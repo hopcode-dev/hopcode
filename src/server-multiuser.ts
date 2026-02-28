@@ -1,5 +1,5 @@
 /**
- * Multi-User Voice Terminal Server
+ * Multi-User Hopcode Server
  * - Linux PAM authentication
  * - Per-user isolated sessions
  * - Admin-managed allowlist
@@ -291,7 +291,7 @@ const loginHtml = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Voice Terminal - Login</title>
+  <title>Hopcode - Login</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100%; background: #1a1a2e; display: flex; align-items: center; justify-content: center; font-family: system-ui; padding: 16px; }
@@ -311,7 +311,7 @@ const loginHtml = `<!DOCTYPE html>
 </head>
 <body>
   <div class="login-box">
-    <h1>Voice Terminal</h1>
+    <h1>Hopcode</h1>
     <div class="error" id="error"></div>
     <form onsubmit="return login()">
       <input type="text" id="username" placeholder="Username" autocomplete="username" required>
@@ -358,7 +358,7 @@ const adminHtml = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Voice Terminal - Admin</title>
+  <title>Hopcode - Admin</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #1a1a2e; font-family: system-ui; color: #e0e0e0; padding: 40px; }
@@ -378,7 +378,7 @@ const adminHtml = `<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <h1>Voice Terminal Admin</h1>
+  <h1>Hopcode Admin</h1>
   <div class="section">
     <h2>Allowed Users</h2>
     <ul class="user-list" id="userList"></ul>
@@ -432,7 +432,7 @@ const indexHtml = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Voice Terminal</title>
+  <title>Hopcode</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -978,7 +978,7 @@ server.on('upgrade', (req, socket, head) => {
 server.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════════════╗
-║      Multi-User Voice Terminal Server          ║
+║          Multi-User Hopcode Server              ║
 ╠════════════════════════════════════════════════╣
 ║  Web UI:    http://localhost:${PORT}              ║
 ║  Admin:     http://localhost:${PORT}/admin        ║

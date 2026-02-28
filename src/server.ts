@@ -1,5 +1,5 @@
 /**
- * Voice Terminal Server
+ * Hopcode Server
  * Uses node-pty + xterm.js (no ttyd dependency)
  * Full control over terminal input - ASR text goes directly to PTY
  */
@@ -74,7 +74,7 @@ const indexHtml = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Voice Terminal</title>
+  <title>Hopcode</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -283,7 +283,7 @@ const indexHtml = `<!DOCTYPE html>
 // Start server
 console.log(`
 ╔════════════════════════════════════════════════╗
-║           Voice Terminal Server                ║
+║               hopcode                           ║
 ╠════════════════════════════════════════════════╣
 ║  Web UI:    http://localhost:${PORT}              ║
 ║  Terminal:  ws://localhost:${PORT}/ws/terminal    ║

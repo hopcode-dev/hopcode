@@ -1,5 +1,5 @@
 /**
- * voxterm — share your terminal over the web, with voice control
+ * hopcode — code from anywhere, with voice input
  * Uses node-pty + xterm.js
  * Full control over terminal input — ASR text goes directly to PTY
  */
@@ -41,7 +41,7 @@ if (!PASSWORD) {
   console.error('  Example: AUTH_PASSWORD=your-secret-password npx tsx src/server-node.ts');
   process.exit(1);
 }
-const AUTH_TOKEN = 'voice_terminal_auth_' + Buffer.from(PASSWORD).toString('base64');
+const AUTH_TOKEN = 'hopcode_auth_' + Buffer.from(PASSWORD).toString('base64');
 
 // --- Rate limiting for login attempts ---
 const LOGIN_MAX_ATTEMPTS = 5;
@@ -143,10 +143,17 @@ interface AsrSession {
   volcanoWs: WebSocket | null;
   ready: boolean;
   pendingChunks: Buffer[];
+  allChunks: Buffer[];       // all audio chunks for retry
+  ended: boolean;            // whether asr_end was received
+  retryCount: number;
+  gotResult: boolean;        // whether we got a final ASR result
 }
 
-function startAsrSession(clientWs: WebSocket): AsrSession {
-  const asrSession: AsrSession = { volcanoWs: null, ready: false, pendingChunks: [] };
+const ASR_MAX_RETRIES = 2;
+
+function connectVolcano(asrSession: AsrSession, clientWs: WebSocket): void {
+  asrSession.ready = false;
+  asrSession.pendingChunks = [];
 
   const headers = {
     'X-Api-App-Key': VOLCANO_APP_ID,
@@ -158,8 +165,21 @@ function startAsrSession(clientWs: WebSocket): AsrSession {
   const volcanoWs = new WebSocket(VOLCANO_ASR_ENDPOINT, { headers });
   asrSession.volcanoWs = volcanoWs;
 
+  function retryIfNeeded() {
+    if (asrSession.gotResult) return; // already got a result, no need to retry
+    if (asrSession.retryCount >= ASR_MAX_RETRIES) {
+      console.error(`ASR: max retries (${ASR_MAX_RETRIES}) reached, giving up`);
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(JSON.stringify({ type: 'error', message: 'ASR failed after retries' }));
+      }
+      return;
+    }
+    asrSession.retryCount++;
+    console.log(`ASR: retrying (attempt ${asrSession.retryCount}/${ASR_MAX_RETRIES}), replaying ${asrSession.allChunks.length} buffered chunks`);
+    setTimeout(() => connectVolcano(asrSession, clientWs), 500);
+  }
+
   volcanoWs.on('open', () => {
-    // Send init payload
     const initPayload = {
       user: { uid: randomUUID() },
       audio: { format: 'pcm', rate: 16000, bits: 16, channel: 1, codec: 'raw' },
@@ -174,14 +194,22 @@ function startAsrSession(clientWs: WebSocket): AsrSession {
     };
     volcanoWs.send(buildFullClientRequest(initPayload));
     asrSession.ready = true;
-    // Flush any audio chunks that arrived while connecting
-    const pending = asrSession.pendingChunks;
+
+    // Replay all buffered audio from previous attempts + current pending
+    const toSend = [...asrSession.allChunks, ...asrSession.pendingChunks];
     asrSession.pendingChunks = [];
-    for (const chunk of pending) {
-      const isLast = chunk.length === 0; // empty buffer = final sentinel
+    for (const chunk of toSend) {
+      if (!asrSession.allChunks.includes(chunk)) {
+        asrSession.allChunks.push(chunk);
+      }
+      const isLast = chunk.length === 0;
       volcanoWs.send(buildAudioRequest(chunk, isLast));
     }
-    console.log(`ASR session connected to Volcano (flushed ${pending.length} buffered chunks)`);
+    // If recording already ended, send final marker
+    if (asrSession.ended && !toSend.some(c => c.length === 0)) {
+      volcanoWs.send(buildAudioRequest(Buffer.alloc(0), true));
+    }
+    console.log(`ASR session connected to Volcano (sent ${toSend.length} chunks, retry=${asrSession.retryCount})`);
   });
 
   volcanoWs.on('message', (data: Buffer) => {
@@ -189,9 +217,7 @@ function startAsrSession(clientWs: WebSocket): AsrSession {
       const parsed = parseAsrResponse(Buffer.from(data));
       if (parsed.msgType === 15) {
         console.error('ASR server error:', parsed.result || parsed.error);
-        if (clientWs.readyState === WebSocket.OPEN) {
-          clientWs.send(JSON.stringify({ type: 'error', message: 'ASR server error' }));
-        }
+        retryIfNeeded();
         return;
       }
       if (parsed.msgType === 9 && parsed.result?.result) {
@@ -200,12 +226,12 @@ function startAsrSession(clientWs: WebSocket): AsrSession {
         if (text && clientWs.readyState === WebSocket.OPEN) {
           const utterances = res.utterances || [];
           const definite = utterances.length > 0 && utterances[0].definite;
-          // Always send the full cumulative text; client decides when to submit
           clientWs.send(JSON.stringify({
             type: definite ? 'asr' : 'asr_partial',
             text,
           }));
           if (definite) {
+            asrSession.gotResult = true;
             console.log(`ASR final: "${text}"`);
           }
         }
@@ -217,18 +243,25 @@ function startAsrSession(clientWs: WebSocket): AsrSession {
 
   volcanoWs.on('error', (err) => {
     console.error('ASR WebSocket error:', err.message);
-    try {
-      if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.send(JSON.stringify({ type: 'error', message: 'ASR connection error' }));
-      }
-    } catch {}
+    retryIfNeeded();
   });
 
   volcanoWs.on('close', () => {
     asrSession.ready = false;
     console.log('ASR session closed');
+    // If closed before getting a result and recording is done, retry
+    if (asrSession.ended && !asrSession.gotResult) {
+      retryIfNeeded();
+    }
   });
+}
 
+function startAsrSession(clientWs: WebSocket): AsrSession {
+  const asrSession: AsrSession = {
+    volcanoWs: null, ready: false, pendingChunks: [],
+    allChunks: [], ended: false, retryCount: 0, gotResult: false,
+  };
+  connectVolcano(asrSession, clientWs);
   return asrSession;
 }
 
@@ -310,7 +343,7 @@ const loginHtml = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Voice Terminal - Login</title>
+  <title>Hopcode - Login</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100%; background: #1a1a2e; display: flex; align-items: center; justify-content: center; font-family: system-ui; padding: 16px; }
@@ -328,7 +361,7 @@ const loginHtml = `<!DOCTYPE html>
 </head>
 <body>
   <div class="login-box">
-    <h1>Voice Terminal</h1>
+    <h1>Hopcode</h1>
     <div class="error" id="error">Incorrect password</div>
     <form onsubmit="return login()">
       <input type="password" id="password" placeholder="Password" autofocus>
@@ -395,7 +428,7 @@ function buildSessionsHtml(): string {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta http-equiv="refresh" content="5">
-  <title>Voice Terminal - Sessions</title>
+  <title>Hopcode - Sessions</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { min-height: 100%; background: #1a1a2e; font-family: system-ui; color: #e0e0e0; }
@@ -457,7 +490,7 @@ function buildSessionsHtml(): string {
 <body>
   <div class="container">
     <div class="header">
-      <h1>Voice Terminal</h1>
+      <h1>Hopcode</h1>
       <a class="new-btn" href="/terminal?action=new">+ New Session</a>
     </div>
     <div class="session-list">${cardsHtml}</div>
@@ -539,16 +572,18 @@ const indexHtml = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Voice Terminal</title>
+  <title>Hopcode</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { height: 100%; background: #1a1a2e; overflow: hidden; touch-action: manipulation; }
-    #container { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
-    #terminal { flex: 1; padding: 8px; min-height: 0; overflow: hidden; }
+    html, body { height: 100%; overflow: hidden; background: #1a1a2e; }
+    #container { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+    #terminal { flex: 1; padding: 8px; overflow: hidden; }
+    .xterm-helper-textarea { opacity: 0 !important; caret-color: transparent !important; color: transparent !important; position: absolute !important; left: -9999px !important; }
     #voice-bar {
       background: #16213e; padding: 10px 16px; display: flex; align-items: center; gap: 10px;
-      border-top: 2px solid #0f3460; color: #fff; font-family: system-ui; flex-shrink: 0;
+      border-top: 2px solid #0f3460; color: #fff; font-family: system-ui;
+      flex-shrink: 0; z-index: 60;
       -webkit-tap-highlight-color: transparent;
     }
     #voice-bar.recording { background: #1a3a2e; border-top-color: #4ade80; }
@@ -570,6 +605,33 @@ const indexHtml = `<!DOCTYPE html>
     #scroll-bottom:active { background: #4ade80; color: #000; }
     #copy-overlay { display: none; position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 100; background: #1a1a2e; color: #e0e0e0; font-family: Menlo, Monaco, "Courier New", monospace; font-size: 12px; padding: 8px; border: none; resize: none; white-space: pre; overflow: auto; -webkit-user-select: text; user-select: text; }
     #copy-overlay.active { display: block; }
+    #floating-keys {
+      position: fixed; right: 12px; top: 50%; transform: translateY(-50%);
+      display: flex; flex-direction: column; gap: 10px; z-index: 50;
+      pointer-events: none;
+    }
+    .float-key {
+      width: 52px; height: 52px; border-radius: 12px; border: 2px solid rgba(51,51,51,0.5);
+      background: rgba(22,33,62,0.4); color: rgba(224,224,224,0.5); font-size: 18px; font-weight: 600;
+      font-family: system-ui; cursor: pointer; display: flex; align-items: center; justify-content: center;
+      -webkit-tap-highlight-color: transparent; backdrop-filter: blur(4px);
+      transition: border-color 0.15s, background 0.15s, color 0.15s;
+      pointer-events: auto;
+    }
+    .float-key:active { background: rgba(74,222,128,0.8); color: #000; border-color: rgba(74,222,128,0.8); }
+    .float-key:hover { border-color: rgba(74,222,128,0.5); color: rgba(224,224,224,0.8); }
+    .float-key-config {
+      display: none; position: fixed; z-index: 200; background: #16213e; border: 2px solid #4ade80;
+      border-radius: 12px; padding: 16px; font-family: system-ui; color: #e0e0e0;
+    }
+    .float-key-config label { display: block; font-size: 13px; margin-bottom: 6px; color: #888; }
+    .float-key-config input { width: 100%; padding: 8px; font-size: 16px; border: 1px solid #444; border-radius: 6px; background: #1a1a2e; color: #e0e0e0; outline: none; margin-bottom: 10px; }
+    .float-key-config input:focus { border-color: #4ade80; }
+    .float-key-config select { width: 100%; padding: 8px; font-size: 14px; border: 1px solid #444; border-radius: 6px; background: #1a1a2e; color: #e0e0e0; outline: none; margin-bottom: 10px; }
+    .float-key-config .cfg-row { display: flex; gap: 8px; }
+    .float-key-config button { flex: 1; padding: 8px; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; font-weight: 600; }
+    .float-key-config .cfg-save { background: #4ade80; color: #000; }
+    .float-key-config .cfg-cancel { background: #333; color: #e0e0e0; }
     body.mobile #voice-bar { padding: 6px 6px; gap: 0; flex-direction: column; }
     body.mobile #bar-row1 { display: flex; align-items: center; gap: 4px; width: 100%; }
     body.mobile #bar-row2 { display: flex; align-items: center; width: 100%; margin-top: 5px; }
@@ -612,6 +674,33 @@ const indexHtml = `<!DOCTYPE html>
       </div>
     </div>
   </div>
+  <div id="floating-keys"></div>
+  <div class="float-key-config" id="fk-config">
+    <label>Label</label>
+    <input type="text" id="fk-cfg-label" maxlength="6" placeholder="e.g. Enter">
+    <label>Action</label>
+    <select id="fk-cfg-action">
+      <option value="char">Type character(s)</option>
+      <option value="enter">Enter</option>
+      <option value="esc">Escape</option>
+      <option value="tab">Tab</option>
+      <option value="up">Arrow Up</option>
+      <option value="down">Arrow Down</option>
+      <option value="pageup">Page Up</option>
+      <option value="pagedown">Page Down</option>
+      <option value="ctrlc">Ctrl+C</option>
+      <option value="ctrld">Ctrl+D</option>
+      <option value="ctrlz">Ctrl+Z</option>
+    </select>
+    <div id="fk-cfg-char-row">
+      <label>Characters to send</label>
+      <input type="text" id="fk-cfg-chars" placeholder="e.g. 1">
+    </div>
+    <div class="cfg-row">
+      <button class="cfg-save" id="fk-cfg-save">Save</button>
+      <button class="cfg-cancel" id="fk-cfg-cancel">Cancel</button>
+    </div>
+  </div>
 
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
@@ -628,27 +717,100 @@ const indexHtml = `<!DOCTYPE html>
       cursorBlink: true,
       fontSize: fontSize,
       fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+      scrollback: 50000,
       theme: { background: '#1a1a2e', foreground: '#e0e0e0', cursor: '#4ade80' }
     });
     const fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
-    term.open(document.getElementById('terminal'));
+    var termEl = document.getElementById('terminal');
+    term.open(termEl);
     fitAddon.fit();
+    var visibleRows = term.rows;
 
-    // Auto-scroll tracking: follow output unless user scrolled up
+    // Hide xterm scrollbar but keep scrolling functional
+    var xtermViewport = document.querySelector('.xterm-viewport');
+    if (xtermViewport) {
+      xtermViewport.style.scrollbarWidth = 'none';
+      xtermViewport.style.webkitOverflowScrolling = 'touch';
+    }
+    var style = document.createElement('style');
+    style.textContent = '.xterm-viewport::-webkit-scrollbar { display: none; }';
+    document.head.appendChild(style);
+
+    // Faster scrolling on mobile only (desktop uses xterm's default scroll)
+    if (isMobile) {
+      document.querySelector('.xterm-screen').addEventListener('wheel', function(e) {
+        e.preventDefault();
+        var lines = Math.round(e.deltaY / Math.abs(e.deltaY || 1)) * 5;
+        term.scrollLines(lines);
+      }, { passive: false });
+    }
+
+    // Touch scroll with momentum for mobile
+    var touchLastY = 0;
+    var touchVelocity = 0;
+    var momentumId = 0;
+    var xtermScreen = document.querySelector('.xterm-screen');
+    if (isMobile && xtermScreen) {
+      xtermScreen.addEventListener('touchstart', function(e) {
+        cancelAnimationFrame(momentumId);
+        touchLastY = e.touches[0].clientY;
+        touchVelocity = 0;
+      }, { passive: true });
+      xtermScreen.addEventListener('touchmove', function(e) {
+        e.preventDefault();
+        var y = e.touches[0].clientY;
+        var delta = touchLastY - y;
+        touchVelocity = delta;
+        var cellHeight = xtermScreen.offsetHeight / term.rows;
+        var lines = Math.round(delta / cellHeight);
+        if (lines !== 0) {
+          term.scrollLines(lines);
+          touchLastY = y;
+        }
+      }, { passive: false });
+      xtermScreen.addEventListener('touchend', function() {
+        // Momentum scrolling
+        var v = touchVelocity;
+        function momentumStep() {
+          if (Math.abs(v) < 1) return;
+          var cellHeight = xtermScreen.offsetHeight / term.rows;
+          var lines = Math.round(v / cellHeight);
+          if (lines !== 0) term.scrollLines(lines);
+          v *= 0.92;
+          momentumId = requestAnimationFrame(momentumStep);
+        }
+        momentumStep();
+      }, { passive: true });
+    }
+
+    function getPtyRows() { return visibleRows; }
+
+    // Scroll to cursor (bottom of terminal)
+    function scrollToCursor() {
+      term.scrollToBottom();
+    }
+
+    // Auto-scroll on new output
     var autoScroll = true;
     term.onScroll(function() {
       var buf = term.buffer.active;
-      autoScroll = buf.viewportY >= buf.baseY;
+      var viewportAtBottom = buf.viewportY >= buf.baseY;
+      autoScroll = viewportAtBottom;
     });
+    function doAutoScroll() {
+      if (!autoScroll) return;
+      term.scrollToBottom();
+    }
 
     function changeFontSize(delta) {
       fontSize = Math.max(10, Math.min(40, fontSize + delta));
       term.options.fontSize = fontSize;
       document.getElementById('font-size').textContent = fontSize + 'px';
       fitAddon.fit();
+      visibleRows = term.rows;
       if (typeof termWs !== 'undefined' && termWs.readyState === 1) {
-        termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+        termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: getPtyRows() }));
       }
     }
 
@@ -667,7 +829,7 @@ const indexHtml = `<!DOCTYPE html>
       termWs.onmessage = (e) => {
         const msg = JSON.parse(e.data);
         if (msg.type === 'session_info') {
-          document.title = msg.name + ' - Voice Terminal';
+          document.title = msg.name + ' - Hopcode';
         } else if (msg.type === 'scrollback') {
           // Scrollback replay: write with terminal hidden to avoid visual flicker
           const termEl = document.getElementById('terminal');
@@ -675,18 +837,16 @@ const indexHtml = `<!DOCTYPE html>
           if (isReconnect) term.reset();
           term.write(msg.data, () => {
             termEl.style.visibility = '';
-            term.scrollToBottom();
+            scrollToCursor();
           });
         } else if (msg.type === 'output') {
-          term.write(msg.data, function() {
-            if (autoScroll) term.scrollToBottom();
-          });
+          term.write(msg.data, doAutoScroll);
         }
       };
       termWs.onopen = () => {
         document.getElementById('status').textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
         document.getElementById('status').style.background = '';
-        termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+        termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: getPtyRows() }));
       };
       termWs.onerror = () => {
         document.getElementById('status').textContent = 'WS error';
@@ -707,16 +867,106 @@ const indexHtml = `<!DOCTYPE html>
       }
     }
 
-    term.onData((data) => { sendInput(data); });
+    // Mobile autocomplete deduplication
+    // Problem: mobile keyboards send individual chars ("h","o","p") then the full
+    // autocomplete word ("hopefully"). We track what was sent and deduplicate.
+    // Uses common-prefix matching to handle both extensions ("hop"→"hopefully")
+    // and autocorrect ("hopco"→"hopscotch").
+    var isComposing = false;
+    var compositionJustEnded = false;
+    var typingBuffer = '';
+    var typingBufferTimer = null;
+    var DEL = String.fromCharCode(127);
+
+    function resetTypingBuffer() {
+      typingBuffer = '';
+      if (typingBufferTimer) { clearTimeout(typingBufferTimer); typingBufferTimer = null; }
+    }
+    function appendToTypingBuffer(ch) {
+      typingBuffer += ch;
+      if (typingBufferTimer) clearTimeout(typingBufferTimer);
+      typingBufferTimer = setTimeout(resetTypingBuffer, 5000);
+    }
+    function isPrintableChar(d) {
+      return d.length === 1 && d.charCodeAt(0) >= 32 && d.charCodeAt(0) !== 127;
+    }
+    function commonPrefixLen(a, b) {
+      var len = Math.min(a.length, b.length);
+      for (var i = 0; i < len; i++) { if (a[i] !== b[i]) return i; }
+      return len;
+    }
+
+    var xtermTextarea = document.querySelector('.xterm-helper-textarea');
+    if (xtermTextarea) {
+      xtermTextarea.setAttribute('autocomplete', 'off');
+      xtermTextarea.setAttribute('autocorrect', 'off');
+      xtermTextarea.setAttribute('autocapitalize', 'off');
+      xtermTextarea.setAttribute('spellcheck', 'false');
+      xtermTextarea.addEventListener('compositionstart', function() {
+        isComposing = true;
+        resetTypingBuffer();
+      });
+      xtermTextarea.addEventListener('compositionend', function(e) {
+        isComposing = false;
+        compositionJustEnded = true;
+        if (e.data) sendInput(e.data);
+        setTimeout(function() { compositionJustEnded = false; }, 200);
+      });
+    }
+
+    term.onData(function(data) {
+      if (compositionJustEnded) return;
+      if (isComposing) return;
+
+      // Single printable char — normal keystroke, track in buffer and send
+      if (isPrintableChar(data)) {
+        appendToTypingBuffer(data);
+        sendInput(data);
+        return;
+      }
+
+      // Multi-char data: autocomplete, paste, or escape sequence
+      if (data.length > 1 && typingBuffer) {
+        var cpLen = commonPrefixLen(typingBuffer, data);
+        if (cpLen >= 2) {
+          // Autocomplete detected — buffer and data share a common prefix
+          // Erase extra buffer chars beyond the common prefix (handles autocorrect)
+          var extraBufferChars = typingBuffer.length - cpLen;
+          var bs = '';
+          for (var i = 0; i < extraBufferChars; i++) bs += DEL;
+          // Send only the new portion of the autocomplete word
+          var newPart = data.slice(cpLen);
+          resetTypingBuffer();
+          if (bs || newPart) sendInput(bs + newPart);
+          return;
+        }
+      }
+
+      // Paste, escape sequences, non-printable single chars, or no buffer match
+      resetTypingBuffer();
+      if (data) sendInput(data);
+    });
+
+    // Fix mobile viewport height (100vh includes browser chrome)
+    function setVh() {
+      var h = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+      document.getElementById('container').style.height = h + 'px';
+    }
+    if (isMobile) {
+      setVh();
+      if (window.visualViewport) window.visualViewport.addEventListener('resize', setVh);
+    }
 
     // Debounced resize to avoid PTY redraw storms (e.g. mobile keyboard toggle)
     var resizeTimer = null;
     window.addEventListener('resize', () => {
+      if (isMobile) setVh();
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         fitAddon.fit();
+        visibleRows = term.rows;
         if (termWs && termWs.readyState === 1) {
-          termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+          termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: getPtyRows() }));
         }
       }, 300);
     });
@@ -726,9 +976,11 @@ const indexHtml = `<!DOCTYPE html>
     document.querySelectorAll('.key-btn').forEach(function(btn) {
       btn.addEventListener('click', function(e) {
         e.preventDefault();
+        resetTypingBuffer();
         var seq = keyMap[btn.getAttribute('data-key')];
         if (seq) sendInput(seq);
-        term.focus();
+        if (isMobile && xtermTextarea) xtermTextarea.blur();
+        else term.focus();
       });
     });
 
@@ -737,8 +989,9 @@ const indexHtml = `<!DOCTYPE html>
     document.getElementById('scroll-bottom').addEventListener('click', function(e) {
       e.preventDefault();
       autoScroll = true;
-      term.scrollToBottom();
-      term.focus();
+      scrollToCursor();
+      if (isMobile && xtermTextarea) xtermTextarea.blur();
+      else term.focus();
     });
 
     // Select/Copy mode: show terminal text in a selectable overlay
@@ -751,7 +1004,7 @@ const indexHtml = `<!DOCTYPE html>
         copyOverlay.classList.remove('active');
         copyBtn.textContent = 'Sel';
         copyBtn.style.background = '';
-        term.focus();
+        if (!isMobile) term.focus();
       } else {
         // Extract visible terminal text from buffer
         var buf = term.buffer.active;
@@ -969,7 +1222,107 @@ const indexHtml = `<!DOCTYPE html>
       status.textContent = 'Hold here to speak';
     }
 
-    term.focus();
+    // --- Floating quick-keys (customizable) ---
+    var fkActionMap = {
+      'char': function(chars) { return chars || ''; },
+      'enter': function() { return String.fromCharCode(13); },
+      'esc': function() { return String.fromCharCode(27); },
+      'tab': function() { return String.fromCharCode(9); },
+      'up': function() { return String.fromCharCode(27) + '[A'; },
+      'down': function() { return String.fromCharCode(27) + '[B'; },
+      'pageup': function() { return String.fromCharCode(27) + '[5~'; },
+      'pagedown': function() { return String.fromCharCode(27) + '[6~'; },
+      'ctrlc': function() { return String.fromCharCode(3); },
+      'ctrld': function() { return String.fromCharCode(4); },
+      'ctrlz': function() { return String.fromCharCode(26); }
+    };
+    var fkDefaults = [
+      { label: '1', action: 'char', chars: '1' },
+      { label: '2', action: 'char', chars: '2' },
+      { label: '3', action: 'char', chars: '3' },
+      { label: 'Ret', action: 'enter', chars: '' }
+    ];
+    var fkStorageKey = 'hopcode_float_keys';
+    function fkLoad() {
+      try {
+        var saved = localStorage.getItem(fkStorageKey);
+        if (saved) return JSON.parse(saved);
+      } catch {}
+      return null;
+    }
+    function fkSave(keys) {
+      try { localStorage.setItem(fkStorageKey, JSON.stringify(keys)); } catch {}
+    }
+    var fkKeys = fkLoad() || fkDefaults.slice();
+    var fkContainer = document.getElementById('floating-keys');
+    var fkConfigEl = document.getElementById('fk-config');
+    var fkConfigLabel = document.getElementById('fk-cfg-label');
+    var fkConfigAction = document.getElementById('fk-cfg-action');
+    var fkConfigChars = document.getElementById('fk-cfg-chars');
+    var fkConfigCharRow = document.getElementById('fk-cfg-char-row');
+    var fkConfigSave = document.getElementById('fk-cfg-save');
+    var fkConfigCancel = document.getElementById('fk-cfg-cancel');
+    var fkEditIdx = -1;
+    var fkLongTimer = null;
+
+    function fkRender() {
+      fkContainer.innerHTML = '';
+      fkKeys.forEach(function(k, i) {
+        var btn = document.createElement('button');
+        btn.className = 'float-key';
+        btn.textContent = k.label;
+        btn.addEventListener('mousedown', function() { fkLongTimer = setTimeout(function() { fkLongTimer = 'fired'; fkOpenConfig(i); }, 600); });
+        btn.addEventListener('mouseup', function(e) { if (fkLongTimer === 'fired') { fkLongTimer = null; return; } clearTimeout(fkLongTimer); fkLongTimer = null; fkSend(k); });
+        btn.addEventListener('mouseleave', function() { if (fkLongTimer !== 'fired') clearTimeout(fkLongTimer); fkLongTimer = null; });
+        btn.addEventListener('touchstart', function(e) { e.preventDefault(); fkLongTimer = setTimeout(function() { fkLongTimer = 'fired'; fkOpenConfig(i); }, 600); }, { passive: false });
+        btn.addEventListener('touchend', function(e) { e.preventDefault(); if (fkLongTimer === 'fired') { fkLongTimer = null; return; } clearTimeout(fkLongTimer); fkLongTimer = null; fkSend(k); }, { passive: false });
+        btn.addEventListener('touchcancel', function() { if (fkLongTimer !== 'fired') clearTimeout(fkLongTimer); fkLongTimer = null; });
+        fkContainer.appendChild(btn);
+      });
+    }
+
+    function fkSend(k) {
+      resetTypingBuffer();
+      var fn = fkActionMap[k.action];
+      if (fn) sendInput(fn(k.chars));
+      if (isMobile && xtermTextarea) xtermTextarea.blur();
+      else term.focus();
+    }
+
+    function fkOpenConfig(idx) {
+      fkEditIdx = idx;
+      var k = fkKeys[idx];
+      fkConfigLabel.value = k.label;
+      fkConfigAction.value = k.action;
+      fkConfigChars.value = k.chars || '';
+      fkConfigCharRow.style.display = k.action === 'char' ? '' : 'none';
+      fkConfigEl.style.display = 'block';
+      fkConfigEl.style.right = '76px';
+      fkConfigEl.style.top = '50%';
+      fkConfigEl.style.transform = 'translateY(-50%)';
+      fkConfigLabel.focus();
+    }
+
+    fkConfigAction.addEventListener('change', function() {
+      fkConfigCharRow.style.display = fkConfigAction.value === 'char' ? '' : 'none';
+    });
+    fkConfigSave.addEventListener('click', function() {
+      if (fkEditIdx < 0) return;
+      var label = fkConfigLabel.value.trim() || fkKeys[fkEditIdx].label;
+      fkKeys[fkEditIdx] = { label: label, action: fkConfigAction.value, chars: fkConfigChars.value };
+      fkSave(fkKeys);
+      fkConfigEl.style.display = 'none';
+      fkRender();
+      if (!isMobile) term.focus();
+    });
+    fkConfigCancel.addEventListener('click', function() {
+      fkConfigEl.style.display = 'none';
+      if (!isMobile) term.focus();
+    });
+
+    fkRender();
+
+    if (!isMobile) term.focus();
     connectVoice();
   </script>
 </body>
@@ -1206,6 +1559,7 @@ voiceWss.on('connection', (ws) => {
         } else if (msg.type === 'asr_end') {
           // Send empty final chunk to signal end of audio
           if (asrSession) {
+            asrSession.ended = true;
             if (asrSession.ready && asrSession.volcanoWs?.readyState === WebSocket.OPEN) {
               asrSession.volcanoWs.send(buildAudioRequest(Buffer.alloc(0), true));
               console.log(`ASR streaming ended for ${id}`);
@@ -1219,11 +1573,13 @@ voiceWss.on('connection', (ws) => {
       } else if (message instanceof Buffer) {
         // Binary = raw PCM audio chunk, forward to Volcano
         if (asrSession) {
+          const chunk = Buffer.from(message);
+          asrSession.allChunks.push(chunk);
           if (asrSession.ready && asrSession.volcanoWs?.readyState === WebSocket.OPEN) {
-            asrSession.volcanoWs.send(buildAudioRequest(message, false));
+            asrSession.volcanoWs.send(buildAudioRequest(chunk, false));
           } else {
             // Buffer chunks while Volcano WebSocket is still connecting
-            asrSession.pendingChunks.push(Buffer.from(message));
+            asrSession.pendingChunks.push(chunk);
           }
         }
       }
@@ -1274,7 +1630,7 @@ server.on('upgrade', (request, socket, head) => {
 server.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════════════╗
-║               voxterm                          ║
+║               hopcode                           ║
 ╠════════════════════════════════════════════════╣
 ║  Web UI:    http://localhost:${PORT}              ║
 ║  Terminal:  ws://localhost:${PORT}/ws/terminal    ║

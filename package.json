@@ -1,11 +1,11 @@
 {
-  "name": "voxterm",
+  "name": "hopcode",
   "version": "1.0.0",
-  "description": "Share your terminal over the web, with voice control",
+  "description": "Code from anywhere — remote dev environment access with voice input",
   "module": "src/server.ts",
   "type": "module",
   "bin": {
-    "voxterm": "src/server-node.ts"
+    "hopcode": "src/server-node.ts"
   },
   "scripts": {
     "start": "npx tsx src/server-node.ts",
@@ -22,13 +22,15 @@
     "pty",
     "cloudflare-tunnel",
     "remote-access",
-    "voxterm"
+    "remote-coding",
+    "mobile-terminal",
+    "hopcode"
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/voxterm/voxterm"
+    "url": "https://github.com/hopcode-dev/hopcode"
   },
-  "homepage": "https://github.com/voxterm/voxterm",
+  "homepage": "https://github.com/hopcode-dev/hopcode",
   "author": "Jack Huang",
   "license": "MIT",
   "devDependencies": {

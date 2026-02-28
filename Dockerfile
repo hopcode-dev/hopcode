@@ -24,6 +24,6 @@ COPY src/ src/
 EXPOSE 3000
 
 ENV PORT=3000
-ENV AUTH_PASSWORD=voxterm
+ENV AUTH_PASSWORD=hopcode
 
 CMD ["npx", "tsx", "src/server-node.ts"]
