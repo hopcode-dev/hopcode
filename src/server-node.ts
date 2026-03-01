@@ -785,7 +785,8 @@ const indexHtml = `<!DOCTYPE html>
     var savedFontSize = parseInt(localStorage.getItem('hopcode-font-size'));
     let fontSize = savedFontSize > 0 ? savedFontSize : (isMobile ? 14 : 21);
     const term = new Terminal({
-      cursorBlink: true,
+      cursorBlink: false,
+      cursorStyle: 'bar',
       fontSize: fontSize,
       fontFamily: 'Menlo, Monaco, "Courier New", monospace',
       scrollback: 50000,
@@ -1072,16 +1073,21 @@ const indexHtml = `<!DOCTYPE html>
           if (statusEl) { statusEl.textContent = 'Uploading image...'; statusEl.style.background = '#60a5fa'; }
           fetch('/terminal/upload', {
             method: 'POST',
+            credentials: 'include',
             headers: { 'Content-Type': blob.type },
             body: blob
-          }).then(function(r) { return r.json(); }).then(function(data) {
+          }).then(function(r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+          }).then(function(data) {
+            if (data.error) throw new Error(data.error);
             if (data.path) sendInput(data.path + ' ');
             if (statusEl) { statusEl.textContent = 'Image uploaded'; statusEl.style.background = '#4ade80'; }
             setTimeout(function() { if (statusEl) { statusEl.textContent = prevStatus; statusEl.style.background = ''; } }, 2000);
           }).catch(function(err) {
             console.error('[paste] upload failed:', err);
-            if (statusEl) { statusEl.textContent = 'Upload failed'; statusEl.style.background = '#f87171'; }
-            setTimeout(function() { if (statusEl) { statusEl.textContent = prevStatus; statusEl.style.background = ''; } }, 3000);
+            if (statusEl) { statusEl.textContent = 'Upload failed: ' + err.message; statusEl.style.background = '#f87171'; }
+            setTimeout(function() { if (statusEl) { statusEl.textContent = prevStatus; statusEl.style.background = ''; } }, 5000);
           });
           return;
         }
