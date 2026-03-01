@@ -96,6 +96,50 @@ interface Session {
 const sessions = new Map<string, Session>();
 let sessionCounter = 0;
 
+// --- File browser helpers ---
+async function getSessionCwd(session: Session): Promise<string> {
+  try {
+    return await fs.promises.readlink('/proc/' + session.pty.pid + '/cwd');
+  } catch {
+    return process.env.HOME || '/';
+  }
+}
+
+function resolveSafePath(requestedPath: string): string {
+  return path.resolve('/', requestedPath);
+}
+
+const MIME_TYPES: Record<string, string> = {
+  '.html': 'text/html', '.htm': 'text/html', '.css': 'text/css', '.js': 'application/javascript',
+  '.json': 'application/json', '.xml': 'application/xml', '.txt': 'text/plain',
+  '.md': 'text/markdown', '.csv': 'text/csv', '.log': 'text/plain',
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+  '.svg': 'image/svg+xml', '.webp': 'image/webp', '.ico': 'image/x-icon', '.bmp': 'image/bmp',
+  '.pdf': 'application/pdf', '.zip': 'application/zip', '.gz': 'application/gzip',
+  '.tar': 'application/x-tar', '.mp3': 'audio/mpeg', '.mp4': 'video/mp4',
+  '.sh': 'text/x-shellscript', '.py': 'text/x-python', '.ts': 'text/typescript',
+  '.tsx': 'text/typescript', '.jsx': 'application/javascript', '.rs': 'text/x-rust',
+  '.go': 'text/x-go', '.java': 'text/x-java', '.c': 'text/x-c', '.cpp': 'text/x-c++',
+  '.h': 'text/x-c', '.rb': 'text/x-ruby', '.yml': 'text/yaml', '.yaml': 'text/yaml',
+  '.toml': 'text/plain', '.ini': 'text/plain', '.cfg': 'text/plain', '.conf': 'text/plain',
+  '.env': 'text/plain', '.sql': 'text/x-sql', '.graphql': 'text/plain',
+};
+
+function getMimeType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  return MIME_TYPES[ext] || 'application/octet-stream';
+}
+
+function isPreviewableImage(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  return ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico', '.bmp'].includes(ext);
+}
+
+function isTextFile(filePath: string): boolean {
+  const mime = getMimeType(filePath);
+  return mime.startsWith('text/') || mime === 'application/json' || mime === 'application/javascript' || mime === 'application/xml';
+}
+
 // Sessions HTML cache - invalidated when sessions change
 let sessionsHtmlCache: string | null = null;
 function invalidateSessionsCache() { sessionsHtmlCache = null; }
@@ -608,7 +652,7 @@ const indexHtml = `<!DOCTYPE html>
     #floating-keys {
       position: fixed; right: 12px; top: 50%; transform: translateY(-50%);
       display: flex; flex-direction: column; gap: 10px; z-index: 50;
-      pointer-events: none;
+      pointer-events: none; transition: top 0.15s ease;
     }
     .float-key {
       width: 52px; height: 52px; border-radius: 12px; border: 2px solid rgba(51,51,51,0.5);
@@ -634,14 +678,82 @@ const indexHtml = `<!DOCTYPE html>
     .float-key-config .cfg-cancel { background: #333; color: #e0e0e0; }
     body.mobile #voice-bar { padding: 6px 6px; gap: 0; flex-direction: column; }
     body.mobile #bar-row1 { display: flex; align-items: center; gap: 4px; width: 100%; }
-    body.mobile #bar-row2 { display: flex; align-items: center; width: 100%; margin-top: 5px; }
+    body.mobile #bar-row2 { display: flex; align-items: center; gap: 4px; width: 100%; margin-top: 5px; }
     body.mobile #special-keys { display: flex; }
-    body.mobile #status { font-size: 13px; padding: 8px; flex: 1; text-align: center; border-radius: 8px; }
+    body.mobile #status { font-size: 13px; padding: 8px; flex: 3; text-align: center; border-radius: 8px; }
     body.mobile #text { display: none; }
     body.mobile #font-controls { display: none; }
     body.mobile .key-btn { min-width: 0; flex: 1; padding: 0 4px; height: 34px; font-size: 12px; }
-    body.mobile #back-btn { padding: 4px 5px; font-size: 10px; }
-    body.mobile #scroll-bottom { min-width: 34px; height: 34px; font-size: 14px; }
+    body.mobile #back-btn { padding: 4px 5px; font-size: 10px; flex-shrink: 0; }
+    body.mobile #scroll-bottom { min-width: 0; height: 34px; font-size: 14px; flex: 1; }
+    body.mobile #voice-bar.collapsed { display: none; }
+    /* --- File Browser --- */
+    #file-browser {
+      position: fixed; top: 0; right: -100%; width: 100%; max-width: 480px; height: 100%;
+      background: #1a1a2e; z-index: 300; display: flex; flex-direction: column;
+      transition: right 0.25s ease; border-left: 2px solid #0f3460;
+      font-family: system-ui; color: #e0e0e0;
+    }
+    #file-browser.open { right: 0; }
+    #fb-header {
+      display: flex; align-items: center; gap: 8px; padding: 12px;
+      background: rgba(22,33,62,0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(15,52,96,0.5); flex-shrink: 0;
+    }
+    #fb-close { background: none; border: none; color: #e0e0e0; font-size: 24px; cursor: pointer; padding: 0 8px; line-height: 1; }
+    #fb-title { flex: 1; font-size: 16px; font-weight: 600; text-align: center; }
+    #fb-cwd-btn { font-size: 11px; padding: 4px 8px; height: 28px; min-width: 0; }
+    #fb-breadcrumb {
+      display: flex; align-items: center; gap: 2px; padding: 8px 12px; font-size: 12px;
+      overflow-x: auto; white-space: nowrap; flex-shrink: 0; background: #111;
+      scrollbar-width: none;
+    }
+    #fb-breadcrumb::-webkit-scrollbar { display: none; }
+    .fb-crumb { color: #4ade80; cursor: pointer; padding: 2px 4px; border-radius: 3px; flex-shrink: 0; }
+    .fb-crumb:hover { background: #333; }
+    .fb-sep { color: #555; flex-shrink: 0; font-size: 14px; }
+    #fb-error { display: none; padding: 12px; color: #f87171; font-size: 13px; background: #2a1a1a; }
+    #fb-list { flex: 1; overflow-y: auto; overflow-x: hidden; }
+    .fb-item {
+      display: flex; align-items: center; gap: 10px; padding: 10px 12px; cursor: pointer;
+      border-radius: 8px; margin: 2px 8px; transition: background 0.15s;
+    }
+    .fb-item:hover, .fb-item:active { background: rgba(255,255,255,0.06); }
+    .fb-icon { font-size: 18px; flex-shrink: 0; width: 24px; text-align: center; line-height: 0; }
+    .fb-info { flex: 1; min-width: 0; }
+    .fb-name { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .fb-meta { font-size: 11px; color: #666; margin-top: 2px; }
+    .fb-actions { display: flex; gap: 4px; flex-shrink: 0; }
+    .fb-dl { background: #333; border: none; color: #4ade80; font-size: 11px; padding: 4px 8px; border-radius: 4px; cursor: pointer; min-width: 32px; min-height: 36px; }
+    .fb-dl:active { background: #4ade80; color: #000; }
+    #fb-text-preview { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+    #fb-text-header {
+      display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+      background: #16213e; border-bottom: 1px solid #0f3460; flex-shrink: 0;
+    }
+    #fb-text-back { font-size: 11px; padding: 4px 8px; height: 28px; min-width: 0; }
+    #fb-text-name { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #fb-text-dl { font-size: 11px; padding: 4px 8px; height: 28px; min-width: 0; }
+    #fb-text-content {
+      flex: 1; overflow: auto; padding: 12px; margin: 0; font-family: Menlo, Monaco, "Courier New", monospace;
+      font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; color: #ccc;
+    }
+    #fb-preview {
+      display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 400;
+      background: rgba(0,0,0,0.95); flex-direction: column; align-items: center; justify-content: center;
+    }
+    #fb-preview.open { display: flex; }
+    #fb-preview-close {
+      position: absolute; top: 12px; right: 16px; background: none; border: none;
+      color: #fff; font-size: 32px; cursor: pointer; z-index: 1; padding: 4px 12px;
+    }
+    #fb-preview-img { max-width: 95%; max-height: 75vh; object-fit: contain; }
+    #fb-preview-info {
+      display: flex; align-items: center; gap: 12px; margin-top: 16px; color: #ccc; font-size: 14px;
+    }
+    #fb-preview-dl { font-size: 12px; padding: 6px 12px; }
+    body.mobile #file-browser { max-width: 100%; }
+    #files-btn { font-size: 11px; padding: 0 6px; }
   </style>
 </head>
 <body>
@@ -650,18 +762,14 @@ const indexHtml = `<!DOCTYPE html>
     <textarea id="copy-overlay" readonly></textarea>
     <div id="voice-bar">
       <div id="bar-row1">
-        <a href="/terminal" id="back-btn">Sess</a>
         <div id="special-keys">
+          <button class="key-btn" id="bar-hide-btn" style="font-size:16px">&#x25B8;</button>
           <button class="key-btn" data-key="esc">Esc</button>
           <button class="key-btn" data-key="tab">Tab</button>
           <button class="key-btn" data-key="up">&#x25B2;</button>
           <button class="key-btn" data-key="down">&#x25BC;</button>
-          <button class="key-btn" data-key="1">1</button>
-          <button class="key-btn" data-key="2">2</button>
-          <button class="key-btn" data-key="3">3</button>
-          <button class="key-btn" id="copy-btn">Sel</button>
+          <button id="scroll-bottom" title="Scroll to bottom">&#x21E9;</button>
         </div>
-        <button id="scroll-bottom" title="Scroll to bottom">&#x21E9;</button>
         <div id="font-controls">
           <button class="font-btn" onclick="changeFontSize(-2)">&#x2212;</button>
           <span id="font-size">21px</span>
@@ -669,6 +777,8 @@ const indexHtml = `<!DOCTYPE html>
         </div>
       </div>
       <div id="bar-row2">
+        <a href="/terminal" id="back-btn">Sess</a>
+        <button id="files-btn" class="key-btn" title="Files">Files</button>
         <div id="status">Hold Option to speak</div>
         <div id="text"></div>
       </div>
@@ -691,6 +801,7 @@ const indexHtml = `<!DOCTYPE html>
       <option value="ctrlc">Ctrl+C</option>
       <option value="ctrld">Ctrl+D</option>
       <option value="ctrlz">Ctrl+Z</option>
+      <option value="togglebar">Toggle Bar</option>
     </select>
     <div id="fk-cfg-char-row">
       <label>Characters to send</label>
@@ -699,6 +810,33 @@ const indexHtml = `<!DOCTYPE html>
     <div class="cfg-row">
       <button class="cfg-save" id="fk-cfg-save">Save</button>
       <button class="cfg-cancel" id="fk-cfg-cancel">Cancel</button>
+    </div>
+  </div>
+
+  <div id="file-browser">
+    <div id="fb-header">
+      <button id="fb-close">&times;</button>
+      <span id="fb-title">Files</span>
+      <button id="fb-cwd-btn" class="key-btn" title="Go to PTY working directory">CWD</button>
+    </div>
+    <div id="fb-breadcrumb"></div>
+    <div id="fb-error"></div>
+    <div id="fb-list"></div>
+    <div id="fb-text-preview">
+      <div id="fb-text-header">
+        <button id="fb-text-back" class="key-btn">&larr; Back</button>
+        <span id="fb-text-name"></span>
+        <button id="fb-text-dl" class="key-btn">&#x2193;</button>
+      </div>
+      <pre id="fb-text-content"></pre>
+    </div>
+  </div>
+  <div id="fb-preview">
+    <button id="fb-preview-close">&times;</button>
+    <img id="fb-preview-img" />
+    <div id="fb-preview-info">
+      <span id="fb-preview-name"></span>
+      <button id="fb-preview-dl" class="key-btn">&#x2193;</button>
     </div>
   </div>
 
@@ -767,6 +905,7 @@ const indexHtml = `<!DOCTYPE html>
         if (lines !== 0) {
           term.scrollLines(lines);
           touchLastY = y;
+          if (lines < 0 && xtermTextarea) xtermTextarea.blur();
         }
       }, { passive: false });
       xtermScreen.addEventListener('touchend', function() {
@@ -867,23 +1006,31 @@ const indexHtml = `<!DOCTYPE html>
       }
     }
 
-    // Mobile autocomplete deduplication
-    // Problem: mobile keyboards send individual chars ("h","o","p") then the full
-    // autocomplete word ("hopefully"). We track what was sent and deduplicate.
-    // Uses common-prefix matching to handle both extensions ("hop"→"hopefully")
-    // and autocorrect ("hopco"→"hopscotch").
+    // Mobile autocomplete fix — three layers:
+    // 1. beforeinput: intercept insertReplacementText (autocomplete), compute
+    //    diff ourselves, send only the new chars, block onData for 100ms
+    //    so xterm's accumulated textarea junk doesn't reach the terminal.
+    // 2. onData prefix check: fallback for keyboards that don't fire
+    //    insertReplacementText. Tracks current word in typingBuffer.
+    // 3. Clear textarea on control chars (Enter, Ctrl+C) to prevent
+    //    cross-command accumulation in the keyboard's backspace buffer.
     var isComposing = false;
     var compositionJustEnded = false;
     var typingBuffer = '';
     var typingBufferTimer = null;
     var DEL = String.fromCharCode(127);
+    var blockOnDataUntil = 0;
 
     function resetTypingBuffer() {
       typingBuffer = '';
       if (typingBufferTimer) { clearTimeout(typingBufferTimer); typingBufferTimer = null; }
     }
     function appendToTypingBuffer(ch) {
-      typingBuffer += ch;
+      if (ch === ' ') {
+        typingBuffer = '';
+      } else {
+        typingBuffer += ch;
+      }
       if (typingBufferTimer) clearTimeout(typingBufferTimer);
       typingBufferTimer = setTimeout(resetTypingBuffer, 5000);
     }
@@ -902,6 +1049,30 @@ const indexHtml = `<!DOCTYPE html>
       xtermTextarea.setAttribute('autocorrect', 'off');
       xtermTextarea.setAttribute('autocapitalize', 'off');
       xtermTextarea.setAttribute('spellcheck', 'false');
+
+      // Intercept autocomplete BEFORE xterm processes it.
+      // We compute the diff (new chars only) and send it ourselves,
+      // then block onData so xterm's version (which may include accumulated
+      // textarea content) doesn't reach the terminal.
+      xtermTextarea.addEventListener('beforeinput', function(e) {
+        if (e.inputType === 'insertReplacementText' && typingBuffer) {
+          var replacement = e.data;
+          if (!replacement && e.dataTransfer) {
+            replacement = e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('text');
+          }
+          if (replacement) {
+            var cpLen = commonPrefixLen(typingBuffer, replacement);
+            var extraBufferChars = typingBuffer.length - cpLen;
+            var bs = '';
+            for (var i = 0; i < extraBufferChars; i++) bs += DEL;
+            var newPart = replacement.slice(cpLen);
+            resetTypingBuffer();
+            if (bs || newPart) sendInput(bs + newPart);
+            blockOnDataUntil = Date.now() + 150;
+          }
+        }
+      });
+
       xtermTextarea.addEventListener('compositionstart', function() {
         isComposing = true;
         resetTypingBuffer();
@@ -915,6 +1086,8 @@ const indexHtml = `<!DOCTYPE html>
     }
 
     term.onData(function(data) {
+      // Block when beforeinput already handled autocomplete
+      if (Date.now() < blockOnDataUntil) return;
       if (compositionJustEnded) return;
       if (isComposing) return;
 
@@ -925,16 +1098,13 @@ const indexHtml = `<!DOCTYPE html>
         return;
       }
 
-      // Multi-char data: autocomplete, paste, or escape sequence
+      // Multi-char data with active typing buffer — fallback autocomplete check
       if (data.length > 1 && typingBuffer) {
         var cpLen = commonPrefixLen(typingBuffer, data);
         if (cpLen >= 2) {
-          // Autocomplete detected — buffer and data share a common prefix
-          // Erase extra buffer chars beyond the common prefix (handles autocorrect)
           var extraBufferChars = typingBuffer.length - cpLen;
           var bs = '';
           for (var i = 0; i < extraBufferChars; i++) bs += DEL;
-          // Send only the new portion of the autocomplete word
           var newPart = data.slice(cpLen);
           resetTypingBuffer();
           if (bs || newPart) sendInput(bs + newPart);
@@ -942,9 +1112,14 @@ const indexHtml = `<!DOCTYPE html>
         }
       }
 
-      // Paste, escape sequences, non-printable single chars, or no buffer match
+      // Non-printable, paste, escape sequences, or no buffer match
       resetTypingBuffer();
       if (data) sendInput(data);
+      // Clear textarea on control chars (Enter, Ctrl+C, Tab, etc.) to prevent
+      // cross-command accumulation. Skip DEL/backspace so within-word editing works.
+      if (xtermTextarea && !isComposing && data.length === 1 && data.charCodeAt(0) < 32) {
+        setTimeout(function() { xtermTextarea.value = ''; }, 0);
+      }
     });
 
     // Fix mobile viewport height (100vh includes browser chrome)
@@ -972,7 +1147,7 @@ const indexHtml = `<!DOCTYPE html>
     });
 
     // Special key buttons for mobile
-    var keyMap = { esc: String.fromCharCode(27), tab: String.fromCharCode(9), up: String.fromCharCode(27) + '[A', down: String.fromCharCode(27) + '[B', '1': '1', '2': '2', '3': '3' };
+    var keyMap = { esc: String.fromCharCode(27), tab: String.fromCharCode(9), up: String.fromCharCode(27) + '[A', down: String.fromCharCode(27) + '[B' };
     document.querySelectorAll('.key-btn').forEach(function(btn) {
       btn.addEventListener('click', function(e) {
         e.preventDefault();
@@ -984,6 +1159,19 @@ const indexHtml = `<!DOCTYPE html>
       });
     });
 
+
+    // Bar collapse toggle (called from floating key)
+    function toggleBar() {
+      var bar = document.getElementById('voice-bar');
+      bar.classList.toggle('collapsed');
+      setTimeout(function() { fitAddon.fit(); visibleRows = term.rows; if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: getPtyRows() })); }, 100);
+    }
+
+    // Hide bar button in row1
+    document.getElementById('bar-hide-btn').addEventListener('click', function(e) {
+      e.preventDefault();
+      toggleBar();
+    });
 
     // Scroll to bottom button
     document.getElementById('scroll-bottom').addEventListener('click', function(e) {
@@ -997,30 +1185,30 @@ const indexHtml = `<!DOCTYPE html>
     // Select/Copy mode: show terminal text in a selectable overlay
     var copyOverlay = document.getElementById('copy-overlay');
     var copyBtn = document.getElementById('copy-btn');
-    copyBtn.addEventListener('click', function(e) {
-      e.preventDefault();
-      if (copyOverlay.classList.contains('active')) {
-        // Close overlay
-        copyOverlay.classList.remove('active');
-        copyBtn.textContent = 'Sel';
-        copyBtn.style.background = '';
-        if (!isMobile) term.focus();
-      } else {
-        // Extract visible terminal text from buffer
-        var buf = term.buffer.active;
-        var lines = [];
-        for (var i = 0; i < buf.length; i++) {
-          var line = buf.getLine(i);
-          if (line) lines.push(line.translateToString(true));
+    if (copyBtn) {
+      copyBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        if (copyOverlay.classList.contains('active')) {
+          copyOverlay.classList.remove('active');
+          copyBtn.textContent = 'Sel';
+          copyBtn.style.background = '';
+          if (!isMobile) term.focus();
+        } else {
+          var buf = term.buffer.active;
+          var lines = [];
+          for (var i = 0; i < buf.length; i++) {
+            var line = buf.getLine(i);
+            if (line) lines.push(line.translateToString(true));
+          }
+          copyOverlay.value = lines.join(String.fromCharCode(10));
+          copyOverlay.classList.add('active');
+          copyOverlay.scrollTop = copyOverlay.scrollHeight;
+          copyBtn.textContent = 'Back';
+          copyBtn.style.background = '#4ade80';
+          copyBtn.style.color = '#000';
         }
-        copyOverlay.value = lines.join(String.fromCharCode(10));
-        copyOverlay.classList.add('active');
-        copyOverlay.scrollTop = copyOverlay.scrollHeight;
-        copyBtn.textContent = 'Back';
-        copyBtn.style.background = '#4ade80';
-        copyBtn.style.color = '#000';
-      }
-    });
+      });
+    }
 
     // Voice setup - streaming ASR (sends PCM in real-time)
     const status = document.getElementById('status');
@@ -1197,8 +1385,9 @@ const indexHtml = `<!DOCTYPE html>
     const backBtn = document.getElementById('back-btn');
     var specialKeys = document.getElementById('special-keys');
     var scrollBtn = document.getElementById('scroll-bottom');
+    var filesBtn = document.getElementById('files-btn');
     function isExcluded(el) {
-      return (fontControls && fontControls.contains(el)) || (backBtn && backBtn.contains(el)) || (specialKeys && specialKeys.contains(el)) || el === scrollBtn;
+      return (fontControls && fontControls.contains(el)) || (backBtn && backBtn.contains(el)) || (specialKeys && specialKeys.contains(el)) || (filesBtn && filesBtn.contains(el));
     }
     voiceBar.addEventListener('touchstart', (e) => {
       if (isExcluded(e.target)) return;
@@ -1234,13 +1423,15 @@ const indexHtml = `<!DOCTYPE html>
       'pagedown': function() { return String.fromCharCode(27) + '[6~'; },
       'ctrlc': function() { return String.fromCharCode(3); },
       'ctrld': function() { return String.fromCharCode(4); },
-      'ctrlz': function() { return String.fromCharCode(26); }
+      'ctrlz': function() { return String.fromCharCode(26); },
+      'togglebar': function() { return null; }
     };
     var fkDefaults = [
       { label: '1', action: 'char', chars: '1' },
       { label: '2', action: 'char', chars: '2' },
       { label: '3', action: 'char', chars: '3' },
-      { label: 'Ret', action: 'enter', chars: '' }
+      { label: 'Ret', action: 'enter', chars: '' },
+      { label: '\\u25BE', action: 'togglebar', chars: '' }
     ];
     var fkStorageKey = 'hopcode_float_keys';
     function fkLoad() {
@@ -1282,6 +1473,7 @@ const indexHtml = `<!DOCTYPE html>
     }
 
     function fkSend(k) {
+      if (k.action === 'togglebar') { toggleBar(); return; }
       resetTypingBuffer();
       var fn = fkActionMap[k.action];
       if (fn) sendInput(fn(k.chars));
@@ -1322,6 +1514,220 @@ const indexHtml = `<!DOCTYPE html>
 
     fkRender();
 
+    // Reposition floating keys when keyboard appears/disappears
+    if (isMobile && window.visualViewport) {
+      function repositionFloatKeys() {
+        var vv = window.visualViewport;
+        var visibleBottom = vv.offsetTop + vv.height;
+        var midY = vv.offsetTop + vv.height / 2;
+        fkContainer.style.top = midY + 'px';
+      }
+      window.visualViewport.addEventListener('resize', repositionFloatKeys);
+      window.visualViewport.addEventListener('scroll', repositionFloatKeys);
+    }
+
+    // --- File Browser ---
+    var fbPanel = document.getElementById('file-browser');
+    var fbList = document.getElementById('fb-list');
+    var fbBreadcrumb = document.getElementById('fb-breadcrumb');
+    var fbError = document.getElementById('fb-error');
+    var fbTextPreview = document.getElementById('fb-text-preview');
+    var fbTextContent = document.getElementById('fb-text-content');
+    var fbTextName = document.getElementById('fb-text-name');
+    var fbPreview = document.getElementById('fb-preview');
+    var fbPreviewImg = document.getElementById('fb-preview-img');
+    var fbPreviewName = document.getElementById('fb-preview-name');
+    var fbCurrentPath = '/';
+
+    function fbOpen() {
+      fbPanel.classList.add('open');
+      fbTextPreview.style.display = 'none';
+      fbList.style.display = '';
+      fbError.style.display = 'none';
+      var savedPath = '';
+      try { savedPath = localStorage.getItem('hopcode_fb_path_' + sessionId) || ''; } catch {}
+      fbLoadDir(savedPath);
+    }
+    function fbClose() { fbPanel.classList.remove('open'); }
+
+    var fbBackIcon = '<svg width="20" height="20" viewBox="0 0 24 24" fill="#888"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>';
+
+    function fbLoadDir(dirPath) {
+      var url = '/terminal/files?session=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(dirPath);
+      fbError.style.display = 'none';
+      fbList.innerHTML = '<div style="padding:20px;text-align:center;color:#666">Loading...</div>';
+      fbTextPreview.style.display = 'none';
+      fbList.style.display = '';
+      fetch(url, { credentials: 'include' })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.error) {
+            if (dirPath) { fbLoadDir(''); return; }
+            fbError.textContent = data.error; fbError.style.display = 'block'; fbList.innerHTML = ''; return;
+          }
+          fbCurrentPath = data.path;
+          try { localStorage.setItem('hopcode_fb_path_' + sessionId, data.path); } catch {}
+          fbBuildBreadcrumb(data.path);
+          var html = '';
+          if (data.path !== '/') {
+            var parentPath = data.path.replace(/\\/[^\\/]+\\/?$/, '') || '/';
+            html += '<div class="fb-item" onclick="fbLoadDir(\\''+fbEsc(parentPath)+'\\')"><span class="fb-icon">'+fbBackIcon+'</span><div class="fb-info"><div class="fb-name">..</div></div></div>';
+          }
+          data.items.forEach(function(item) {
+            var fullPath = data.path === '/' ? '/' + item.name : data.path + '/' + item.name;
+            var ep = fbEsc(fullPath);
+            if (item.isDirectory) {
+              html += '<div class="fb-item" onclick="fbLoadDir(\\''+ep+'\\')"><span class="fb-icon">'+fbGetIcon(item)+'</span><div class="fb-info"><div class="fb-name">'+fbEscHtml(item.name)+'</div><div class="fb-meta">'+fbFormatTime(item.modified)+'</div></div></div>';
+            } else {
+              var icon = fbGetIcon(item);
+              var actions = '<div class="fb-actions"><button class="fb-dl" onclick="event.stopPropagation();fbDownload(\\''+ep+'\\')">&#x2193;</button></div>';
+              var click = '';
+              if (item.isImage) click = 'fbShowImagePreview(\\''+ep+'\\',\\''+fbEsc(item.name)+'\\')';
+              else if (item.isText) click = 'fbShowTextPreview(\\''+ep+'\\',\\''+fbEsc(item.name)+'\\')';
+              else click = 'fbDownload(\\''+ep+'\\')';
+              html += '<div class="fb-item" onclick="'+click+'"><span class="fb-icon">'+icon+'</span><div class="fb-info"><div class="fb-name">'+fbEscHtml(item.name)+'</div><div class="fb-meta">'+fbFormatSize(item.size)+' &middot; '+fbFormatTime(item.modified)+'</div></div>'+actions+'</div>';
+            }
+          });
+          fbList.innerHTML = html || '<div style="padding:20px;text-align:center;color:#666">Empty directory</div>';
+        })
+        .catch(function(e) {
+          if (dirPath) { fbLoadDir(''); return; }
+          fbError.textContent = 'Failed to load: ' + e.message; fbError.style.display = 'block'; fbList.innerHTML = '';
+        });
+    }
+
+    function fbBuildBreadcrumb(p) {
+      var parts = p.split('/').filter(Boolean);
+      var html = '<span class="fb-crumb" onclick="fbLoadDir(\\'/\\')">/</span>';
+      var acc = '';
+      parts.forEach(function(part) {
+        acc += '/' + part;
+        var ep = fbEsc(acc);
+        html += '<span class="fb-sep">&#x203A;</span><span class="fb-crumb" onclick="fbLoadDir(\\''+ep+'\\')">'+fbEscHtml(part)+'</span>';
+      });
+      fbBreadcrumb.innerHTML = html;
+      fbBreadcrumb.scrollLeft = fbBreadcrumb.scrollWidth;
+    }
+
+    function fbShowImagePreview(filePath, name) {
+      fbPreviewImg.src = '/terminal/preview?session=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(filePath);
+      fbPreviewName.textContent = name;
+      fbPreview.classList.add('open');
+      fbPreview.onclick = function(e) { if (e.target === fbPreview) fbPreview.classList.remove('open'); };
+    }
+
+    function fbShowTextPreview(filePath, name) {
+      fbTextName.textContent = name;
+      fbTextContent.textContent = 'Loading...';
+      fbList.style.display = 'none';
+      fbTextPreview.style.display = 'flex';
+      document.getElementById('fb-text-dl').onclick = function() { fbDownload(filePath); };
+      fetch('/terminal/preview?session=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(filePath), { credentials: 'include' })
+        .then(function(r) { return r.text(); })
+        .then(function(text) { fbTextContent.textContent = text; })
+        .catch(function(e) { fbTextContent.textContent = 'Error: ' + e.message; });
+    }
+
+    function fbDownload(filePath) {
+      var a = document.createElement('a');
+      a.href = '/terminal/download?session=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(filePath);
+      a.download = '';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+
+    function fbGetIcon(item) {
+      if (item.isDirectory) return '<svg width="20" height="20" viewBox="0 0 24 24" fill="#60a5fa"><path d="M2 6a2 2 0 012-2h5l2 2h9a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg>';
+      var name = (item.name || '').toLowerCase();
+      if (item.isImage) return '<svg width="20" height="20" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="2" fill="#4ade80" opacity="0.3"/><circle cx="8.5" cy="8.5" r="1.5" fill="#4ade80"/><path d="M21 15l-5-5L5 21h14a2 2 0 002-2v-4z" fill="#4ade80"/></svg>';
+      if (/\\.(js|ts|tsx|jsx|py|rb|go|rs|java|c|cpp|h|sh|lua|php|swift|kt)$/.test(name)) return '<svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" fill="#c084fc" opacity="0.3"/><path d="M14 2v6h6" stroke="#c084fc" stroke-width="1.5" fill="none"/><text x="12" y="17" text-anchor="middle" font-size="7" font-family="monospace" fill="#c084fc">&lt;/&gt;</text></svg>';
+      if (/\\.(json|yaml|yml|toml|ini|cfg|conf|env|xml)$/.test(name)) return '<svg width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" stroke="#fb923c" stroke-width="1.5"/><path d="M12 1v3M12 20v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M1 12h3M20 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12" stroke="#fb923c" stroke-width="1.5" stroke-linecap="round"/></svg>';
+      if (item.isText) return '<svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" fill="#e0e0e0" opacity="0.3"/><path d="M14 2v6h6" stroke="#e0e0e0" stroke-width="1.5" fill="none"/><line x1="8" y1="13" x2="16" y2="13" stroke="#e0e0e0" stroke-width="1" opacity="0.5"/><line x1="8" y1="16" x2="13" y2="16" stroke="#e0e0e0" stroke-width="1" opacity="0.5"/></svg>';
+      return '<svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" fill="#888" opacity="0.3"/><path d="M14 2v6h6" stroke="#888" stroke-width="1.5" fill="none"/></svg>';
+    }
+
+    function fbFormatSize(bytes) {
+      if (bytes == null) return '';
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+      if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+      return (bytes / 1073741824).toFixed(1) + ' GB';
+    }
+
+    function fbFormatTime(ms) {
+      if (!ms) return '';
+      var d = new Date(ms);
+      return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    }
+
+    function fbEsc(s) { return s.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'"); }
+    function fbEscHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+    // Wire up buttons
+    document.getElementById('files-btn').addEventListener('click', function(e) {
+      e.preventDefault();
+      fbOpen();
+      if (isMobile && xtermTextarea) xtermTextarea.blur();
+    });
+    document.getElementById('fb-close').addEventListener('click', fbClose);
+    document.getElementById('fb-cwd-btn').addEventListener('click', function() { fbLoadDir(''); });
+    document.getElementById('fb-text-back').addEventListener('click', function() {
+      fbTextPreview.style.display = 'none';
+      fbList.style.display = '';
+    });
+    document.getElementById('fb-preview-close').addEventListener('click', function() { fbPreview.classList.remove('open'); });
+    document.getElementById('fb-preview-dl').addEventListener('click', function() {
+      var src = fbPreviewImg.src;
+      var a = document.createElement('a');
+      a.href = src.replace('/terminal/preview', '/terminal/download');
+      a.download = '';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    });
+
+    // Right-edge swipe to open file browser
+    var fbSwipeStartX = 0, fbSwipeStartY = 0, fbSwiping = false;
+    termEl.addEventListener('touchstart', function(e) {
+      var touch = e.touches[0];
+      if (touch.clientX > window.innerWidth - 20 && !fbPanel.classList.contains('open')) {
+        fbSwipeStartX = touch.clientX;
+        fbSwipeStartY = touch.clientY;
+        fbSwiping = true;
+      }
+    }, { passive: true });
+    termEl.addEventListener('touchmove', function(e) {
+      if (!fbSwiping) return;
+      var dx = fbSwipeStartX - e.touches[0].clientX;
+      var dy = Math.abs(e.touches[0].clientY - fbSwipeStartY);
+      if (dx > 50 && dy < 100) {
+        fbSwiping = false;
+        fbOpen();
+      }
+    }, { passive: true });
+    termEl.addEventListener('touchend', function() { fbSwiping = false; }, { passive: true });
+
+    // Left-edge swipe inside file browser to close
+    var fbCloseSwipeStartX = 0, fbCloseSwiping = false;
+    fbPanel.addEventListener('touchstart', function(e) {
+      var touch = e.touches[0];
+      var panelRect = fbPanel.getBoundingClientRect();
+      if (touch.clientX - panelRect.left < 20) {
+        fbCloseSwipeStartX = touch.clientX;
+        fbCloseSwiping = true;
+      }
+    }, { passive: true });
+    fbPanel.addEventListener('touchmove', function(e) {
+      if (!fbCloseSwiping) return;
+      var dx = e.touches[0].clientX - fbCloseSwipeStartX;
+      if (dx > 50) {
+        fbCloseSwiping = false;
+        fbClose();
+      }
+    }, { passive: true });
+    fbPanel.addEventListener('touchend', function() { fbCloseSwiping = false; }, { passive: true });
+
     if (!isMobile) term.focus();
     connectVoice();
   </script>
@@ -1351,7 +1757,7 @@ function isAuthenticated(req: http.IncomingMessage): boolean {
 }
 
 // HTTP server
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   // Security headers
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
@@ -1451,6 +1857,140 @@ const server = http.createServer((req, res) => {
   }
 
   // --- Authenticated routes below ---
+
+  // --- File browser API ---
+  const parsedUrl = new URL(req.url || '/', `http://${req.headers.host}`);
+  const pathname = parsedUrl.pathname;
+
+  if ((pathname === '/terminal/files' || pathname === '/files') && req.method === 'GET') {
+    try {
+      const sid = parsedUrl.searchParams.get('session');
+      const session = sid ? sessions.get(sid) : null;
+      if (!session) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Session not found' })); return; }
+
+      let requestedPath = parsedUrl.searchParams.get('path') || '';
+      let dirPath: string;
+      if (!requestedPath) {
+        dirPath = await getSessionCwd(session);
+      } else {
+        dirPath = resolveSafePath(requestedPath);
+      }
+
+      const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+      const items: any[] = [];
+      for (const entry of entries) {
+        const fullPath = path.join(dirPath, entry.name);
+        let stat;
+        try { stat = await fs.promises.stat(fullPath); } catch { continue; }
+        items.push({
+          name: entry.name,
+          isDirectory: entry.isDirectory(),
+          size: entry.isDirectory() ? null : stat.size,
+          modified: stat.mtimeMs,
+          isImage: !entry.isDirectory() && isPreviewableImage(entry.name),
+          isText: !entry.isDirectory() && isTextFile(entry.name),
+        });
+      }
+      // Sort: directories first, then alphabetical
+      items.sort((a: any, b: any) => {
+        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ path: dirPath, cwd: await getSessionCwd(session), items }));
+    } catch (e: any) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message || 'Failed to list directory' }));
+    }
+    return;
+  }
+
+  if ((pathname === '/terminal/download' || pathname === '/download') && req.method === 'GET') {
+    try {
+      const sid = parsedUrl.searchParams.get('session');
+      const session = sid ? sessions.get(sid) : null;
+      if (!session) { res.writeHead(404); res.end('Session not found'); return; }
+
+      const requestedPath = parsedUrl.searchParams.get('path') || '';
+      if (!requestedPath) { res.writeHead(400); res.end('Path required'); return; }
+      const filePath = resolveSafePath(requestedPath);
+
+      const stat = await fs.promises.stat(filePath);
+      if (stat.isDirectory()) { res.writeHead(400); res.end('Cannot download directory'); return; }
+
+      const mime = getMimeType(filePath);
+      const fileName = path.basename(filePath);
+      res.writeHead(200, {
+        'Content-Type': mime,
+        'Content-Disposition': 'attachment; filename="' + fileName.replace(/"/g, '\\"') + '"',
+        'Content-Length': stat.size.toString(),
+      });
+      const stream = fs.createReadStream(filePath);
+      stream.pipe(res);
+      stream.on('error', () => { try { res.end(); } catch {} });
+    } catch (e: any) {
+      res.writeHead(500); res.end(e.message || 'Download failed');
+    }
+    return;
+  }
+
+  if ((pathname === '/terminal/preview' || pathname === '/preview') && req.method === 'GET') {
+    try {
+      const sid = parsedUrl.searchParams.get('session');
+      const session = sid ? sessions.get(sid) : null;
+      if (!session) { res.writeHead(404); res.end('Session not found'); return; }
+
+      const requestedPath = parsedUrl.searchParams.get('path') || '';
+      if (!requestedPath) { res.writeHead(400); res.end('Path required'); return; }
+      const filePath = resolveSafePath(requestedPath);
+
+      const stat = await fs.promises.stat(filePath);
+      if (stat.isDirectory()) { res.writeHead(400); res.end('Cannot preview directory'); return; }
+
+      const mime = getMimeType(filePath);
+      const fileName = path.basename(filePath);
+
+      if (isTextFile(filePath)) {
+        // Text preview: limit to 1MB
+        const MAX_TEXT = 1024 * 1024;
+        if (stat.size > MAX_TEXT) {
+          // Read first 1MB
+          const fd = await fs.promises.open(filePath, 'r');
+          const buf = Buffer.alloc(MAX_TEXT);
+          await fd.read(buf, 0, MAX_TEXT, 0);
+          await fd.close();
+          res.writeHead(200, {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Content-Disposition': 'inline; filename="' + fileName.replace(/"/g, '\\"') + '"',
+          });
+          res.end(buf.toString('utf-8') + '\n\n--- truncated at 1MB ---');
+        } else {
+          res.writeHead(200, {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Content-Disposition': 'inline; filename="' + fileName.replace(/"/g, '\\"') + '"',
+          });
+          const stream = fs.createReadStream(filePath);
+          stream.pipe(res);
+          stream.on('error', () => { try { res.end(); } catch {} });
+        }
+      } else {
+        // Binary preview (images etc)
+        res.writeHead(200, {
+          'Content-Type': mime,
+          'Content-Disposition': 'inline; filename="' + fileName.replace(/"/g, '\\"') + '"',
+          'Content-Length': stat.size.toString(),
+        });
+        const stream = fs.createReadStream(filePath);
+        stream.pipe(res);
+        stream.on('error', () => { try { res.end(); } catch {} });
+      }
+    } catch (e: any) {
+      res.writeHead(500); res.end(e.message || 'Preview failed');
+    }
+    return;
+  }
+
   // Everything goes through /terminal so the reverse proxy forwards it
   const url = new URL(req.url || '/', `http://${req.headers.host}`);
   const action = url.searchParams.get('action');
