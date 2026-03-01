@@ -2,15 +2,17 @@
   "name": "hopcode",
   "version": "1.0.0",
   "description": "Code from anywhere — remote dev environment access with voice input",
-  "module": "src/server.ts",
   "type": "module",
   "bin": {
     "hopcode": "src/server-node.ts"
   },
   "scripts": {
-    "start": "npx tsx src/server-node.ts",
+    "start": "pm2 start ecosystem.config.cjs",
+    "start:ui": "npx tsx src/server-node.ts",
+    "start:pty": "npx tsx src/pty-service.ts",
     "start:tunnel": "npx tsx src/server-node.ts --tunnel",
-    "dev": "npx tsx --watch src/server-node.ts",
+    "dev": "npx tsx src/pty-service.ts & npx tsx --watch src/server-node.ts",
+    "typecheck": "tsc --noEmit",
     "test": "bun run src/test-all.ts"
   },
   "keywords": [

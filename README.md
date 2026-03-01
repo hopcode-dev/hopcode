@@ -1,30 +1,34 @@
+<div align="center">
+
+<!-- TODO: Replace with actual logo -->
+<!-- <img src="media/logo.png" width="120" alt="Hopcode logo" /> -->
+
 # hopcode
 
-> Hop into your code from anywhere.
+**Hop into your code from anywhere.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![CI](https://github.com/hopcode-dev/hopcode/actions/workflows/ci.yml/badge.svg)](https://github.com/hopcode-dev/hopcode/actions/workflows/ci.yml)
 
-<!-- TODO: Add demo GIF here -->
-<!-- ![hopcode demo](docs/demo.gif) -->
+<!-- TODO: Replace with actual demo GIF -->
+<!-- ![hopcode demo](media/demo.gif) -->
 
-Remote terminal access from any device, with voice input for mobile. Self-hosted, open source, single container.
+A web-based terminal you can access from any device — with voice input, a file browser, and a mobile-first UI. Self-hosted, open source, single deploy.
 
-## Install
+[Quick Start](#quick-start) · [Features](#features) · [Docs](docs/) · [Contributing](CONTRIBUTING.md)
 
-```bash
-# One command
-npx hopcode
+</div>
 
-# Or with Docker
-docker run -p 3000:3000 -e AUTH_PASSWORD=mysecret hopcode
-```
+---
 
 ## Features
 
 - **Code from anywhere** — access your dev machine from your phone, tablet, or any browser
-- **Voice input** — hold Option/Alt to talk, text goes straight to your terminal
-- **Mobile-optimized** — special keys, touch controls, responsive UI built for small screens
-- **Session persistence** — reconnect without losing state, multiple sessions
+- **Voice input** — hold to talk, speech goes straight to your terminal via streaming ASR
+- **File browser** — Finder-style panel with swipe gestures, upload, rename, delete
+- **Image paste** — paste or upload images directly from clipboard
+- **Session management** — multiple named sessions, reconnect without losing state
+- **Mobile-first UI** — floating keys, swipe gestures, bottom bar, touch-optimized
 - **Self-hosted** — your code stays on your machine, password-protected
 - **Zero config** — works immediately, voice is optional
 
@@ -34,86 +38,90 @@ docker run -p 3000:3000 -e AUTH_PASSWORD=mysecret hopcode
 # Clone and install
 git clone https://github.com/hopcode-dev/hopcode.git
 cd hopcode
-npm install
+bun install
 
-# Start (password required)
-AUTH_PASSWORD=mysecret npx tsx src/server-node.ts
+# Configure
+echo "AUTH_PASSWORD=yourpassword" > .env
 
-# Open in browser
+# Start
+pm2 start ecosystem.config.cjs
+
+# Open
 open http://localhost:3000
 ```
 
-## Docker
+### Docker
 
 ```bash
-# Build and run
 docker build -t hopcode .
-docker run -p 3000:3000 -e AUTH_PASSWORD=mysecret hopcode
+docker run -p 3000:3000 -e AUTH_PASSWORD=yourpassword hopcode
 ```
 
-## Remote Access
-
-Expose your terminal over a Cloudflare Tunnel:
+### Remote Access
 
 ```bash
-AUTH_PASSWORD=mysecret npx tsx src/server-node.ts --tunnel
+# Expose via Cloudflare Tunnel (prints a public HTTPS URL)
+AUTH_PASSWORD=yourpassword npx tsx src/server-node.ts --tunnel
 ```
-
-Prints a public HTTPS URL you can open from your phone (password-protected).
 
 ## Why Hopcode?
 
-| | Hopcode | SSH apps (Termius, Blink) | Happy Coder |
-|---|---|---|---|
-| Voice input | Yes | No | No |
-| Works in browser | Yes | No (native app) | Yes |
-| Self-hosted | Yes | N/A | No |
-| Any CLI tool | Yes | Yes | Claude Code only |
-| Mobile UX | Built for it | Retrofitted | Built for it |
-| Open source | MIT | No | No |
+| | Hopcode | SSH apps (Termius, Blink) | VS Code Server | Happy Coder |
+|---|---|---|---|---|
+| Voice input | Yes | No | No | No |
+| File browser | Yes | No | Yes | No |
+| Works in browser | Yes | No (native app) | Yes | Yes |
+| Self-hosted | Yes | N/A | Yes | No |
+| Any CLI tool | Yes | Yes | Yes | Claude only |
+| Mobile UX | Built for it | Retrofitted | Not optimized | Built for it |
+| Open source | MIT | No | Partially | No |
+
+## Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTH_PASSWORD` | *(required)* | Login password |
+| `PORT` | `3000` | UI service port |
+| `SHELL_CMD` | `bash` | Shell to spawn |
+| `VOLCANO_APP_ID` | — | Volcano Engine app ID (for voice) |
+| `VOLCANO_TOKEN` | — | Volcano Engine token (for voice) |
+| `VOLCANO_ASR_RESOURCE_ID` | `volc.bigasr.sauc.duration` | ASR resource ID |
+
+## Architecture
+
+Hopcode runs as two services so the UI can restart without killing terminal sessions:
+
+```
+Browser (xterm.js)
+    │
+    ├── :3000 → UI Service ─── auth, web UI, voice, file browser
+    │               │
+    │               └── proxy ──► PTY Service ─── node-pty, session state
+    │                              :3002 (internal)
+    │
+    └── WebSocket ────────────► terminal I/O (proxied through UI)
+```
+
+- **UI Service** (`src/server-node.ts`) — public-facing, serves HTML, handles auth and voice
+- **PTY Service** (`src/pty-service.ts`) — internal, manages terminal processes and scrollback
+
+Both managed by pm2. See [docs/architecture.md](docs/architecture.md) for details.
 
 ## Voice Setup (Optional)
 
-Voice uses [Volcano Engine](https://www.volcengine.com/) for speech recognition. Hopcode works perfectly as a plain web terminal without it.
-
-To enable voice:
+Voice uses [Volcano Engine](https://www.volcengine.com/) for streaming speech recognition. Hopcode works perfectly as a plain web terminal without it.
 
 ```bash
+# Add to .env
 VOLCANO_APP_ID=your_app_id
 VOLCANO_TOKEN=your_token
 ```
 
 Hold **Option** (Mac) or **Alt** (Windows/Linux) to record. On mobile, hold the voice bar.
 
-## Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | `3000` | Server port |
-| `AUTH_PASSWORD` | *(required)* | Login password |
-| `SHELL_CMD` | `bash` | Shell to spawn |
-| `VOLCANO_APP_ID` | - | Volcano Engine app ID (for voice) |
-| `VOLCANO_TOKEN` | - | Volcano Engine token (for voice) |
-| `VOLCANO_ASR_RESOURCE_ID` | `volc.bigasr.sauc.duration` | ASR resource ID |
-| `CLOUDFLARE_TUNNEL` | - | Set to `1` to enable tunnel |
-
-## Architecture
-
-```
-Browser (xterm.js)
-    |
-    |-- WebSocket /ws/terminal --> node-pty (bash/zsh)
-    |
-    +-- WebSocket /ws/voice --> Volcano ASR --> text --> PTY
-                                  (optional)
-
-Server: Node.js + node-pty + xterm-headless (session persistence)
-Tunnel: cloudflared (optional, --tunnel flag)
-```
-
 ## Contributing
 
-Contributions welcome! Please open an issue first to discuss what you'd like to change.
+Contributions welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before getting started.
 
 ## License
 

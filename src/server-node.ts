@@ -52,7 +52,7 @@ const loginAttempts = new Map<string, { count: number; firstAttempt: number }>()
 
 function getClientIp(req: http.IncomingMessage): string {
   const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
+  if (typeof forwarded === 'string') return forwarded.split(',')[0]!.trim();
   return req.socket.remoteAddress || 'unknown';
 }
 
@@ -158,8 +158,8 @@ function buildAudioRequest(audioData: Buffer, isLast: boolean): Buffer {
 
 function parseAsrResponse(data: Buffer): { msgType: number; result?: any; error?: string } {
   if (data.length < 12) return { msgType: 0, error: 'Response too short' };
-  const msgType = (data[1] >> 4) & 0x0F;
-  const compression = data[2] & 0x0F;
+  const msgType = (data[1]! >> 4) & 0x0F;
+  const compression = data[2]! & 0x0F;
   const payloadSize = data.readUInt32BE(8);
   let payload = data.subarray(12, 12 + payloadSize);
   if (compression === 1) {
@@ -2240,7 +2240,7 @@ function startCloudflareTunnel() {
     // cloudflared prints the URL like: "https://xxx-yyy-zzz.trycloudflare.com"
     const match = line.match(/(https:\/\/[a-z0-9-]+\.trycloudflare\.com)/);
     if (match && !tunnelUrl) {
-      tunnelUrl = match[1];
+      tunnelUrl = match[1]!;
       console.log(`
 ╔════════════════════════════════════════════════╗
 ║         Cloudflare Tunnel Active              ║

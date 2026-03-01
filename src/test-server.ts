@@ -15,7 +15,7 @@ async function testServer() {
 
   // Start server in background
   console.log('Starting server...');
-  const serverProc = Bun.spawn(['bun', 'run', 'src/server.ts'], {
+  const serverProc = Bun.spawn(['npx', 'tsx', 'src/server-node.ts'], {
     cwd: process.cwd(),
     stdout: 'pipe',
     stderr: 'pipe',
@@ -31,7 +31,7 @@ async function testServer() {
     console.log('Test 1: Health check');
     try {
       const res = await fetch(`${BASE_URL}/health`);
-      const data = await res.json();
+      const data = await res.json() as { status: string };
       if (res.ok && data.status === 'ok') {
         console.log(`  ✓ Health check passed: ${JSON.stringify(data)}`);
       } else {
