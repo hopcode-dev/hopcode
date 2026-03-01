@@ -1,7 +1,6 @@
 /**
- * hopcode — code from anywhere, with voice input
- * Uses node-pty + xterm.js
- * Full control over terminal input — ASR text goes directly to PTY
+ * hopcode — UI service (code from anywhere, with voice input)
+ * Proxies terminal connections to PTY service on localhost:3001
  */
 
 // Prevent unhandled errors from crashing the server
@@ -19,7 +18,6 @@ process.on('unhandledRejection', (err: any) => {
 
 import 'dotenv/config';
 import * as http from 'http';
-import * as pty from 'node-pty';
 import { WebSocketServer, WebSocket } from 'ws';
 import { spawn } from 'child_process';
 import * as fs from 'fs';
@@ -27,9 +25,13 @@ import * as path from 'path';
 import * as zlib from 'zlib';
 import { fileURLToPath } from 'url';
 import { randomUUID, randomBytes } from 'crypto';
-import xtermHeadless from '@xterm/headless';
-const HeadlessTerminal = xtermHeadless.Terminal;
-import { SerializeAddon } from '@xterm/addon-serialize';
+
+import {
+  PTY_SERVICE_PORT,
+  PTY_INTERNAL_TOKEN_HEADER,
+  getPtyInternalToken,
+  type SessionInfo,
+} from './shared/protocol.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -84,26 +86,18 @@ const VOLCANO_TOKEN = process.env.VOLCANO_TOKEN || '';
 const VOLCANO_ASR_RESOURCE_ID = process.env.VOLCANO_ASR_RESOURCE_ID || 'volc.bigasr.sauc.duration';
 const VOLCANO_ASR_ENDPOINT = 'wss://openspeech.bytedance.com/api/v3/sauc/bigmodel';
 
-// Store active PTY sessions and their WebSocket clients
-interface Session {
-  pty: pty.IPty;
-  clients: Set<WebSocket>;
-  headlessTerm: InstanceType<typeof HeadlessTerminal>;
-  serializeAddon: InstanceType<typeof SerializeAddon>;
-  name: string;
-  createdAt: number;
+// --- PTY service client ---
+const PTY_INTERNAL_TOKEN = getPtyInternalToken();
+const PTY_BASE_URL = `http://127.0.0.1:${PTY_SERVICE_PORT}`;
+
+async function ptyFetch(urlPath: string, options?: RequestInit): Promise<Response> {
+  const url = PTY_BASE_URL + urlPath;
+  const headers = new Headers(options?.headers);
+  headers.set(PTY_INTERNAL_TOKEN_HEADER, PTY_INTERNAL_TOKEN);
+  return fetch(url, { ...options, headers });
 }
-const sessions = new Map<string, Session>();
-let sessionCounter = 0;
 
 // --- File browser helpers ---
-async function getSessionCwd(session: Session): Promise<string> {
-  try {
-    return await fs.promises.readlink('/proc/' + session.pty.pid + '/cwd');
-  } catch {
-    return process.env.HOME || '/';
-  }
-}
 
 function resolveSafePath(requestedPath: string): string {
   return path.resolve('/', requestedPath);
@@ -139,10 +133,6 @@ function isTextFile(filePath: string): boolean {
   const mime = getMimeType(filePath);
   return mime.startsWith('text/') || mime === 'application/json' || mime === 'application/javascript' || mime === 'application/xml';
 }
-
-// Sessions HTML cache - invalidated when sessions change
-let sessionsHtmlCache: string | null = null;
-function invalidateSessionsCache() { sessionsHtmlCache = null; }
 
 // --- Volcano ASR streaming protocol (native TypeScript) ---
 
@@ -312,75 +302,6 @@ function startAsrSession(clientWs: WebSocket): AsrSession {
 // Voice clients
 const voiceClients = new Map<string, WebSocket>();
 
-// Create a new PTY session (direct bash, no tmux)
-function createSession(id: string): Session {
-  // Direct bash shell - interactive login shell
-  const ptyProcess = pty.spawn('/bin/bash', ['--login', '-i'], {
-    name: 'xterm-256color',
-    cols: 120,
-    rows: 30,
-    cwd: process.env.HOME || '/',
-    env: {
-      ...Object.fromEntries(
-        Object.entries(process.env).filter(([k]) => k !== 'CLAUDECODE')
-      ) as { [key: string]: string },
-      TERM: 'xterm-256color',
-      SHELL: '/bin/bash',
-      PS1: '\\[\\033[32m\\]\\u\\[\\033[0m\\]:\\[\\033[34m\\]\\W\\[\\033[0m\\]\\$ ',
-    },
-  });
-
-  sessionCounter++;
-
-  // Headless terminal tracks screen state for efficient reconnection
-  const headlessTerm = new HeadlessTerminal({ cols: 120, rows: 30, scrollback: 500, allowProposedApi: true });
-  const serializeAddon = new SerializeAddon();
-  headlessTerm.loadAddon(serializeAddon);
-
-  const session: Session = {
-    pty: ptyProcess,
-    clients: new Set(),
-    headlessTerm,
-    serializeAddon,
-    name: `Session ${sessionCounter}`,
-    createdAt: Date.now(),
-  };
-
-  console.log(`Created PTY session: ${id} - ${session.name}`);
-
-  // Broadcast PTY output to all connected clients and feed headless terminal
-  ptyProcess.onData((data) => {
-    session.headlessTerm.write(data);
-
-    const message = JSON.stringify({ type: 'output', data });
-    for (const client of session.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(message);
-      }
-    }
-  });
-
-  ptyProcess.onExit(({ exitCode }) => {
-    console.log(`PTY exited with code ${exitCode}`);
-    session.headlessTerm.dispose();
-    sessions.delete(id);
-    invalidateSessionsCache();
-    for (const client of session.clients) {
-      client.close();
-    }
-  });
-
-  sessions.set(id, session);
-  invalidateSessionsCache();
-  return session;
-}
-
-// Get or create a session by ID
-function getSession(id: string): Session {
-  return sessions.get(id) || createSession(id);
-}
-
-
 // Login page HTML
 const loginHtml = `<!DOCTYPE html>
 <html>
@@ -432,11 +353,15 @@ const loginHtml = `<!DOCTYPE html>
 </html>`;
 
 // Session chooser HTML page - generated dynamically with server-side rendering
-function buildSessionsHtml(): string {
-  if (sessionsHtmlCache) return sessionsHtmlCache;
-  const sessionList = Array.from(sessions.entries()).map(([id, s]) => ({
-    id, name: s.name, createdAt: s.createdAt, clients: s.clients.size,
-  }));
+async function buildSessionsHtml(): Promise<string> {
+  let sessionList: { id: string; name: string; createdAt: number; clients: number }[] = [];
+  try {
+    const resp = await ptyFetch('/sessions');
+    if (resp.ok) {
+      const list: SessionInfo[] = await resp.json() as SessionInfo[];
+      sessionList = list.map(s => ({ id: s.id, name: s.name, createdAt: s.createdAt, clients: s.clientCount }));
+    }
+  } catch {}
   sessionList.sort((a, b) => b.createdAt - a.createdAt);
 
   function fmtAge(ts: number): string {
@@ -471,7 +396,6 @@ function buildSessionsHtml(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <meta http-equiv="refresh" content="5">
   <title>Hopcode - Sessions</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -580,12 +504,15 @@ function buildSessionsHtml(): string {
           restore(d.success ? newName : name);
         }).catch(function() { restore(name); });
       }
+      var committed = false;
       input.addEventListener('click', function(ev) { ev.preventDefault(); ev.stopPropagation(); });
       input.addEventListener('keydown', function(ev) {
-        if (ev.key === 'Enter') { ev.preventDefault(); input.blur(); }
+        if (ev.key === 'Enter') { ev.preventDefault(); committed = true; save(); }
         if (ev.key === 'Escape') { ev.preventDefault(); restore(name); }
       });
-      input.addEventListener('blur', save);
+      input.addEventListener('blur', function() {
+        if (!committed) restore(name);
+      });
     }
     document.querySelectorAll('.session-card').forEach(function(card) {
       card.addEventListener('click', function(e) {
@@ -606,7 +533,6 @@ function buildSessionsHtml(): string {
   </script>
 </body>
 </html>`;
-  sessionsHtmlCache = html;
   return html;
 }
 
@@ -658,7 +584,7 @@ const indexHtml = `<!DOCTYPE html>
       width: 52px; height: 52px; border-radius: 12px; border: 2px solid rgba(51,51,51,0.5);
       background: rgba(22,33,62,0.4); color: rgba(224,224,224,0.5); font-size: 18px; font-weight: 600;
       font-family: system-ui; cursor: pointer; display: flex; align-items: center; justify-content: center;
-      -webkit-tap-highlight-color: transparent; backdrop-filter: blur(4px);
+      -webkit-tap-highlight-color: transparent;
       transition: border-color 0.15s, background 0.15s, color 0.15s;
       pointer-events: auto;
     }
@@ -684,8 +610,12 @@ const indexHtml = `<!DOCTYPE html>
     body.mobile #text { display: none; }
     body.mobile #font-controls { display: none; }
     body.mobile .key-btn { min-width: 0; flex: 1; padding: 0 4px; height: 34px; font-size: 12px; }
-    body.mobile #back-btn { padding: 4px 5px; font-size: 10px; flex-shrink: 0; }
-    body.mobile #scroll-bottom { min-width: 0; height: 34px; font-size: 14px; flex: 1; }
+    .mobile-only { display: none; }
+    body.mobile .mobile-only { display: inline-block; }
+    body.mobile #back-btn { display: none; }
+    body.mobile #scroll-bottom { display: none; }
+    body.mobile #back-btn-mobile { padding: 4px 5px; font-size: 10px; flex-shrink: 0; color: #4ade80; text-decoration: none; background: #1a1a2e; border-radius: 6px; white-space: nowrap; }
+    body.mobile #scroll-bottom-mobile { min-width: 0; height: 34px; font-size: 14px; flex: 1; background: #333; border: none; color: #fff; border-radius: 6px; cursor: pointer; -webkit-tap-highlight-color: transparent; padding: 0; }
     body.mobile #voice-bar.collapsed { display: none; }
     /* --- File Browser --- */
     #file-browser {
@@ -762,13 +692,13 @@ const indexHtml = `<!DOCTYPE html>
     <textarea id="copy-overlay" readonly></textarea>
     <div id="voice-bar">
       <div id="bar-row1">
+        <a href="/terminal" id="back-btn">Sess</a>
         <div id="special-keys">
           <button class="key-btn" id="bar-hide-btn" style="font-size:16px">&#x25B8;</button>
           <button class="key-btn" data-key="esc">Esc</button>
           <button class="key-btn" data-key="tab">Tab</button>
           <button class="key-btn" data-key="up">&#x25B2;</button>
           <button class="key-btn" data-key="down">&#x25BC;</button>
-          <button id="scroll-bottom" title="Scroll to bottom">&#x21E9;</button>
         </div>
         <div id="font-controls">
           <button class="font-btn" onclick="changeFontSize(-2)">&#x2212;</button>
@@ -777,10 +707,12 @@ const indexHtml = `<!DOCTYPE html>
         </div>
       </div>
       <div id="bar-row2">
-        <a href="/terminal" id="back-btn">Sess</a>
+        <a href="/terminal" id="back-btn-mobile" class="mobile-only">Sess</a>
         <button id="files-btn" class="key-btn" title="Files">Files</button>
         <div id="status">Hold Option to speak</div>
         <div id="text"></div>
+        <button id="scroll-bottom-mobile" class="mobile-only" title="Scroll to bottom">&#x21E9;</button>
+        <button id="scroll-bottom" title="Scroll to bottom">&#x21E9;</button>
       </div>
     </div>
   </div>
@@ -850,7 +782,8 @@ const indexHtml = `<!DOCTYPE html>
 
     const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
     if (isMobile) document.body.classList.add('mobile');
-    let fontSize = isMobile ? 14 : 21;
+    var savedFontSize = parseInt(localStorage.getItem('hopcode-font-size'));
+    let fontSize = savedFontSize > 0 ? savedFontSize : (isMobile ? 14 : 21);
     const term = new Terminal({
       cursorBlink: true,
       fontSize: fontSize,
@@ -945,6 +878,7 @@ const indexHtml = `<!DOCTYPE html>
     function changeFontSize(delta) {
       fontSize = Math.max(10, Math.min(40, fontSize + delta));
       term.options.fontSize = fontSize;
+      localStorage.setItem('hopcode-font-size', String(fontSize));
       document.getElementById('font-size').textContent = fontSize + 'px';
       fitAddon.fit();
       visibleRows = term.rows;
@@ -1122,6 +1056,38 @@ const indexHtml = `<!DOCTYPE html>
       }
     });
 
+    // Clipboard image paste → upload to server → insert path into terminal
+    // Use capture phase (3rd arg = true) because xterm.js calls stopPropagation on paste
+    document.addEventListener('paste', function(e) {
+      if (!e.clipboardData || !e.clipboardData.items) return;
+      var items = e.clipboardData.items;
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf('image/') === 0) {
+          e.preventDefault();
+          e.stopPropagation();
+          var blob = items[i].getAsFile();
+          if (!blob) return;
+          var statusEl = document.getElementById('status');
+          var prevStatus = statusEl ? statusEl.textContent : '';
+          if (statusEl) { statusEl.textContent = 'Uploading image...'; statusEl.style.background = '#60a5fa'; }
+          fetch('/terminal/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': blob.type },
+            body: blob
+          }).then(function(r) { return r.json(); }).then(function(data) {
+            if (data.path) sendInput(data.path + ' ');
+            if (statusEl) { statusEl.textContent = 'Image uploaded'; statusEl.style.background = '#4ade80'; }
+            setTimeout(function() { if (statusEl) { statusEl.textContent = prevStatus; statusEl.style.background = ''; } }, 2000);
+          }).catch(function(err) {
+            console.error('[paste] upload failed:', err);
+            if (statusEl) { statusEl.textContent = 'Upload failed'; statusEl.style.background = '#f87171'; }
+            setTimeout(function() { if (statusEl) { statusEl.textContent = prevStatus; statusEl.style.background = ''; } }, 3000);
+          });
+          return;
+        }
+      }
+    }, true);
+
     // Fix mobile viewport height (100vh includes browser chrome)
     function setVh() {
       var h = window.visualViewport ? window.visualViewport.height : window.innerHeight;
@@ -1173,14 +1139,17 @@ const indexHtml = `<!DOCTYPE html>
       toggleBar();
     });
 
-    // Scroll to bottom button
-    document.getElementById('scroll-bottom').addEventListener('click', function(e) {
+    // Scroll to bottom buttons (desktop + mobile duplicate)
+    function handleScrollBottom(e) {
       e.preventDefault();
       autoScroll = true;
       scrollToCursor();
       if (isMobile && xtermTextarea) xtermTextarea.blur();
       else term.focus();
-    });
+    }
+    document.getElementById('scroll-bottom').addEventListener('click', handleScrollBottom);
+    var scrollBottomMobile = document.getElementById('scroll-bottom-mobile');
+    if (scrollBottomMobile) scrollBottomMobile.addEventListener('click', handleScrollBottom);
 
     // Select/Copy mode: show terminal text in a selectable overlay
     var copyOverlay = document.getElementById('copy-overlay');
@@ -1383,11 +1352,13 @@ const indexHtml = `<!DOCTYPE html>
     const voiceBar = document.getElementById('voice-bar');
     const fontControls = document.getElementById('font-controls');
     const backBtn = document.getElementById('back-btn');
+    var backBtnMobile = document.getElementById('back-btn-mobile');
     var specialKeys = document.getElementById('special-keys');
     var scrollBtn = document.getElementById('scroll-bottom');
+    var scrollBtnMobile = document.getElementById('scroll-bottom-mobile');
     var filesBtn = document.getElementById('files-btn');
     function isExcluded(el) {
-      return (fontControls && fontControls.contains(el)) || (backBtn && backBtn.contains(el)) || (specialKeys && specialKeys.contains(el)) || (filesBtn && filesBtn.contains(el));
+      return (fontControls && fontControls.contains(el)) || (backBtn && backBtn.contains(el)) || (backBtnMobile && backBtnMobile.contains(el)) || (specialKeys && specialKeys.contains(el)) || (filesBtn && filesBtn.contains(el)) || (scrollBtnMobile && scrollBtnMobile.contains(el));
     }
     voiceBar.addEventListener('touchstart', (e) => {
       if (isExcluded(e.target)) return;
@@ -1811,7 +1782,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Handle session rename POST (requires authentication)
+  // Handle session rename POST — proxy to PTY service
   if ((req.url === '/rename' || req.url === '/terminal/rename') && req.method === 'POST') {
     if (!isAuthenticated(req)) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -1820,25 +1791,17 @@ const server = http.createServer(async (req, res) => {
     }
     const chunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
-    req.on('end', () => {
+    req.on('end', async () => {
       try {
         const { session, name } = JSON.parse(Buffer.concat(chunks).toString());
-        const s = sessions.get(session);
-        if (!s) {
-          res.writeHead(404, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: 'Session not found' }));
-          return;
-        }
-        const trimmed = (name || '').trim().substring(0, 100);
-        if (!trimmed) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: 'Name cannot be empty' }));
-          return;
-        }
-        s.name = trimmed;
-        invalidateSessionsCache();
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true }));
+        const resp = await ptyFetch(`/sessions/${encodeURIComponent(session)}/rename`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
+        const data = await resp.json();
+        res.writeHead(resp.status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(data));
       } catch {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: 'Bad request' }));
@@ -1865,15 +1828,37 @@ const server = http.createServer(async (req, res) => {
   if ((pathname === '/terminal/files' || pathname === '/files') && req.method === 'GET') {
     try {
       const sid = parsedUrl.searchParams.get('session');
-      const session = sid ? sessions.get(sid) : null;
-      if (!session) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Session not found' })); return; }
+      if (!sid) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Session not found' })); return; }
 
       let requestedPath = parsedUrl.searchParams.get('path') || '';
       let dirPath: string;
       if (!requestedPath) {
-        dirPath = await getSessionCwd(session);
+        // Get CWD from PTY service
+        try {
+          const cwdResp = await ptyFetch(`/sessions/${encodeURIComponent(sid)}/cwd`);
+          if (cwdResp.ok) {
+            const cwdData = await cwdResp.json() as { cwd: string };
+            dirPath = cwdData.cwd;
+          } else {
+            dirPath = process.env.HOME || '/';
+          }
+        } catch {
+          dirPath = process.env.HOME || '/';
+        }
       } else {
         dirPath = resolveSafePath(requestedPath);
+      }
+
+      // Get CWD for response (may differ from dirPath)
+      let sessionCwd = dirPath;
+      if (requestedPath) {
+        try {
+          const cwdResp = await ptyFetch(`/sessions/${encodeURIComponent(sid)}/cwd`);
+          if (cwdResp.ok) {
+            const cwdData = await cwdResp.json() as { cwd: string };
+            sessionCwd = cwdData.cwd;
+          }
+        } catch {}
       }
 
       const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
@@ -1898,7 +1883,7 @@ const server = http.createServer(async (req, res) => {
       });
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ path: dirPath, cwd: await getSessionCwd(session), items }));
+      res.end(JSON.stringify({ path: dirPath, cwd: sessionCwd, items }));
     } catch (e: any) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message || 'Failed to list directory' }));
@@ -1908,10 +1893,6 @@ const server = http.createServer(async (req, res) => {
 
   if ((pathname === '/terminal/download' || pathname === '/download') && req.method === 'GET') {
     try {
-      const sid = parsedUrl.searchParams.get('session');
-      const session = sid ? sessions.get(sid) : null;
-      if (!session) { res.writeHead(404); res.end('Session not found'); return; }
-
       const requestedPath = parsedUrl.searchParams.get('path') || '';
       if (!requestedPath) { res.writeHead(400); res.end('Path required'); return; }
       const filePath = resolveSafePath(requestedPath);
@@ -1937,10 +1918,6 @@ const server = http.createServer(async (req, res) => {
 
   if ((pathname === '/terminal/preview' || pathname === '/preview') && req.method === 'GET') {
     try {
-      const sid = parsedUrl.searchParams.get('session');
-      const session = sid ? sessions.get(sid) : null;
-      if (!session) { res.writeHead(404); res.end('Session not found'); return; }
-
       const requestedPath = parsedUrl.searchParams.get('path') || '';
       if (!requestedPath) { res.writeHead(400); res.end('Path required'); return; }
       const filePath = resolveSafePath(requestedPath);
@@ -1991,15 +1968,52 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // --- Clipboard image upload ---
+  if ((pathname === '/terminal/upload' || pathname === '/upload') && req.method === 'POST') {
+    const UPLOAD_DIR = '/tmp/hopcode-clipboard';
+    const contentType = req.headers['content-type'] || 'image/png';
+    const extMap: Record<string, string> = {
+      'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif',
+      'image/webp': 'webp', 'image/bmp': 'bmp', 'image/svg+xml': 'svg',
+    };
+    const ext = extMap[contentType] || 'png';
+    const fileName = `img-${Date.now()}.${ext}`;
+    const filePath = path.join(UPLOAD_DIR, fileName);
+
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', async () => {
+      try {
+        await fs.promises.mkdir(UPLOAD_DIR, { recursive: true });
+        await fs.promises.writeFile(filePath, Buffer.concat(chunks));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ path: filePath }));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message || 'Upload failed' }));
+      }
+    });
+    req.resume();
+    return;
+  }
+
   // Everything goes through /terminal so the reverse proxy forwards it
   const url = new URL(req.url || '/', `http://${req.headers.host}`);
   const action = url.searchParams.get('action');
   const sessionId = url.searchParams.get('session');
 
-  // Create new session: /terminal?action=new
+  // Create new session: /terminal?action=new — proxy to PTY service
   if (action === 'new') {
     const id = 'sess_' + randomBytes(12).toString('hex');
-    createSession(id);
+    try {
+      await ptyFetch('/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      });
+    } catch (e) {
+      console.error('Failed to create session via PTY service:', e);
+    }
     res.writeHead(302, { 'Location': '/terminal?session=' + encodeURIComponent(id) });
     res.end();
     return;
@@ -2014,62 +2028,76 @@ const server = http.createServer(async (req, res) => {
 
   // Session chooser (default for /terminal with no params, or any other path)
   res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
-  res.end(buildSessionsHtml());
+  res.end(await buildSessionsHtml());
 });
 
-// Terminal WebSocket server
+// Terminal WebSocket server — proxies to PTY service
 const terminalWss = new WebSocketServer({ noServer: true });
-terminalWss.on('connection', (ws, req) => {
-  // Extract session ID from URL query
+terminalWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
   const url = new URL(req.url!, `http://${req.headers.host}`);
   const sessionId = url.searchParams.get('session') || 'default';
 
-  const session = getSession(sessionId);
-  session.clients.add(ws);
-  invalidateSessionsCache();
-  console.log(`Terminal client connected: ${sessionId}`);
+  // Connect to PTY service WebSocket
+  const ptyWsUrl = `ws://127.0.0.1:${PTY_SERVICE_PORT}/ws/${encodeURIComponent(sessionId)}`;
+  const ptyWs = new WebSocket(ptyWsUrl, {
+    headers: { [PTY_INTERNAL_TOKEN_HEADER]: PTY_INTERNAL_TOKEN },
+  });
 
-  // Send session info (name for tab title)
-  ws.send(JSON.stringify({ type: 'session_info', name: session.name }));
+  let ptyReady = false;
+  const pendingMessages: (string | Buffer)[] = [];
 
-  // Send serialized terminal state (current screen + some scrollback) instead of raw replay
-  try {
-    const serialized = session.serializeAddon.serialize({ scrollback: 500 });
-    if (serialized) {
-      ws.send(JSON.stringify({ type: 'scrollback', data: serialized }));
+  ptyWs.on('open', () => {
+    ptyReady = true;
+    // Flush pending messages
+    for (const msg of pendingMessages) {
+      ptyWs.send(msg);
     }
-  } catch (e) {
-    console.error('Serialize error:', e);
-  }
+    pendingMessages.length = 0;
+    console.log(`Terminal proxy connected: ${sessionId}`);
+  });
 
-  ws.on('message', (message) => {
-    try {
-      const msg = JSON.parse(message.toString());
-      if (msg.type === 'input') {
-        session.pty.write(msg.data);
-      } else if (msg.type === 'resize') {
-        try {
-          if (msg.cols > 0 && msg.rows > 0) {
-            session.pty.resize(msg.cols, msg.rows);
-            session.headlessTerm.resize(msg.cols, msg.rows);
-          }
-        } catch (e) {
-          // Ignore resize errors (can happen during session transitions)
-        }
-      } else if (msg.type === 'asr') {
-        console.log(`ASR input: "${msg.text}"`);
-        // Direct write: text + carriage return
-        session.pty.write(msg.text + '\r');
-      }
-    } catch (e) {
-      console.error('Parse error:', e);
+  // PTY service -> browser: transparent forward (preserve text/binary frame type)
+  ptyWs.on('message', (data: Buffer | string, isBinary: boolean) => {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send(data, { binary: isBinary });
     }
   });
 
-  ws.on('close', () => {
-    session.clients.delete(ws);
-    invalidateSessionsCache();
-    console.log(`Terminal client disconnected: ${sessionId}`);
+  // Browser -> PTY service: transparent forward
+  clientWs.on('message', (data: Buffer | string, isBinary: boolean) => {
+    if (ptyReady && ptyWs.readyState === WebSocket.OPEN) {
+      ptyWs.send(data, { binary: isBinary });
+    } else {
+      pendingMessages.push(data);
+    }
+  });
+
+  // Close handling
+  clientWs.on('close', () => {
+    console.log(`Terminal proxy client disconnected: ${sessionId}`);
+    if (ptyWs.readyState === WebSocket.OPEN || ptyWs.readyState === WebSocket.CONNECTING) {
+      ptyWs.close();
+    }
+  });
+
+  ptyWs.on('close', () => {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.close();
+    }
+  });
+
+  ptyWs.on('error', (err) => {
+    console.error(`PTY proxy error for ${sessionId}:`, err.message);
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.close();
+    }
+  });
+
+  clientWs.on('error', (err) => {
+    console.error(`Client proxy error for ${sessionId}:`, err.message);
+    if (ptyWs.readyState === WebSocket.OPEN) {
+      ptyWs.close();
+    }
   });
 });
 
