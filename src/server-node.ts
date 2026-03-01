@@ -616,7 +616,7 @@ const indexHtml = `<!DOCTYPE html>
     body.mobile #scroll-bottom { display: none; }
     body.mobile #back-btn-mobile { padding: 4px 5px; font-size: 10px; flex-shrink: 0; color: #4ade80; text-decoration: none; background: #1a1a2e; border-radius: 6px; white-space: nowrap; }
     body.mobile #scroll-bottom-mobile { min-width: 0; height: 34px; font-size: 14px; flex: 1; background: #333; border: none; color: #fff; border-radius: 6px; cursor: pointer; -webkit-tap-highlight-color: transparent; padding: 0; }
-    body.mobile #voice-bar.collapsed { display: none; }
+    #voice-bar.collapsed { display: none; }
     /* --- File Browser --- */
     #file-browser {
       position: fixed; top: 0; right: -100%; width: 100%; max-width: 480px; height: 100%;
