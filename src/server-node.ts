@@ -581,8 +581,8 @@ const indexHtml = `<!DOCTYPE html>
       pointer-events: none; transition: top 0.15s ease;
     }
     .float-key {
-      width: 52px; height: 52px; border-radius: 12px; border: 2px solid rgba(51,51,51,0.5);
-      background: rgba(22,33,62,0.4); color: rgba(224,224,224,0.5); font-size: 18px; font-weight: 600;
+      width: 42px; height: 42px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.45);
+      background: rgba(22,33,62,0.6); color: rgba(74,222,128,0.85); font-size: 14px; font-weight: 600;
       font-family: system-ui; cursor: pointer; display: flex; align-items: center; justify-content: center;
       -webkit-tap-highlight-color: transparent;
       transition: border-color 0.15s, background 0.15s, color 0.15s;
@@ -939,6 +939,8 @@ const indexHtml = `<!DOCTYPE html>
       if (termWs && termWs.readyState === 1) {
         termWs.send(JSON.stringify({ type: 'input', data: data }));
       }
+      autoScroll = true;
+      scrollToCursor();
     }
 
     // Mobile autocomplete fix — three layers:
@@ -1115,6 +1117,8 @@ const indexHtml = `<!DOCTYPE html>
         if (termWs && termWs.readyState === 1) {
           termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: getPtyRows() }));
         }
+        autoScroll = true;
+        scrollToCursor();
       }, 300);
     });
 
@@ -1404,11 +1408,11 @@ const indexHtml = `<!DOCTYPE html>
       'togglebar': function() { return null; }
     };
     var fkDefaults = [
+      { label: 'Bar', action: 'togglebar', chars: '' },
       { label: '1', action: 'char', chars: '1' },
       { label: '2', action: 'char', chars: '2' },
       { label: '3', action: 'char', chars: '3' },
-      { label: 'Ret', action: 'enter', chars: '' },
-      { label: '\\u25BE', action: 'togglebar', chars: '' }
+      { label: 'Ret', action: 'enter', chars: '' }
     ];
     var fkStorageKey = 'hopcode_float_keys';
     function fkLoad() {
@@ -1421,7 +1425,11 @@ const indexHtml = `<!DOCTYPE html>
     function fkSave(keys) {
       try { localStorage.setItem(fkStorageKey, JSON.stringify(keys)); } catch {}
     }
-    var fkKeys = fkLoad() || fkDefaults.slice();
+    var fkVersion = 2;
+    var fkSaved = fkLoad();
+    var fkSavedVer = parseInt(localStorage.getItem('hopcode_float_keys_v')) || 0;
+    var fkKeys = (fkSaved && fkSavedVer >= fkVersion) ? fkSaved : fkDefaults.slice();
+    if (fkSavedVer < fkVersion) { localStorage.setItem('hopcode_float_keys_v', String(fkVersion)); fkSave(fkKeys); }
     var fkContainer = document.getElementById('floating-keys');
     var fkConfigEl = document.getElementById('fk-config');
     var fkConfigLabel = document.getElementById('fk-cfg-label');
