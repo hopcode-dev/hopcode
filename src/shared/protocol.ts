@@ -16,6 +16,7 @@ export interface SessionInfo {
   id: string;
   name: string;
   createdAt: number;
+  lastActivity: number;
   clientCount: number;
 }
 

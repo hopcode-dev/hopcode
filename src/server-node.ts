@@ -354,15 +354,15 @@ const loginHtml = `<!DOCTYPE html>
 
 // Session chooser HTML page - generated dynamically with server-side rendering
 async function buildSessionsHtml(): Promise<string> {
-  let sessionList: { id: string; name: string; createdAt: number; clients: number }[] = [];
+  let sessionList: { id: string; name: string; createdAt: number; lastActivity: number; clients: number }[] = [];
   try {
     const resp = await ptyFetch('/sessions');
     if (resp.ok) {
       const list: SessionInfo[] = await resp.json() as SessionInfo[];
-      sessionList = list.map(s => ({ id: s.id, name: s.name, createdAt: s.createdAt, clients: s.clientCount }));
+      sessionList = list.map(s => ({ id: s.id, name: s.name, createdAt: s.createdAt, lastActivity: s.lastActivity, clients: s.clientCount }));
     }
   } catch {}
-  sessionList.sort((a, b) => b.createdAt - a.createdAt);
+  sessionList.sort((a, b) => b.lastActivity - a.lastActivity);
 
   function fmtAge(ts: number): string {
     const m = Math.floor((Date.now() - ts) / 60000);
@@ -386,7 +386,7 @@ async function buildSessionsHtml(): Promise<string> {
       const badgeClass = s.clients > 0 ? ' active' : '';
       cardsHtml += `<a class="session-card" href="/terminal?session=${encodeURIComponent(s.id)}">
         <div class="session-info"><div class="session-name" data-session="${esc(s.id)}"><span class="session-name-text">${esc(s.name)}</span><button class="rename-btn" title="Rename session">&#9998;</button></div>
-        <div class="session-meta">Created ${fmtAge(s.createdAt)}</div></div>
+        <div class="session-meta">Active ${fmtAge(s.lastActivity)} · Created ${fmtAge(s.createdAt)}</div></div>
         <span class="session-badge${badgeClass}">${cl}</span></a>`;
     }
   }
@@ -798,6 +798,13 @@ const indexHtml = `<!DOCTYPE html>
     term.open(termEl);
     fitAddon.fit();
     var visibleRows = term.rows;
+    var lastCols = term.cols, lastRows = 0;
+    function sendResize() {
+      var c = term.cols, r = getPtyRows();
+      if (c === lastCols) return;
+      lastCols = c; lastRows = r;
+      if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ type: 'resize', cols: c, rows: r }));
+    }
 
     // Hide xterm scrollbar but keep scrolling functional
     var xtermViewport = document.querySelector('.xterm-viewport');
@@ -883,9 +890,7 @@ const indexHtml = `<!DOCTYPE html>
       document.getElementById('font-size').textContent = fontSize + 'px';
       fitAddon.fit();
       visibleRows = term.rows;
-      if (typeof termWs !== 'undefined' && termWs.readyState === 1) {
-        termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: getPtyRows() }));
-      }
+      sendResize();
     }
 
     // Session ID from URL
@@ -920,7 +925,7 @@ const indexHtml = `<!DOCTYPE html>
       termWs.onopen = () => {
         document.getElementById('status').textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
         document.getElementById('status').style.background = '';
-        termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: getPtyRows() }));
+        lastCols = 0; lastRows = 0; sendResize();
       };
       termWs.onerror = () => {
         document.getElementById('status').textContent = 'WS error';
@@ -1096,9 +1101,12 @@ const indexHtml = `<!DOCTYPE html>
       }
     }, true);
 
-    // Fix mobile viewport height (100vh includes browser chrome)
+    // Fix mobile viewport height — only react to keyboard open/close (large changes), ignore address bar jitter
+    var lastVh = 0;
     function setVh() {
       var h = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+      if (lastVh && Math.abs(h - lastVh) < 50) return;
+      lastVh = h;
       document.getElementById('container').style.height = h + 'px';
     }
     if (isMobile) {
@@ -1114,9 +1122,7 @@ const indexHtml = `<!DOCTYPE html>
       resizeTimer = setTimeout(() => {
         fitAddon.fit();
         visibleRows = term.rows;
-        if (termWs && termWs.readyState === 1) {
-          termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: getPtyRows() }));
-        }
+        sendResize();
         autoScroll = true;
         scrollToCursor();
       }, 300);
@@ -1140,7 +1146,7 @@ const indexHtml = `<!DOCTYPE html>
     function toggleBar() {
       var bar = document.getElementById('voice-bar');
       bar.classList.toggle('collapsed');
-      setTimeout(function() { fitAddon.fit(); visibleRows = term.rows; if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: getPtyRows() })); }, 100);
+      setTimeout(function() { fitAddon.fit(); visibleRows = term.rows; }, 100);
     }
 
     // Hide bar button in row1
@@ -2211,15 +2217,14 @@ server.on('upgrade', (request, socket, head) => {
 // Start
 server.listen(PORT, () => {
   console.log(`
-╔════════════════════════════════════════════════╗
-║               hopcode                           ║
-╠════════════════════════════════════════════════╣
-║  Web UI:    http://localhost:${PORT}              ║
-║  Terminal:  ws://localhost:${PORT}/ws/terminal    ║
-║  Voice:     ws://localhost:${PORT}/ws/voice       ║
-╚════════════════════════════════════════════════╝
+      .-.   .-.
+     ( o ) ( o )
+      /  ¯¯¯¯  \\
+     |   >__    |
+      '--------'
+    h o p c o d e
 
-=== Server ready ===
+  http://localhost:${PORT}
 `);
 
   // Start Cloudflare Tunnel if requested via --tunnel flag or CLOUDFLARE_TUNNEL env

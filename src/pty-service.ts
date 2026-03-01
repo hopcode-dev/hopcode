@@ -42,6 +42,8 @@ interface Session {
   serializeAddon: InstanceType<typeof SerializeAddon>;
   name: string;
   createdAt: number;
+  lastActivity: number;
+  cursorHidden: boolean;
 }
 
 const sessions = new Map<string, Session>();
@@ -84,12 +86,18 @@ function createSession(id: string): Session {
     serializeAddon,
     name: `Session ${sessionCounter}`,
     createdAt: Date.now(),
+    lastActivity: Date.now(),
+    cursorHidden: false,
   };
 
   console.log(`[pty-service] Created session: ${id} - ${session.name}`);
 
   // Broadcast PTY output to all connected internal WS clients
   ptyProcess.onData((data) => {
+    session.lastActivity = Date.now();
+    // Track DECTCEM cursor visibility: \e[?25l = hide, \e[?25h = show
+    if (data.includes('\x1b[?25l')) session.cursorHidden = true;
+    if (data.includes('\x1b[?25h')) session.cursorHidden = false;
     session.headlessTerm.write(data);
     const message = JSON.stringify({ type: 'output', data });
     for (const client of session.clients) {
@@ -155,6 +163,7 @@ const server = http.createServer(async (req, res) => {
       id,
       name: s.name,
       createdAt: s.createdAt,
+      lastActivity: s.lastActivity,
       clientCount: s.clients.size,
     }));
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -258,10 +267,11 @@ wss.on('connection', (ws, req) => {
   // Send session info
   ws.send(JSON.stringify({ type: 'session_info', name: session.name }));
 
-  // Send scrollback
+  // Send scrollback + restore cursor visibility
   try {
-    const serialized = session.serializeAddon.serialize({ scrollback: 500 });
+    let serialized = session.serializeAddon.serialize({ scrollback: 500 });
     if (serialized) {
+      if (session.cursorHidden) serialized += '\x1b[?25l';
       ws.send(JSON.stringify({ type: 'scrollback', data: serialized }));
     }
   } catch (e) {
@@ -274,7 +284,8 @@ wss.on('connection', (ws, req) => {
       if (msg.type === 'input') {
         session.pty.write(msg.data);
       } else if (msg.type === 'resize') {
-        if (msg.cols > 0 && msg.rows > 0) {
+        if (msg.cols > 0 && msg.rows > 0 &&
+            (msg.cols !== session.pty.cols || msg.rows !== session.pty.rows)) {
           try {
             session.pty.resize(msg.cols, msg.rows);
             session.headlessTerm.resize(msg.cols, msg.rows);
