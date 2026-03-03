@@ -2326,8 +2326,9 @@ const indexHtml = `<!DOCTYPE html>
     if (isMobile && window.visualViewport) {
       function repositionFloatKeys() {
         var vv = window.visualViewport;
-        var visibleBottom = vv.offsetTop + vv.height;
-        var midY = vv.offsetTop + vv.height / 2;
+        var bar = document.getElementById('voice-bar');
+        var barH = (bar && !bar.classList.contains('collapsed')) ? bar.offsetHeight : 0;
+        var midY = vv.offsetTop + (vv.height - barH) / 2;
         fkContainer.style.top = midY + 'px';
       }
       window.visualViewport.addEventListener('resize', repositionFloatKeys);
@@ -2909,6 +2910,27 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // URL token authentication: ?token=username:hmac → set cookie → redirect
+  const tokenParam = parsedUrl.searchParams.get('token');
+  if (tokenParam) {
+    const username = verifyAuthToken(tokenParam);
+    if (username) {
+      const isSecure = req.headers['x-forwarded-proto'] === 'https' || (req.socket as any).encrypted;
+      const securePart = isSecure ? ' Secure;' : '';
+      const authToken = makeAuthToken(username);
+      // Strip token param from URL to avoid leaking it in browser history
+      parsedUrl.searchParams.delete('token');
+      const cleanUrl = parsedUrl.pathname + (parsedUrl.search || '');
+      res.writeHead(302, {
+        'Location': cleanUrl || '/',
+        'Set-Cookie': `auth=${authToken}; Path=/; Max-Age=86400; SameSite=Lax; HttpOnly;${securePart}`,
+      });
+      res.end();
+      return;
+    }
+    // Invalid token — fall through to normal auth check
+  }
+
   // Check authentication
   const auth = getAuthInfo(req);
   if (!auth.authenticated) {
@@ -3411,7 +3433,8 @@ server.listen(PORT, () => {
 });
 
 function startCloudflareTunnel() {
-  const tunnelProc = spawn('cloudflared', ['tunnel', '--url', `http://localhost:${PORT}`], {
+  // Use npx cloudflared so the npm package auto-downloads the binary if not present
+  const tunnelProc = spawn('npx', ['cloudflared', 'tunnel', '--url', `http://localhost:${PORT}`], {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 

@@ -11,6 +11,7 @@
     "start:ui": "npx tsx src/server-node.ts",
     "start:pty": "npx tsx src/pty-service.ts",
     "start:tunnel": "npx tsx src/server-node.ts --tunnel",
+    "go": "npx tsx src/quick.ts",
     "dev": "npx tsx src/pty-service.ts & npx tsx --watch src/server-node.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun run src/test-all.ts"
@@ -49,6 +50,7 @@
   "dependencies": {
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/headless": "^6.0.0",
+    "cloudflared": "^0.7.1",
     "dotenv": "^17.2.4",
     "node-pty": "^1.1.0",
     "sharp": "^0.34.5",

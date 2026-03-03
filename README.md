@@ -1,7 +1,6 @@
 <div align="center">
 
-<!-- TODO: Replace with actual logo -->
-<!-- <img src="media/logo.png" width="120" alt="Hopcode logo" /> -->
+<img src="media/logo.svg" width="120" alt="Hopcode logo" />
 
 # hopcode
 
@@ -26,7 +25,7 @@ A web-based terminal you can access from any device — with voice input, a file
 - **Code from anywhere** — access your dev machine from your phone, tablet, or any browser
 - **Voice input** — hold to talk, speech goes straight to your terminal via streaming ASR
 - **File browser** — Finder-style panel with swipe gestures, upload, rename, delete
-- **Image paste** — paste or upload images directly from clipboard
+- **File upload** — upload files from your device or paste images from clipboard
 - **Session management** — multiple named sessions, reconnect without losing state
 - **Mobile-first UI** — floating keys, swipe gestures, bottom bar, touch-optimized
 - **Self-hosted** — your code stays on your machine, password-protected
@@ -35,32 +34,36 @@ A web-based terminal you can access from any device — with voice input, a file
 ## Quick Start
 
 ```bash
-# Clone and install
 git clone https://github.com/hopcode-dev/hopcode.git
 cd hopcode
 bun install
-
-# Configure
-echo "AUTH_PASSWORD=yourpassword" > .env
-
-# Start
-pm2 start ecosystem.config.cjs
-
-# Open
-open http://localhost:3000
+bun run go
 ```
+
+That's it. A public HTTPS URL with an auth token is printed to your terminal — open it on your phone and you're in.
 
 ### Docker
 
 ```bash
 docker build -t hopcode .
-docker run -p 3000:3000 -e AUTH_PASSWORD=yourpassword hopcode
+docker run -it --rm -v "$HOME":"$HOME" -w "$HOME" hopcode
 ```
 
-### Remote Access
+The `-v` flag mounts your home directory into the container at the same path, so CLI tools (Claude Code, etc.) can access your files.
+
+### Manual Setup
+
+For more control (e.g. pm2 process management, custom password):
 
 ```bash
-# Expose via Cloudflare Tunnel (prints a public HTTPS URL)
+echo "AUTH_PASSWORD=yourpassword" > .env
+pm2 start ecosystem.config.cjs
+open http://localhost:3000
+```
+
+To expose via Cloudflare Tunnel manually:
+
+```bash
 AUTH_PASSWORD=yourpassword npx tsx src/server-node.ts --tunnel
 ```
 
