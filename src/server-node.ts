@@ -1023,6 +1023,7 @@ const indexHtml = `<!DOCTYPE html>
     }
     .float-key:active { background: rgba(74,222,128,0.8); color: #000; border-color: rgba(74,222,128,0.8); }
     .float-key:hover { border-color: rgba(74,222,128,0.5); color: rgba(224,224,224,0.8); }
+    .fk-hidden .float-key { display: none !important; }
     .float-key-config {
       display: none; position: fixed; z-index: 200; background: #16213e; border: 2px solid #4ade80;
       border-radius: 12px; padding: 16px; font-family: system-ui; color: #e0e0e0;
@@ -1314,19 +1315,24 @@ const indexHtml = `<!DOCTYPE html>
     var touchVelocity = 0;
     var momentumId = 0;
     var xtermScreen = document.querySelector('.xterm-screen');
+    var cachedCellHeight = 0;
+    function getCellHeight() {
+      if (!cachedCellHeight && xtermScreen) cachedCellHeight = xtermScreen.offsetHeight / term.rows;
+      return cachedCellHeight || 16;
+    }
     if (isMobile && xtermScreen) {
       xtermScreen.addEventListener('touchstart', function(e) {
         cancelAnimationFrame(momentumId);
         touchLastY = e.touches[0].clientY;
         touchVelocity = 0;
+        cachedCellHeight = xtermScreen.offsetHeight / term.rows;
       }, { passive: true });
       xtermScreen.addEventListener('touchmove', function(e) {
         e.preventDefault();
         var y = e.touches[0].clientY;
         var delta = touchLastY - y;
         touchVelocity = delta;
-        var cellHeight = xtermScreen.offsetHeight / term.rows;
-        var lines = Math.round(delta / cellHeight);
+        var lines = Math.round(delta / getCellHeight());
         if (lines !== 0) {
           term.scrollLines(lines);
           touchLastY = y;
@@ -1336,10 +1342,10 @@ const indexHtml = `<!DOCTYPE html>
       xtermScreen.addEventListener('touchend', function() {
         // Momentum scrolling
         var v = touchVelocity;
+        var ch = getCellHeight();
         function momentumStep() {
           if (Math.abs(v) < 1) return;
-          var cellHeight = xtermScreen.offsetHeight / term.rows;
-          var lines = Math.round(v / cellHeight);
+          var lines = Math.round(v / ch);
           if (lines !== 0) term.scrollLines(lines);
           v *= 0.92;
           momentumId = requestAnimationFrame(momentumStep);
@@ -1572,25 +1578,34 @@ const indexHtml = `<!DOCTYPE html>
 
     // Fix mobile viewport height — only react to keyboard open/close (large changes), ignore address bar jitter
     var lastVh = 0;
+    var containerEl = document.getElementById('container');
+    var _vhRafPending = false;
     function setVh() {
       var h = window.visualViewport ? window.visualViewport.height : window.innerHeight;
       if (lastVh && Math.abs(h - lastVh) < 50) return;
       lastVh = h;
-      document.getElementById('container').style.height = h + 'px';
+      containerEl.style.height = h + 'px';
+    }
+    function setVhThrottled() {
+      if (_vhRafPending) return;
+      _vhRafPending = true;
+      requestAnimationFrame(function() { _vhRafPending = false; setVh(); });
     }
     if (isMobile) {
       setVh();
-      if (window.visualViewport) window.visualViewport.addEventListener('resize', setVh);
+      if (window.visualViewport) window.visualViewport.addEventListener('resize', setVhThrottled);
     }
 
     // Debounced resize to avoid PTY redraw storms (e.g. mobile keyboard toggle)
     var resizeTimer = null;
     window.addEventListener('resize', () => {
-      if (isMobile) setVh();
+      if (isMobile) setVhThrottled();
+      cachedCellHeight = 0; // invalidate cached cell height
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         fitAddon.fit();
         visibleRows = term.rows;
+        cachedCellHeight = 0; // invalidate again after fit
         sendResize();
         autoScroll = true;
         scrollToCursor();
@@ -2006,6 +2021,10 @@ const indexHtml = `<!DOCTYPE html>
     let isRecording = false, audioReady = false;
     var pendingAsrText = ''; // Accumulate ASR text, send only when recording ends
     var asrFlushed = false; // Prevent flushing more than once per recording
+    var wantsToStop = false; // Track if stop was requested during async acquireMic
+    var micReleaseTimer = null; // Delayed mic release
+
+    var defaultStatusText = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
 
     function flushAsrText() {
       if (asrFlushed) return;
@@ -2014,11 +2033,16 @@ const indexHtml = `<!DOCTYPE html>
         text.textContent = pendingAsrText;
         status.textContent = 'Sending to terminal...';
         termWs.send(JSON.stringify({ type: 'asr', text: pendingAsrText }));
-        setTimeout(function() { status.textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak'; }, 2000);
+        setTimeout(function() { status.textContent = defaultStatusText; }, 2000);
       } else {
-        status.textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
+        status.textContent = defaultStatusText;
       }
       pendingAsrText = '';
+    }
+
+    function scheduleMicRelease() {
+      clearTimeout(micReleaseTimer);
+      micReleaseTimer = setTimeout(releaseMic, 60000);
     }
 
     function connectVoice() {
@@ -2037,6 +2061,10 @@ const indexHtml = `<!DOCTYPE html>
         } else if (d.type === 'asr_partial' && d.text) {
           pendingAsrText = d.text;
           text.textContent = d.text;
+        } else if (d.type === 'error') {
+          // ASR failed — reset immediately instead of waiting for timeout
+          clearTimeout(processingTimeout);
+          flushAsrText();
         }
       };
       voiceWs.onclose = () => {
@@ -2044,10 +2072,11 @@ const indexHtml = `<!DOCTYPE html>
         clearTimeout(stopRecTimer);
         stopRecTimer = null;
         isRecording = false;
-        releaseMic();
+        wantsToStop = false;
+        scheduleMicRelease();
         status.classList.remove('recording');
         if (status.textContent === 'Processing...' || status.textContent === 'Finishing...' || status.textContent === 'Recording...') {
-          status.textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
+          status.textContent = defaultStatusText;
         }
         setTimeout(connectVoice, 2000);
       };
@@ -2099,8 +2128,18 @@ const indexHtml = `<!DOCTYPE html>
 
     async function startRec() {
       if (isRecording) return;
+      clearTimeout(micReleaseTimer);
+      wantsToStop = false;
       var ok = await acquireMic();
       if (!ok) return;
+      // Check if user released finger while we were acquiring mic
+      if (wantsToStop) {
+        wantsToStop = false;
+        scheduleMicRelease();
+        status.textContent = defaultStatusText;
+        status.classList.remove('recording');
+        return;
+      }
       if (audioContext.state === 'suspended') audioContext.resume();
       isRecording = true;
       asrFlushed = false;
@@ -2115,6 +2154,7 @@ const indexHtml = `<!DOCTYPE html>
     var stopRecTimer = null;
     var stopRecRequestedAt = 0;
     function stopRec() {
+      wantsToStop = true;
       if (!isRecording) return;
       // Keep recording for 1000ms to capture trailing sound, then finalize
       if (!stopRecTimer) {
@@ -2126,15 +2166,15 @@ const indexHtml = `<!DOCTYPE html>
           if (!isRecording) return;
           isRecording = false;
           if (voiceWs?.readyState === 1) voiceWs.send(JSON.stringify({ type: 'asr_end' }));
-          releaseMic();
+          scheduleMicRelease();
           status.textContent = 'Processing...';
           clearTimeout(processingTimeout);
           processingTimeout = setTimeout(function() {
-            // Safety: if no final ASR result after 10s, flush whatever we have
+            // Safety: if no final ASR result after 5s, flush whatever we have
             if (status.textContent === 'Processing...') {
               flushAsrText();
             }
-          }, 10000);
+          }, 5000);
         }, 1000);
       }
     }
@@ -2153,7 +2193,7 @@ const indexHtml = `<!DOCTYPE html>
         altCombined = true;
         if (isRecording) {
           stopRec();
-          status.textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
+          status.textContent = defaultStatusText;
         }
       }
     }, true);
@@ -2165,7 +2205,7 @@ const indexHtml = `<!DOCTYPE html>
           // Combined with other key or too short - discard
           if (isRecording) {
             stopRec();
-            status.textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
+            status.textContent = defaultStatusText;
           }
         } else {
           stopRec();
@@ -2207,7 +2247,7 @@ const indexHtml = `<!DOCTYPE html>
 
     // Update status text for mobile
     if (isMobile) {
-      status.textContent = 'Hold here to speak';
+      status.textContent = defaultStatusText;
     }
 
     // --- Floating quick-keys (customizable) ---
@@ -2324,10 +2364,8 @@ const indexHtml = `<!DOCTYPE html>
     var fkHidden = localStorage.getItem('hopcode_fk_hidden') === '1';
     var fkHideBtn = document.getElementById('menu-fk-hide');
     function fkApplyVisibility() {
-      // Hide individual float-key buttons but keep bar-handle visible
-      fkContainer.querySelectorAll('.float-key').forEach(function(btn) {
-        btn.style.display = fkHidden ? 'none' : '';
-      });
+      // Toggle visibility via class on container (avoids per-button DOM queries)
+      fkContainer.classList.toggle('fk-hidden', fkHidden);
       fkHideBtn.textContent = fkHidden ? 'Show' : 'Hide';
     }
     fkApplyVisibility();
@@ -2338,14 +2376,19 @@ const indexHtml = `<!DOCTYPE html>
       fkApplyVisibility();
     });
 
-    // Reposition floating keys when keyboard appears/disappears
+    // Reposition floating keys when keyboard appears/disappears (throttled to 1 rAF)
     if (isMobile && window.visualViewport) {
+      var _fkRafPending = false;
       function repositionFloatKeys() {
-        var vv = window.visualViewport;
-        var bar = document.getElementById('voice-bar');
-        var barH = (bar && !bar.classList.contains('collapsed')) ? bar.offsetHeight : 0;
-        var midY = vv.offsetTop + (vv.height - barH) / 2;
-        fkContainer.style.top = midY + 'px';
+        if (_fkRafPending) return;
+        _fkRafPending = true;
+        requestAnimationFrame(function() {
+          _fkRafPending = false;
+          var vv = window.visualViewport;
+          var barH = (voiceBar && !voiceBar.classList.contains('collapsed')) ? voiceBar.offsetHeight : 0;
+          var midY = vv.offsetTop + (vv.height - barH) / 2;
+          fkContainer.style.top = midY + 'px';
+        });
       }
       window.visualViewport.addEventListener('resize', repositionFloatKeys);
       window.visualViewport.addEventListener('scroll', repositionFloatKeys);
