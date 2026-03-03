@@ -20,7 +20,7 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const PROJECT_ROOT = resolve(__dirname, '..');
-const TSX = resolve(PROJECT_ROOT, 'node_modules', '.bin', 'tsx');
+const TSX_CLI = resolve(PROJECT_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs');
 
 const PORT = parseInt(process.env.PORT || '3000');
 const children: ChildProcess[] = [];
@@ -50,27 +50,8 @@ function makeAuthToken(password: string, username: string): string {
 }
 
 function preflight() {
-  if (!existsSync(TSX)) {
+  if (!existsSync(TSX_CLI)) {
     console.error('  tsx not found. Run: bun install');
-    process.exit(1);
-  }
-
-  // Check node-pty native module
-  try {
-    execSync('node -e "require(\'node-pty\')"', {
-      cwd: PROJECT_ROOT,
-      stdio: 'ignore',
-      timeout: 5000,
-    });
-  } catch {
-    console.error(`
-  node-pty native module not built.
-  If you used bun install, run:
-
-    bun pm trust node-pty && bun install
-
-  Then try again.
-`);
     process.exit(1);
   }
 }
@@ -83,15 +64,19 @@ async function main() {
   const env = { ...process.env, AUTH_PASSWORD: password };
 
   // Start PTY service
-  const pty = spawn(TSX, ['src/pty-service.ts'], {
+  const pty = spawn('node', [TSX_CLI, 'src/pty-service.ts'], {
     cwd: PROJECT_ROOT,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   children.push(pty);
+  pty.stdout?.on('data', (d: Buffer) => {
+    const text = d.toString();
+    if (!text.includes('ExperimentalWarning')) process.stderr.write(`[pty] ${text}`);
+  });
   pty.stderr?.on('data', (d: Buffer) => {
-    const line = d.toString();
-    if (!line.includes('ExperimentalWarning')) process.stderr.write(`[pty] ${line}`);
+    const text = d.toString();
+    if (!text.includes('ExperimentalWarning')) process.stderr.write(`[pty] ${text}`);
   });
   pty.on('error', (err) => {
     console.error(`Failed to start PTY service: ${err.message}`);
@@ -101,7 +86,7 @@ async function main() {
   });
 
   // Start UI service with tunnel
-  const ui = spawn(TSX, ['src/server-node.ts', '--tunnel'], {
+  const ui = spawn('node', [TSX_CLI, 'src/server-node.ts', '--tunnel'], {
     cwd: PROJECT_ROOT,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -112,8 +97,9 @@ async function main() {
 
   function handleOutput(data: Buffer) {
     const text = data.toString();
+    // Forward child output for debugging (filter noise)
     for (const line of text.split('\n')) {
-      if (line.includes('ExperimentalWarning')) continue;
+      if (!line.trim() || line.includes('ExperimentalWarning')) continue;
 
       // Detect tunnel URL
       const match = line.match(/(https:\/\/[a-z0-9-]+\.trycloudflare\.com)/);
@@ -129,6 +115,9 @@ async function main() {
   Local: http://localhost:${PORT}
   Press Ctrl+C to stop
 `);
+      } else if (!tunnelUrl) {
+        // Show child output until tunnel is established (helps debug startup issues)
+        process.stderr.write(`[ui] ${line}\n`);
       }
     }
   }
