@@ -1,0 +1,4 @@
+{
+  "alice": { "password": "alice-hopcode-password", "linuxUser": "alice" },
+  "bob":   { "password": "bob-hopcode-password",   "linuxUser": "bob" }
+}

@@ -19,12 +19,13 @@ process.on('unhandledRejection', (err: any) => {
 import 'dotenv/config';
 import * as http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
-import { spawn } from 'child_process';
+import { spawn, execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import * as zlib from 'zlib';
 import { fileURLToPath } from 'url';
-import { randomUUID, randomBytes } from 'crypto';
+import { randomUUID, randomBytes, createHmac } from 'crypto';
 
 import {
   PTY_SERVICE_PORT,
@@ -43,7 +44,141 @@ if (!PASSWORD) {
   console.error('  Example: AUTH_PASSWORD=your-secret-password npx tsx src/server-node.ts');
   process.exit(1);
 }
-const AUTH_TOKEN = 'hopcode_auth_' + Buffer.from(PASSWORD).toString('base64');
+const LEGACY_AUTH_TOKEN = 'hopcode_auth_' + Buffer.from(PASSWORD).toString('base64');
+
+// --- Multi-user support ---
+interface UserConfig {
+  password: string;
+  linuxUser: string;
+}
+
+let usersConfig: Record<string, UserConfig> = {};
+let isMultiUser = false;
+
+function loadUsersConfig(): void {
+  const usersPath = path.join(__dirname, '..', 'users.json');
+  try {
+    const data = fs.readFileSync(usersPath, 'utf-8');
+    usersConfig = JSON.parse(data);
+    isMultiUser = Object.keys(usersConfig).length > 0;
+    if (isMultiUser) {
+      console.log(`[auth] Multi-user mode: ${Object.keys(usersConfig).length} user(s) loaded from users.json`);
+    }
+  } catch {
+    usersConfig = {};
+    isMultiUser = false;
+    console.log('[auth] Single-user mode (no users.json found)');
+  }
+}
+loadUsersConfig();
+
+function makeAuthToken(username: string): string {
+  const hmac = createHmac('sha256', PASSWORD!).update(username).digest('hex');
+  return `${username}:${hmac}`;
+}
+
+function verifyAuthToken(token: string): string | null {
+  const colonIdx = token.indexOf(':');
+  if (colonIdx < 1) return null;
+  const username = token.substring(0, colonIdx);
+  const expected = makeAuthToken(username);
+  // Constant-time compare
+  if (token.length !== expected.length) return null;
+  let diff = 0;
+  for (let i = 0; i < token.length; i++) {
+    diff |= token.charCodeAt(i) ^ expected.charCodeAt(i);
+  }
+  return diff === 0 ? username : null;
+}
+
+interface AuthInfo {
+  authenticated: boolean;
+  username: string;
+  linuxUser: string;
+}
+
+function getAuthInfo(req: http.IncomingMessage): AuthInfo {
+  const cookies = parseCookies(req.headers.cookie);
+  const authCookie = cookies.auth || '';
+
+  if (isMultiUser) {
+    // Multi-user: verify HMAC token → extract username
+    const username = verifyAuthToken(authCookie);
+    if (username && usersConfig[username]) {
+      return { authenticated: true, username, linuxUser: usersConfig[username]!.linuxUser };
+    }
+    return { authenticated: false, username: '', linuxUser: '' };
+  } else {
+    // Single-user: accept legacy token or new HMAC token
+    if (authCookie === LEGACY_AUTH_TOKEN) {
+      return { authenticated: true, username: 'admin', linuxUser: '' };
+    }
+    const username = verifyAuthToken(authCookie);
+    if (username === 'admin') {
+      return { authenticated: true, username: 'admin', linuxUser: '' };
+    }
+    return { authenticated: false, username: '', linuxUser: '' };
+  }
+}
+
+// --- File permission checking for multi-user mode ---
+
+interface UserPosixInfo {
+  uid: number;
+  gid: number;
+  groups: number[];
+}
+
+const userPosixCache = new Map<string, UserPosixInfo>();
+
+function getUserPosixInfo(linuxUser: string): UserPosixInfo | null {
+  const cached = userPosixCache.get(linuxUser);
+  if (cached) return cached;
+  try {
+    const passwd = fs.readFileSync('/etc/passwd', 'utf-8');
+    let uid = -1, gid = -1;
+    for (const line of passwd.split('\n')) {
+      const parts = line.split(':');
+      if (parts[0] === linuxUser) {
+        uid = parseInt(parts[2]!);
+        gid = parseInt(parts[3]!);
+        break;
+      }
+    }
+    if (uid < 0) return null;
+    // Get supplementary groups
+    let groups: number[] = [gid];
+    try {
+      const out = execFileSync('id', ['-G', linuxUser], { timeout: 2000 }).toString().trim();
+      groups = out.split(/\s+/).map(Number).filter(n => !isNaN(n));
+    } catch {}
+    const info = { uid, gid, groups };
+    userPosixCache.set(linuxUser, info);
+    return info;
+  } catch {
+    return null;
+  }
+}
+
+// Check Unix file permissions for a given user (owner/group/other + supplementary groups)
+function checkPosixAccess(stat: fs.Stats, user: UserPosixInfo, mode: 'read' | 'write' | 'execute' | 'read+execute'): boolean {
+  if (user.uid === 0) return true; // root bypasses all
+  const bits = stat.mode;
+  const checks = mode === 'read' ? [4] : mode === 'write' ? [2] : mode === 'execute' ? [1] : [4, 1];
+
+  for (const bit of checks) {
+    let allowed = false;
+    if (stat.uid === user.uid) {
+      allowed = (bits & (bit << 6)) !== 0;
+    } else if (user.groups.includes(stat.gid)) {
+      allowed = (bits & (bit << 3)) !== 0;
+    } else {
+      allowed = (bits & bit) !== 0;
+    }
+    if (!allowed) return false;
+  }
+  return true;
+}
 
 // --- Rate limiting for login attempts ---
 const LOGIN_MAX_ATTEMPTS = 5;
@@ -302,12 +437,25 @@ function startAsrSession(clientWs: WebSocket): AsrSession {
 // Voice clients
 const voiceClients = new Map<string, WebSocket>();
 
-// Login page HTML
-const loginHtml = `<!DOCTYPE html>
+// Login page HTML — dynamic to support multi-user mode
+function getLoginHtml(): string {
+  const usernameField = isMultiUser
+    ? `<input type="text" id="username" placeholder="Username" autofocus autocomplete="username" autocapitalize="off">`
+    : '';
+  const passwordAutofocus = isMultiUser ? '' : ' autofocus';
+  return `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#1a1a2e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Hopcode">
+  <link rel="manifest" href="./manifest.json">
+  <link rel="icon" type="image/svg+xml" href="./icons/favicon.svg">
+  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
   <title>Hopcode - Login</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -329,14 +477,17 @@ const loginHtml = `<!DOCTYPE html>
     <h1>Hopcode</h1>
     <div class="error" id="error">Incorrect password</div>
     <form onsubmit="return login()">
-      <input type="password" id="password" placeholder="Password" autofocus>
+      ${usernameField}
+      <input type="password" id="password" placeholder="Password"${passwordAutofocus}>
       <button type="submit">Login</button>
     </form>
   </div>
   <script>
     function login() {
-      const pwd = document.getElementById('password').value;
-      fetch('/terminal/login', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pwd }) })
+      var body = { password: document.getElementById('password').value };
+      var uEl = document.getElementById('username');
+      if (uEl) body.username = uEl.value;
+      fetch('/terminal/login', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
         .then(r => r.json())
         .then(d => {
           if (d.success) {
@@ -349,17 +500,22 @@ const loginHtml = `<!DOCTYPE html>
       return false;
     }
   </script>
+  <script>if('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js');</script>
 </body>
 </html>`;
+}
 
 // Session chooser HTML page - generated dynamically with server-side rendering
-async function buildSessionsHtml(): Promise<string> {
-  let sessionList: { id: string; name: string; createdAt: number; lastActivity: number; clients: number }[] = [];
+async function buildSessionsHtml(username?: string): Promise<string> {
+  const isRoot = username === 'root';
+  let sessionList: { id: string; name: string; owner: string; createdAt: number; lastActivity: number; clients: number }[] = [];
   try {
-    const resp = await ptyFetch('/sessions');
+    // Root sees all sessions; other users see only their own
+    const ownerQuery = isMultiUser && username && !isRoot ? `?owner=${encodeURIComponent(username)}` : '';
+    const resp = await ptyFetch('/sessions' + ownerQuery);
     if (resp.ok) {
       const list: SessionInfo[] = await resp.json() as SessionInfo[];
-      sessionList = list.map(s => ({ id: s.id, name: s.name, createdAt: s.createdAt, lastActivity: s.lastActivity, clients: s.clientCount }));
+      sessionList = list.map(s => ({ id: s.id, name: s.name, owner: s.owner, createdAt: s.createdAt, lastActivity: s.lastActivity, clients: s.clientCount }));
     }
   } catch {}
   sessionList.sort((a, b) => b.lastActivity - a.lastActivity);
@@ -377,18 +533,37 @@ async function buildSessionsHtml(): Promise<string> {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
+  function renderCard(s: typeof sessionList[0]): string {
+    const cl = s.clients === 0 ? 'idle' : s.clients === 1 ? '1 client' : s.clients + ' clients';
+    const badgeClass = s.clients > 0 ? ' active' : '';
+    return `<a class="session-card" href="/terminal?session=${encodeURIComponent(s.id)}">
+      <div class="session-info"><div class="session-name" data-session="${esc(s.id)}"><span class="session-name-text">${esc(s.name)}</span><button class="rename-btn" title="Rename session">&#9998;</button></div>
+      <div class="session-meta">Active ${fmtAge(s.lastActivity)} · Created ${fmtAge(s.createdAt)}</div></div>
+      <span class="session-badge${badgeClass}">${cl}</span></a>`;
+  }
+
   let cardsHtml = '';
   if (sessionList.length === 0) {
     cardsHtml = '<div class="empty-state"><p>No active sessions</p><a class="new-btn" href="/terminal?action=new">Create your first session</a></div>';
-  } else {
+  } else if (isRoot) {
+    // Group by owner, root's own sessions first
+    const groups = new Map<string, typeof sessionList>();
     for (const s of sessionList) {
-      const cl = s.clients === 0 ? 'idle' : s.clients === 1 ? '1 client' : s.clients + ' clients';
-      const badgeClass = s.clients > 0 ? ' active' : '';
-      cardsHtml += `<a class="session-card" href="/terminal?session=${encodeURIComponent(s.id)}">
-        <div class="session-info"><div class="session-name" data-session="${esc(s.id)}"><span class="session-name-text">${esc(s.name)}</span><button class="rename-btn" title="Rename session">&#9998;</button></div>
-        <div class="session-meta">Active ${fmtAge(s.lastActivity)} · Created ${fmtAge(s.createdAt)}</div></div>
-        <span class="session-badge${badgeClass}">${cl}</span></a>`;
+      const arr = groups.get(s.owner) || [];
+      arr.push(s);
+      groups.set(s.owner, arr);
     }
+    const sortedOwners = Array.from(groups.keys()).sort((a, b) => {
+      if (a === 'root') return -1;
+      if (b === 'root') return 1;
+      return a.localeCompare(b);
+    });
+    for (const owner of sortedOwners) {
+      cardsHtml += `<div class="group-header">${esc(owner)}</div>`;
+      for (const s of groups.get(owner)!) cardsHtml += renderCard(s);
+    }
+  } else {
+    for (const s of sessionList) cardsHtml += renderCard(s);
   }
 
   const html = `<!DOCTYPE html>
@@ -396,6 +571,14 @@ async function buildSessionsHtml(): Promise<string> {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#1a1a2e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Hopcode">
+  <link rel="manifest" href="./manifest.json">
+  <link rel="icon" type="image/svg+xml" href="./icons/favicon.svg">
+  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
   <title>Hopcode - Sessions</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -444,6 +627,11 @@ async function buildSessionsHtml(): Promise<string> {
     @media (max-width: 500px) {
       .rename-btn { opacity: 1; }
     }
+    .group-header {
+      font-size: 13px; font-weight: 600; color: #60a5fa; padding: 16px 4px 6px;
+      border-bottom: 1px solid #0f3460; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .group-header:first-child { padding-top: 0; }
     .empty-state { text-align: center; padding: 60px 20px; color: #666; }
     .empty-state p { margin-bottom: 16px; font-size: 18px; }
     @media (max-width: 500px) {
@@ -453,13 +641,21 @@ async function buildSessionsHtml(): Promise<string> {
       h1 { font-size: 20px; }
       .new-btn { padding: 8px 14px; font-size: 14px; }
     }
+    .header-right { display: flex; align-items: center; gap: 12px; }
+    .user-info { color: #888; font-size: 13px; }
+    .logout-btn { color: #888; font-size: 13px; text-decoration: none; padding: 4px 8px; border-radius: 6px; }
+    .logout-btn:hover { color: #f87171; background: rgba(248,113,113,0.1); }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="header">
       <h1>Hopcode</h1>
-      <a class="new-btn" href="/terminal?action=new">+ New Session</a>
+      <div class="header-right">
+        ${isMultiUser && username ? `<span class="user-info">${esc(username)}</span>` : ''}
+        <a class="new-btn" href="/terminal?action=new">+ New Session</a>
+        <a class="logout-btn" href="/terminal/logout">Logout</a>
+      </div>
     </div>
     <div class="session-list">${cardsHtml}</div>
   </div>
@@ -531,6 +727,7 @@ async function buildSessionsHtml(): Promise<string> {
       });
     });
   </script>
+  <script>if('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js');</script>
 </body>
 </html>`;
   return html;
@@ -541,7 +738,15 @@ const indexHtml = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#1a1a2e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Hopcode">
+  <link rel="manifest" href="./manifest.json">
+  <link rel="icon" type="image/svg+xml" href="./icons/favicon.svg">
+  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
   <title>Hopcode</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
   <style>
@@ -565,14 +770,57 @@ const indexHtml = `<!DOCTYPE html>
     .font-btn:hover { background: #444; }
     #font-size { color: #888; font-size: 12px; min-width: 36px; text-align: center; }
     #font-controls { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-    #back-btn { color: #4ade80; font-size: 11px; text-decoration: none; padding: 4px 6px; background: #1a1a2e; border-radius: 6px; white-space: nowrap; flex-shrink: 0; }
-    .key-btn { background: #333; border: none; color: #fff; min-width: 40px; height: 36px; border-radius: 6px; cursor: pointer; font-size: 13px; font-family: system-ui; -webkit-tap-highlight-color: transparent; flex-shrink: 0; padding: 0 8px; }
+    #app-menu { position:fixed;top:0;left:0;right:0;bottom:0;z-index:600; }
+    .app-menu-backdrop { position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5); }
+    .app-menu-panel {
+      position:absolute;bottom:80px;left:8px;background:#16213e;border:2px solid #0f3460;
+      border-radius:12px;padding:6px 0;min-width:220px;max-width:300px;z-index:1;
+      max-height:calc(100vh - 120px);overflow-y:auto;
+    }
+    .app-menu-item {
+      display:flex;align-items:center;gap:10px;padding:12px 16px;color:#e0e0e0;font-size:14px;
+      font-family:system-ui;cursor:pointer;text-decoration:none;
+    }
+    .app-menu-item:hover,.app-menu-item:active { background:rgba(255,255,255,0.06); }
+    .app-menu-sep { height:1px;background:#0f3460;margin:4px 12px; }
+    .app-menu-section { font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;padding:8px 16px 2px; }
+    .app-menu-row { display:flex;align-items:center; }
+    .app-menu-btn {
+      padding:6px 12px;background:#0f3460;color:#e0e0e0;border:none;border-radius:6px;
+      font-size:13px;cursor:pointer;font-family:system-ui;
+    }
+    .app-menu-btn:active { background:#4ade80;color:#000; }
+    .app-menu-fk-chip {
+      display:flex;align-items:center;gap:4px;padding:4px 8px;background:#0f3460;border-radius:6px;
+      font-size:13px;color:#e0e0e0;cursor:pointer;
+    }
+    .app-menu-fk-chip:active { background:#333; }
+    .app-menu-fk-chip .fk-remove {
+      color:#f87171;font-size:16px;line-height:1;cursor:pointer;margin-left:2px;
+    }
+    .app-menu-fk-chip.fk-dragging { opacity:0.4; }
+    .app-menu-fk-chip .fk-grip { color:#555;font-size:14px;cursor:grab;margin-right:2px;-webkit-tap-highlight-color:transparent;touch-action:none; }
+    .fk-drop-indicator { height:2px;background:#4ade80;border-radius:1px;margin:0 8px; }
+    body.light-mode .app-menu-section { color:#999; }
+    body.light-mode .app-menu-btn { background:#ddd;color:#333; }
+    body.light-mode .app-menu-fk-chip { background:#ddd;color:#333; }
+    body.light-mode { background:#f5f5f5; }
+    body.light-mode #voice-bar { background:rgba(240,240,240,0.95);border-top-color:#ccc; }
+    body.light-mode .key-btn { background:#c8c8c8;color:#111; }
+    body.light-mode .key-btn:active { background:#4ade80;color:#000; }
+    body.light-mode #status { background:#c8c8c8;color:#111; }
+    body.light-mode #status.recording { background:#4ade80;color:#000; }
+    body.light-mode .font-btn { background:#c8c8c8;color:#111; }
+    body.light-mode .font-btn:hover { background:#bbb; }
+    body.light-mode .app-menu-panel { background:#fff;border-color:#ddd; }
+    body.light-mode .app-menu-item { color:#333; }
+    body.light-mode .app-menu-item:hover { background:rgba(0,0,0,0.05); }
+    body.light-mode .app-menu-sep { background:#eee; }
+    .key-btn { background: #333; border: none; color: #fff; min-width: 40px; height: 36px; border-radius: 6px; cursor: pointer; font-size: 14px; font-family: system-ui; -webkit-tap-highlight-color: transparent; flex-shrink: 0; padding: 0 8px; }
     .key-btn:active { background: #4ade80; color: #000; }
     #special-keys { display: none; align-items: center; gap: 4px; flex: 1; }
     #bar-row1 { display: contents; }
     #bar-row2 { display: contents; }
-    #scroll-bottom { background: #333; border: none; color: #fff; min-width: 36px; height: 36px; border-radius: 6px; cursor: pointer; font-size: 16px; -webkit-tap-highlight-color: transparent; flex-shrink: 0; padding: 0; }
-    #scroll-bottom:active { background: #4ade80; color: #000; }
     #copy-overlay { display: none; position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 100; background: #1a1a2e; color: #e0e0e0; font-family: Menlo, Monaco, "Courier New", monospace; font-size: 12px; padding: 8px; border: none; resize: none; white-space: pre; overflow: auto; -webkit-user-select: text; user-select: text; }
     #copy-overlay.active { display: block; }
     #floating-keys {
@@ -609,14 +857,27 @@ const indexHtml = `<!DOCTYPE html>
     body.mobile #status { font-size: 13px; padding: 8px; flex: 3; text-align: center; border-radius: 8px; }
     body.mobile #text { display: none; }
     body.mobile #font-controls { display: none; }
-    body.mobile .key-btn { min-width: 0; flex: 1; padding: 0 4px; height: 34px; font-size: 12px; }
+    body.mobile .key-btn { min-width: 0; flex: 1; padding: 0 4px; height: 34px; font-size: 14px; }
     .mobile-only { display: none; }
     body.mobile .mobile-only { display: inline-block; }
-    body.mobile #back-btn { display: none; }
-    body.mobile #scroll-bottom { display: none; }
-    body.mobile #back-btn-mobile { padding: 4px 5px; font-size: 10px; flex-shrink: 0; color: #4ade80; text-decoration: none; background: #1a1a2e; border-radius: 6px; white-space: nowrap; }
-    body.mobile #scroll-bottom-mobile { min-width: 0; height: 34px; font-size: 14px; flex: 1; background: #333; border: none; color: #fff; border-radius: 6px; cursor: pointer; -webkit-tap-highlight-color: transparent; padding: 0; }
-    #voice-bar.collapsed { display: none; }
+    body.mobile #menu-btn { display: none; }
+    body.mobile #menu-btn-mobile { font-size: 16px; min-width: 32px; }
+    #voice-bar { transition: transform 0.3s ease, max-height 0.3s ease, padding 0.3s ease, border-width 0.3s ease; overflow: hidden; }
+    #voice-bar.collapsed { transform: translateX(calc(100% + 2px)); max-height: 0 !important; padding-top: 0 !important; padding-bottom: 0 !important; border-top-width: 0 !important; }
+    #bar-handle {
+      display: none; width: 42px; height: 42px; border-radius: 50%;
+      border: 2px solid rgba(255,255,255,0.45);
+      background: rgba(22,33,62,0.6); color: rgba(74,222,128,0.85); font-size: 16px; font-weight: 600;
+      font-family: system-ui; cursor: pointer; align-items: center; justify-content: center;
+      -webkit-tap-highlight-color: transparent; pointer-events: auto;
+      margin-top: 12px;
+    }
+    #bar-handle:active { background: rgba(74,222,128,0.8); color: #000; border-color: rgba(74,222,128,0.8); }
+    #bar-handle.visible { display: flex; }
+    @supports (padding-top: env(safe-area-inset-top)) {
+      #container { padding-top: env(safe-area-inset-top); }
+      #voice-bar { padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+    }
     /* --- File Browser --- */
     #file-browser {
       position: fixed; top: 0; right: -100%; width: 100%; max-width: 480px; height: 100%;
@@ -625,6 +886,15 @@ const indexHtml = `<!DOCTYPE html>
       font-family: system-ui; color: #e0e0e0;
     }
     #file-browser.open { right: 0; }
+    #fb-drop-overlay {
+      display: none; position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(74, 222, 128, 0.15); z-index: 10;
+      flex-direction: column; align-items: center; justify-content: center;
+      font-size: 18px; font-weight: 600; color: #4ade80;
+      border: 3px dashed #4ade80; border-radius: 8px; margin: 4px;
+      pointer-events: none;
+    }
+    #fb-drop-overlay.visible { display: flex; }
     #fb-header {
       display: flex; align-items: center; gap: 8px; padding: 12px;
       background: rgba(22,33,62,0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
@@ -692,13 +962,15 @@ const indexHtml = `<!DOCTYPE html>
     <textarea id="copy-overlay" readonly></textarea>
     <div id="voice-bar">
       <div id="bar-row1">
-        <a href="/terminal" id="back-btn">Sess</a>
+        <button id="menu-btn" class="key-btn" style="font-size:16px;min-width:32px;">&#x22EF;</button>
         <div id="special-keys">
-          <button class="key-btn" id="bar-hide-btn" style="font-size:16px">&#x25B8;</button>
+          <button class="key-btn" id="bar-hide-btn" style="font-size:14px;">&#x276F;</button>
           <button class="key-btn" data-key="esc">Esc</button>
           <button class="key-btn" data-key="tab">Tab</button>
           <button class="key-btn" data-key="up">&#x25B2;</button>
           <button class="key-btn" data-key="down">&#x25BC;</button>
+          <button class="key-btn" id="paste-btn" title="Paste" style="font-size:16px;">&#x2398;</button>
+          <button class="key-btn" id="scroll-bottom" title="Scroll to bottom" style="font-size:20px;">&#x21E9;</button>
         </div>
         <div id="font-controls">
           <button class="font-btn" onclick="changeFontSize(-2)">&#x2212;</button>
@@ -707,16 +979,15 @@ const indexHtml = `<!DOCTYPE html>
         </div>
       </div>
       <div id="bar-row2">
-        <a href="/terminal" id="back-btn-mobile" class="mobile-only">Sess</a>
+        <button id="menu-btn-mobile" class="key-btn mobile-only" style="font-size:16px;min-width:32px;">&#x22EF;</button>
         <button id="files-btn" class="key-btn" title="Files">Files</button>
         <div id="status">Hold Option to speak</div>
         <div id="text"></div>
-        <button id="scroll-bottom-mobile" class="mobile-only" title="Scroll to bottom">&#x21E9;</button>
-        <button id="scroll-bottom" title="Scroll to bottom">&#x21E9;</button>
+        <button id="return-btn" class="key-btn" title="Return" style="font-size:20px;">&#x23CE;</button>
       </div>
     </div>
   </div>
-  <div id="floating-keys"></div>
+  <div id="floating-keys"><button id="bar-handle">&#x2328;</button></div>
   <div class="float-key-config" id="fk-config">
     <label>Label</label>
     <input type="text" id="fk-cfg-label" maxlength="6" placeholder="e.g. Enter">
@@ -746,9 +1017,11 @@ const indexHtml = `<!DOCTYPE html>
   </div>
 
   <div id="file-browser">
+    <div id="fb-drop-overlay">Drop files here</div>
     <div id="fb-header">
       <button id="fb-close">&times;</button>
       <span id="fb-title">Files</span>
+      <button id="fb-hidden-btn" class="key-btn" title="Toggle hidden files" style="font-size:10px;opacity:0.5">.*</button>
       <button id="fb-cwd-btn" class="key-btn" title="Go to PTY working directory">CWD</button>
     </div>
     <div id="fb-breadcrumb"></div>
@@ -769,6 +1042,29 @@ const indexHtml = `<!DOCTYPE html>
     <div id="fb-preview-info">
       <span id="fb-preview-name"></span>
       <button id="fb-preview-dl" class="key-btn">&#x2193;</button>
+    </div>
+  </div>
+
+  <div id="app-menu" style="display:none;">
+    <div class="app-menu-backdrop"></div>
+    <div class="app-menu-panel">
+      <a class="app-menu-item" href="/terminal">&#x2630; Sessions</a>
+      <div class="app-menu-sep"></div>
+      <div class="app-menu-section">Font Size</div>
+      <div class="app-menu-row" style="padding:6px 16px;gap:10px;">
+        <button class="app-menu-btn" id="menu-font-down">A&#x2212;</button>
+        <span id="menu-font-val" style="font-size:14px;min-width:40px;text-align:center;color:#fff;font-weight:600;"></span>
+        <button class="app-menu-btn" id="menu-font-up">A+</button>
+      </div>
+      <div class="app-menu-sep"></div>
+      <div class="app-menu-section">Floating Keys</div>
+      <div id="menu-fk-list" style="padding:6px 16px;display:flex;flex-direction:column;gap:4px;"></div>
+      <div class="app-menu-row" style="padding:6px 16px;gap:8px;">
+        <button class="app-menu-btn" id="menu-fk-add">+ Add</button>
+        <button class="app-menu-btn" id="menu-fk-reset" style="background:#333;color:#f87171;">Reset</button>
+      </div>
+      <div class="app-menu-sep"></div>
+      <div class="app-menu-item" id="theme-toggle">&#x263E; Dark mode</div>
     </div>
   </div>
 
@@ -918,6 +1214,10 @@ const indexHtml = `<!DOCTYPE html>
             termEl.style.visibility = '';
             scrollToCursor();
           });
+        } else if (msg.type === 'session_exit') {
+          termWs.sessionExited = true;
+          location.href = '/terminal';
+          return;
         } else if (msg.type === 'output') {
           term.write(msg.data, doAutoScroll);
         }
@@ -932,6 +1232,7 @@ const indexHtml = `<!DOCTYPE html>
         document.getElementById('status').style.background = '#f87171';
       };
       termWs.onclose = (e) => {
+        if (termWs.sessionExited) return;
         document.getElementById('status').textContent = 'Disconnected - reconnecting...';
         document.getElementById('status').style.background = '#f97316';
         isReconnect = true;
@@ -1142,15 +1443,270 @@ const indexHtml = `<!DOCTYPE html>
     });
 
 
-    // Bar collapse toggle (called from floating key)
+    // Paste button — popup textarea for manual paste
+    var pasteOverlay = document.createElement('div');
+    pasteOverlay.id = 'paste-overlay';
+    pasteOverlay.style.cssText = 'display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:500;background:rgba(0,0,0,0.8);flex-direction:column;align-items:center;justify-content:center;padding:20px;';
+    pasteOverlay.innerHTML = '<div style="width:100%;max-width:480px;background:#16213e;border:2px solid #0f3460;border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:12px;">'
+      + '<div style="color:#e0e0e0;font-size:14px;font-family:system-ui;">Paste content here:</div>'
+      + '<textarea id="paste-input" style="width:100%;height:120px;background:#1a1a2e;color:#e0e0e0;border:1px solid #333;border-radius:8px;padding:10px;font-family:monospace;font-size:14px;resize:vertical;outline:none;" placeholder="Long press or Ctrl+V to paste..."></textarea>'
+      + '<div style="display:flex;gap:8px;justify-content:flex-end;">'
+      + '<button id="paste-cancel" style="padding:8px 16px;background:#333;color:#e0e0e0;border:none;border-radius:6px;font-size:14px;cursor:pointer;">Cancel</button>'
+      + '<button id="paste-send" style="padding:8px 16px;background:#4ade80;color:#000;border:none;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer;">Send</button>'
+      + '</div></div>';
+    document.body.appendChild(pasteOverlay);
+
+    function pasteShow() {
+      var inp = document.getElementById('paste-input');
+      inp.value = '';
+      pasteOverlay.style.display = 'flex';
+      inp.focus();
+    }
+    function pasteHide() {
+      pasteOverlay.style.display = 'none';
+      term.focus();
+    }
+    document.getElementById('paste-btn').addEventListener('click', function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      pasteShow();
+    });
+    document.getElementById('paste-send').addEventListener('click', function() {
+      var text = document.getElementById('paste-input').value;
+      pasteHide();
+      if (text) sendInput(text);
+    });
+    document.getElementById('paste-cancel').addEventListener('click', pasteHide);
+    pasteOverlay.addEventListener('click', function(e) {
+      if (e.target === pasteOverlay) pasteHide();
+    });
+
+    // App menu (... button)
+    var appMenu = document.getElementById('app-menu');
+    function menuShow() {
+      appMenu.style.display = 'block';
+      document.getElementById('menu-font-val').textContent = fontSize + 'px';
+      menuRenderFk();
+    }
+    function menuHide() { appMenu.style.display = 'none'; term.focus(); }
+    document.getElementById('menu-btn').addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); menuShow(); });
+    document.getElementById('menu-btn-mobile').addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); menuShow(); });
+    appMenu.querySelector('.app-menu-backdrop').addEventListener('click', menuHide);
+
+    // Menu: font size
+    document.getElementById('menu-font-down').addEventListener('click', function(e) {
+      e.stopPropagation();
+      changeFontSize(-2);
+      document.getElementById('menu-font-val').textContent = fontSize + 'px';
+    });
+    document.getElementById('menu-font-up').addEventListener('click', function(e) {
+      e.stopPropagation();
+      changeFontSize(2);
+      document.getElementById('menu-font-val').textContent = fontSize + 'px';
+    });
+
+    // Menu: floating keys list
+    var menuFkList = document.getElementById('menu-fk-list');
+    var fkProtected = ['enter'];
+    var fkDragIdx = -1;
+    function menuRenderFk() {
+      menuFkList.innerHTML = '';
+      fkKeys.forEach(function(k, i) {
+        var isLocked = fkProtected.indexOf(k.action) >= 0;
+        var chip = document.createElement('div');
+        chip.className = 'app-menu-fk-chip';
+        chip.setAttribute('data-fk-idx', i);
+        chip.draggable = true;
+        chip.innerHTML = '<span class="fk-grip">&#x2630;</span><span style="flex:1;">' + (k.label || '?') + '</span>';
+        if (isLocked) {
+          chip.innerHTML += '<span style="font-size:10px;color:#888;">&#x1F512;</span>';
+        } else {
+          chip.innerHTML += '<span class="fk-remove">&times;</span>';
+          chip.querySelector('.fk-remove').addEventListener('click', function(e) {
+            e.stopPropagation();
+            fkKeys.splice(i, 1);
+            fkSave(fkKeys); fkRender(); menuRenderFk();
+          });
+        }
+        chip.addEventListener('click', function(e) {
+          if (e.target.classList.contains('fk-remove') || e.target.classList.contains('fk-grip')) return;
+          e.stopPropagation();
+          menuHide();
+          fkOpenConfig(i);
+        });
+        // Drag (desktop)
+        chip.addEventListener('dragstart', function(e) {
+          fkDragIdx = i;
+          chip.classList.add('fk-dragging');
+          e.dataTransfer.effectAllowed = 'move';
+        });
+        chip.addEventListener('dragend', function() {
+          chip.classList.remove('fk-dragging');
+          fkDragIdx = -1;
+          menuFkList.querySelectorAll('.fk-drop-indicator').forEach(function(el) { el.remove(); });
+        });
+        chip.addEventListener('dragover', function(e) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          if (fkDragIdx < 0 || fkDragIdx === i) return;
+          menuFkList.querySelectorAll('.fk-drop-indicator').forEach(function(el) { el.remove(); });
+          var rect = chip.getBoundingClientRect();
+          var mid = rect.top + rect.height / 2;
+          var ind = document.createElement('div');
+          ind.className = 'fk-drop-indicator';
+          if (e.clientY < mid) {
+            menuFkList.insertBefore(ind, chip);
+          } else {
+            menuFkList.insertBefore(ind, chip.nextSibling);
+          }
+        });
+        chip.addEventListener('drop', function(e) {
+          e.preventDefault();
+          if (fkDragIdx < 0 || fkDragIdx === i) return;
+          var rect = chip.getBoundingClientRect();
+          var mid = rect.top + rect.height / 2;
+          var targetIdx = e.clientY < mid ? i : i + 1;
+          if (targetIdx > fkDragIdx) targetIdx--;
+          var item = fkKeys.splice(fkDragIdx, 1)[0];
+          fkKeys.splice(targetIdx, 0, item);
+          fkDragIdx = -1;
+          fkSave(fkKeys); fkRender(); menuRenderFk();
+        });
+        // Touch drag (mobile)
+        (function(chipEl, idx) {
+          var touchStartY = 0, touchActive = false, clone = null, startScrollTop = 0;
+          chipEl.addEventListener('pointerdown', function(e) {
+            if (e.target.classList.contains('fk-remove')) return;
+            if (e.pointerType === 'mouse') return; // mouse uses native drag
+            touchStartY = e.clientY;
+            startScrollTop = menuFkList.scrollTop;
+            touchActive = false;
+          });
+          chipEl.addEventListener('pointermove', function(e) {
+            if (e.pointerType === 'mouse') return;
+            if (!touchActive && Math.abs(e.clientY - touchStartY) > 8) {
+              touchActive = true;
+              fkDragIdx = idx;
+              chipEl.classList.add('fk-dragging');
+              clone = chipEl.cloneNode(true);
+              clone.style.cssText = 'position:fixed;left:' + chipEl.getBoundingClientRect().left + 'px;width:' + chipEl.offsetWidth + 'px;pointer-events:none;z-index:999;opacity:0.8;';
+              document.body.appendChild(clone);
+              chipEl.setPointerCapture(e.pointerId);
+            }
+            if (!touchActive) return;
+            e.preventDefault();
+            clone.style.top = (e.clientY - 18) + 'px';
+            menuFkList.querySelectorAll('.fk-drop-indicator').forEach(function(el) { el.remove(); });
+            var chips = menuFkList.querySelectorAll('.app-menu-fk-chip');
+            for (var j = 0; j < chips.length; j++) {
+              var r = chips[j].getBoundingClientRect();
+              if (e.clientY >= r.top && e.clientY <= r.bottom) {
+                var ind = document.createElement('div');
+                ind.className = 'fk-drop-indicator';
+                if (e.clientY < r.top + r.height / 2) {
+                  menuFkList.insertBefore(ind, chips[j]);
+                } else {
+                  menuFkList.insertBefore(ind, chips[j].nextSibling);
+                }
+                break;
+              }
+            }
+          });
+          chipEl.addEventListener('pointerup', function(e) {
+            if (!touchActive) return;
+            touchActive = false;
+            if (clone) { clone.remove(); clone = null; }
+            chipEl.classList.remove('fk-dragging');
+            // find drop target
+            var chips = menuFkList.querySelectorAll('.app-menu-fk-chip');
+            var targetIdx = fkDragIdx;
+            for (var j = 0; j < chips.length; j++) {
+              var r = chips[j].getBoundingClientRect();
+              var ci = parseInt(chips[j].getAttribute('data-fk-idx'));
+              if (e.clientY >= r.top && e.clientY <= r.bottom) {
+                targetIdx = e.clientY < r.top + r.height / 2 ? ci : ci + 1;
+                if (targetIdx > fkDragIdx) targetIdx--;
+                break;
+              }
+            }
+            if (targetIdx !== fkDragIdx) {
+              var item = fkKeys.splice(fkDragIdx, 1)[0];
+              fkKeys.splice(targetIdx, 0, item);
+              fkSave(fkKeys); fkRender();
+            }
+            fkDragIdx = -1;
+            menuFkList.querySelectorAll('.fk-drop-indicator').forEach(function(el) { el.remove(); });
+            menuRenderFk();
+          });
+          chipEl.addEventListener('pointercancel', function() {
+            if (clone) { clone.remove(); clone = null; }
+            chipEl.classList.remove('fk-dragging');
+            touchActive = false; fkDragIdx = -1;
+            menuFkList.querySelectorAll('.fk-drop-indicator').forEach(function(el) { el.remove(); });
+          });
+        })(chip, i);
+        menuFkList.appendChild(chip);
+      });
+      if (fkKeys.length === 0) {
+        menuFkList.innerHTML = '<span style="color:#666;font-size:12px;">No floating keys</span>';
+      }
+    }
+    document.getElementById('menu-fk-add').addEventListener('click', function(e) {
+      e.stopPropagation();
+      fkKeys.push({ label: 'New', action: 'char', chars: '' });
+      fkSave(fkKeys);
+      fkRender();
+      menuHide();
+      fkOpenConfig(fkKeys.length - 1);
+    });
+    document.getElementById('menu-fk-reset').addEventListener('click', function(e) {
+      e.stopPropagation();
+      fkKeys = fkDefaults.slice();
+      fkSave(fkKeys);
+      fkRender();
+      menuRenderFk();
+    });
+
+    // Theme toggle
+    var isLight = localStorage.getItem('hopcode-theme') === 'light';
+    var themeToggle = document.getElementById('theme-toggle');
+    function applyTheme() {
+      document.body.classList.toggle('light-mode', isLight);
+      term.options.theme = isLight
+        ? { background: '#f5f5f5', foreground: '#333', cursor: '#333', selectionBackground: 'rgba(0,0,0,0.15)' }
+        : { background: '#000', foreground: '#e0e0e0', cursor: '#4ade80' };
+      themeToggle.innerHTML = isLight ? '&#x2600; Light mode' : '&#x263E; Dark mode';
+    }
+    applyTheme();
+    themeToggle.addEventListener('click', function() {
+      isLight = !isLight;
+      localStorage.setItem('hopcode-theme', isLight ? 'light' : 'dark');
+      applyTheme();
+      menuHide();
+    });
+
+    // Bar collapse toggle (called from floating key or hide btn)
     function toggleBar() {
       var bar = document.getElementById('voice-bar');
+      var handle = document.getElementById('bar-handle');
       bar.classList.toggle('collapsed');
-      setTimeout(function() { fitAddon.fit(); visibleRows = term.rows; }, 100);
+      var isCollapsed = bar.classList.contains('collapsed');
+      if (isCollapsed) {
+        handle.classList.add('visible');
+      } else {
+        handle.classList.remove('visible');
+      }
+      setTimeout(function() { fitAddon.fit(); visibleRows = term.rows; }, 350);
     }
 
     // Hide bar button in row1
     document.getElementById('bar-hide-btn').addEventListener('click', function(e) {
+      e.preventDefault();
+      toggleBar();
+    });
+
+    // Bar handle (pull tab to restore bar)
+    document.getElementById('bar-handle').addEventListener('click', function(e) {
       e.preventDefault();
       toggleBar();
     });
@@ -1164,8 +1720,15 @@ const indexHtml = `<!DOCTYPE html>
       else term.focus();
     }
     document.getElementById('scroll-bottom').addEventListener('click', handleScrollBottom);
-    var scrollBottomMobile = document.getElementById('scroll-bottom-mobile');
-    if (scrollBottomMobile) scrollBottomMobile.addEventListener('click', handleScrollBottom);
+
+    // Return button in row2
+    document.getElementById('return-btn').addEventListener('click', function(e) {
+      e.preventDefault();
+      resetTypingBuffer();
+      sendInput(String.fromCharCode(13));
+      if (isMobile && xtermTextarea) xtermTextarea.blur();
+      else term.focus();
+    });
 
     // Select/Copy mode: show terminal text in a selectable overlay
     var copyOverlay = document.getElementById('copy-overlay');
@@ -1367,14 +1930,13 @@ const indexHtml = `<!DOCTYPE html>
     // Mobile: entire voice bar is hold-to-speak (except font controls and back button)
     const voiceBar = document.getElementById('voice-bar');
     const fontControls = document.getElementById('font-controls');
-    const backBtn = document.getElementById('back-btn');
-    var backBtnMobile = document.getElementById('back-btn-mobile');
+    var menuBtn = document.getElementById('menu-btn');
+    var menuBtnMobile = document.getElementById('menu-btn-mobile');
     var specialKeys = document.getElementById('special-keys');
-    var scrollBtn = document.getElementById('scroll-bottom');
-    var scrollBtnMobile = document.getElementById('scroll-bottom-mobile');
     var filesBtn = document.getElementById('files-btn');
+    var returnBtn = document.getElementById('return-btn');
     function isExcluded(el) {
-      return (fontControls && fontControls.contains(el)) || (backBtn && backBtn.contains(el)) || (backBtnMobile && backBtnMobile.contains(el)) || (specialKeys && specialKeys.contains(el)) || (filesBtn && filesBtn.contains(el)) || (scrollBtnMobile && scrollBtnMobile.contains(el));
+      return (fontControls && fontControls.contains(el)) || (menuBtn && menuBtn.contains(el)) || (menuBtnMobile && menuBtnMobile.contains(el)) || (specialKeys && specialKeys.contains(el)) || (filesBtn && filesBtn.contains(el)) || (returnBtn && returnBtn.contains(el));
     }
     voiceBar.addEventListener('touchstart', (e) => {
       if (isExcluded(e.target)) return;
@@ -1414,11 +1976,11 @@ const indexHtml = `<!DOCTYPE html>
       'togglebar': function() { return null; }
     };
     var fkDefaults = [
-      { label: 'Bar', action: 'togglebar', chars: '' },
-      { label: '1', action: 'char', chars: '1' },
+      { label: 'Esc', action: 'esc', chars: '' },
+      { label: 'Tab', action: 'tab', chars: '' },
       { label: '2', action: 'char', chars: '2' },
       { label: '3', action: 'char', chars: '3' },
-      { label: 'Ret', action: 'enter', chars: '' }
+      { label: '\u23CE', action: 'enter', chars: '' }
     ];
     var fkStorageKey = 'hopcode_float_keys';
     function fkLoad() {
@@ -1431,7 +1993,7 @@ const indexHtml = `<!DOCTYPE html>
     function fkSave(keys) {
       try { localStorage.setItem(fkStorageKey, JSON.stringify(keys)); } catch {}
     }
-    var fkVersion = 2;
+    var fkVersion = 7;
     var fkSaved = fkLoad();
     var fkSavedVer = parseInt(localStorage.getItem('hopcode_float_keys_v')) || 0;
     var fkKeys = (fkSaved && fkSavedVer >= fkVersion) ? fkSaved : fkDefaults.slice();
@@ -1448,11 +2010,13 @@ const indexHtml = `<!DOCTYPE html>
     var fkLongTimer = null;
 
     function fkRender() {
+      var handle = document.getElementById('bar-handle');
       fkContainer.innerHTML = '';
       fkKeys.forEach(function(k, i) {
         var btn = document.createElement('button');
         btn.className = 'float-key';
         btn.textContent = k.label;
+        if (k.action === 'enter') { btn.style.fontSize = '18px'; }
         btn.addEventListener('mousedown', function() { fkLongTimer = setTimeout(function() { fkLongTimer = 'fired'; fkOpenConfig(i); }, 600); });
         btn.addEventListener('mouseup', function(e) { if (fkLongTimer === 'fired') { fkLongTimer = null; return; } clearTimeout(fkLongTimer); fkLongTimer = null; fkSend(k); });
         btn.addEventListener('mouseleave', function() { if (fkLongTimer !== 'fired') clearTimeout(fkLongTimer); fkLongTimer = null; });
@@ -1461,6 +2025,7 @@ const indexHtml = `<!DOCTYPE html>
         btn.addEventListener('touchcancel', function() { if (fkLongTimer !== 'fired') clearTimeout(fkLongTimer); fkLongTimer = null; });
         fkContainer.appendChild(btn);
       });
+      fkContainer.appendChild(handle);
     }
 
     function fkSend(k) {
@@ -1529,6 +2094,8 @@ const indexHtml = `<!DOCTYPE html>
     var fbPreviewImg = document.getElementById('fb-preview-img');
     var fbPreviewName = document.getElementById('fb-preview-name');
     var fbCurrentPath = '/';
+    var fbShowHidden = false;
+    var fbHiddenBtn = document.getElementById('fb-hidden-btn');
 
     function fbOpen() {
       fbPanel.classList.add('open');
@@ -1544,7 +2111,7 @@ const indexHtml = `<!DOCTYPE html>
     var fbBackIcon = '<svg width="20" height="20" viewBox="0 0 24 24" fill="#888"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>';
 
     function fbLoadDir(dirPath) {
-      var url = '/terminal/files?session=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(dirPath);
+      var url = '/terminal/files?session=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(dirPath) + (fbShowHidden ? '&hidden=1' : '');
       fbError.style.display = 'none';
       fbList.innerHTML = '<div style="padding:20px;text-align:center;color:#666">Loading...</div>';
       fbTextPreview.style.display = 'none';
@@ -1572,11 +2139,8 @@ const indexHtml = `<!DOCTYPE html>
             } else {
               var icon = fbGetIcon(item);
               var actions = '<div class="fb-actions"><button class="fb-dl" onclick="event.stopPropagation();fbDownload(\\''+ep+'\\')">&#x2193;</button></div>';
-              var click = '';
-              if (item.isImage) click = 'fbShowImagePreview(\\''+ep+'\\',\\''+fbEsc(item.name)+'\\')';
-              else if (item.isText) click = 'fbShowTextPreview(\\''+ep+'\\',\\''+fbEsc(item.name)+'\\')';
-              else click = 'fbDownload(\\''+ep+'\\')';
-              html += '<div class="fb-item" onclick="'+click+'"><span class="fb-icon">'+icon+'</span><div class="fb-info"><div class="fb-name">'+fbEscHtml(item.name)+'</div><div class="fb-meta">'+fbFormatSize(item.size)+' &middot; '+fbFormatTime(item.modified)+'</div></div>'+actions+'</div>';
+              var dtype = item.isImage ? 'image' : (item.isText ? 'text' : 'binary');
+              html += '<div class="fb-item fb-file" data-path="'+fbEscHtml(fullPath)+'" data-name="'+fbEscHtml(item.name)+'" data-type="'+dtype+'"><span class="fb-icon">'+icon+'</span><div class="fb-info"><div class="fb-name">'+fbEscHtml(item.name)+'</div><div class="fb-meta">'+fbFormatSize(item.size)+' &middot; '+fbFormatTime(item.modified)+'</div></div>'+actions+'</div>';
             }
           });
           fbList.innerHTML = html || '<div style="padding:20px;text-align:center;color:#666">Empty directory</div>';
@@ -1655,6 +2219,57 @@ const indexHtml = `<!DOCTYPE html>
     function fbEsc(s) { return s.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'"); }
     function fbEscHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
+    // Double-click on file → confirm then open/download
+    fbList.addEventListener('dblclick', function(e) {
+      var item = e.target.closest && e.target.closest('.fb-file');
+      if (!item) return;
+      var fp = item.getAttribute('data-path');
+      var nm = item.getAttribute('data-name');
+      var tp = item.getAttribute('data-type');
+      if (tp === 'image') { fbShowImagePreview(fp, nm); return; }
+      if (tp === 'text') { fbShowTextPreview(fp, nm); return; }
+      if (confirm('Download ' + nm + '?')) fbDownload(fp);
+    });
+
+    // Long-press on filename → editable input for copying
+    var fbLpTimer = null, fbLpItem = null, fbLpMoved = false;
+    function fbLpClear() { clearTimeout(fbLpTimer); fbLpTimer = null; fbLpItem = null; }
+
+    fbList.addEventListener('pointerdown', function(e) {
+      var nameEl = e.target.closest && e.target.closest('.fb-name');
+      if (!nameEl) return;
+      fbLpMoved = false;
+      fbLpItem = nameEl;
+      fbLpTimer = setTimeout(function() {
+        if (fbLpMoved || !fbLpItem) return;
+        var name = fbLpItem.textContent;
+        var inp = document.createElement('input');
+        inp.type = 'text';
+        inp.value = name;
+        inp.readOnly = true;
+        inp.style.cssText = 'width:100%;font-size:14px;background:#222;color:#4ade80;border:1px solid #4ade80;border-radius:4px;padding:2px 4px;outline:none;font-family:inherit;';
+        var origEl = fbLpItem;
+        origEl.textContent = '';
+        origEl.appendChild(inp);
+        inp.focus();
+        inp.select();
+        inp.addEventListener('blur', function() {
+          origEl.textContent = name;
+        });
+        inp.addEventListener('keydown', function(ev) {
+          if (ev.key === 'Escape' || ev.key === 'Enter') inp.blur();
+          ev.stopPropagation();
+        });
+        // Prevent the parent click from firing
+        origEl.closest('.fb-item').onclick = null;
+      }, 500);
+    });
+    fbList.addEventListener('pointermove', function(e) {
+      if (fbLpTimer) fbLpMoved = true;
+    });
+    fbList.addEventListener('pointerup', function() { fbLpClear(); });
+    fbList.addEventListener('pointercancel', function() { fbLpClear(); });
+
     // Wire up buttons
     document.getElementById('files-btn').addEventListener('click', function(e) {
       e.preventDefault();
@@ -1663,6 +2278,11 @@ const indexHtml = `<!DOCTYPE html>
     });
     document.getElementById('fb-close').addEventListener('click', fbClose);
     document.getElementById('fb-cwd-btn').addEventListener('click', function() { fbLoadDir(''); });
+    fbHiddenBtn.addEventListener('click', function() {
+      fbShowHidden = !fbShowHidden;
+      fbHiddenBtn.style.opacity = fbShowHidden ? '1' : '0.5';
+      fbLoadDir(fbCurrentPath);
+    });
     document.getElementById('fb-text-back').addEventListener('click', function() {
       fbTextPreview.style.display = 'none';
       fbList.style.display = '';
@@ -1719,9 +2339,106 @@ const indexHtml = `<!DOCTYPE html>
     }, { passive: true });
     fbPanel.addEventListener('touchend', function() { fbCloseSwiping = false; }, { passive: true });
 
+    // --- File Browser: Drag-and-drop upload ---
+    var fbDropOverlay = document.getElementById('fb-drop-overlay');
+    var fbDragCounter = 0;
+
+    fbPanel.addEventListener('dragenter', function(e) {
+      e.preventDefault();
+      fbDragCounter++;
+      if (fbDragCounter === 1) fbDropOverlay.classList.add('visible');
+    });
+    fbPanel.addEventListener('dragover', function(e) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+    });
+    fbPanel.addEventListener('dragleave', function(e) {
+      e.preventDefault();
+      fbDragCounter--;
+      if (fbDragCounter <= 0) {
+        fbDragCounter = 0;
+        fbDropOverlay.classList.remove('visible');
+      }
+    });
+    fbPanel.addEventListener('drop', function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      fbDragCounter = 0;
+      fbDropOverlay.classList.remove('visible');
+      var files = e.dataTransfer && e.dataTransfer.files;
+      if (!files || files.length === 0) return;
+      fbUploadFiles(files);
+    });
+
+    // Also handle drop on the document body when file-browser is open
+    // (in case the user drops slightly outside the panel)
+    document.addEventListener('dragover', function(e) {
+      if (fbPanel.classList.contains('open')) e.preventDefault();
+    });
+    document.addEventListener('drop', function(e) {
+      if (fbPanel.classList.contains('open')) {
+        e.preventDefault();
+        var files = e.dataTransfer && e.dataTransfer.files;
+        if (files && files.length > 0) fbUploadFiles(files);
+      }
+    });
+
+    function fbUploadFiles(files) {
+      var total = files.length;
+      var done = 0;
+      var errors = [];
+      fbError.textContent = 'Uploading ' + total + ' file' + (total > 1 ? 's' : '') + '...';
+      fbError.style.display = 'block';
+      fbError.style.color = '#4ade80';
+      fbError.style.background = '#1a2a1a';
+      for (var i = 0; i < files.length; i++) {
+        (function(file) {
+          fetch('/terminal/file-upload?path=' + encodeURIComponent(fbCurrentPath), {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'X-Filename': encodeURIComponent(file.name) },
+            body: file,
+          })
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (data.error) errors.push(file.name + ': ' + data.error);
+            done++;
+            fbError.textContent = 'Uploading... (' + done + '/' + total + ')';
+            if (done === total) fbUploadDone(total, errors);
+          })
+          .catch(function(err) {
+            errors.push(file.name + ': ' + err.message);
+            done++;
+            fbError.textContent = 'Uploading... (' + done + '/' + total + ')';
+            if (done === total) fbUploadDone(total, errors);
+          });
+        })(files[i]);
+      }
+    }
+
+    function fbUploadDone(total, errors) {
+      if (errors.length === 0) {
+        fbError.textContent = 'Uploaded ' + total + ' file' + (total > 1 ? 's' : '');
+        fbError.style.color = '#4ade80';
+        fbError.style.background = '#1a2a1a';
+      } else {
+        fbError.textContent = errors.join('; ');
+        fbError.style.color = '#f87171';
+        fbError.style.background = '#2a1a1a';
+      }
+      fbError.style.display = 'block';
+      fbLoadDir(fbCurrentPath);
+      setTimeout(function() {
+        fbError.style.display = 'none';
+        fbError.style.color = '#f87171';
+        fbError.style.background = '#2a1a1a';
+      }, 4000);
+    }
+
     if (!isMobile) term.focus();
     connectVoice();
   </script>
+  <script>if('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js');</script>
 </body>
 </html>`;
 
@@ -1741,10 +2458,9 @@ function parseCookies(cookieHeader: string | undefined): Record<string, string> 
   return cookies;
 }
 
-// Helper: check auth
+// Helper: check auth (backward compat wrapper)
 function isAuthenticated(req: http.IncomingMessage): boolean {
-  const cookies = parseCookies(req.headers.cookie);
-  return cookies.auth === AUTH_TOKEN;
+  return getAuthInfo(req).authenticated;
 }
 
 // HTTP server
@@ -1752,7 +2468,7 @@ const server = http.createServer(async (req, res) => {
   // Security headers
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:;");
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:; manifest-src 'self';");
 
   // Only log non-routine requests
   if (req.url !== '/health' && !req.url?.startsWith('/terminal?session=')) {
@@ -1778,14 +2494,34 @@ const server = http.createServer(async (req, res) => {
     req.on('end', () => {
       try {
         const body = Buffer.concat(chunks).toString();
-        const { password } = JSON.parse(body);
-        if (password === PASSWORD) {
+        const parsed = JSON.parse(body);
+        const { password, username } = parsed;
+
+        let loginOk = false;
+        let tokenUsername = 'admin';
+
+        if (isMultiUser) {
+          // Multi-user: look up username in config
+          if (username && usersConfig[username] && password === usersConfig[username]!.password) {
+            loginOk = true;
+            tokenUsername = username;
+          }
+        } else {
+          // Single-user: just verify password
+          if (password === PASSWORD) {
+            loginOk = true;
+            tokenUsername = 'admin';
+          }
+        }
+
+        if (loginOk) {
           clearLoginAttempts(clientIp);
           const isSecure = req.headers['x-forwarded-proto'] === 'https' || (req.socket as any).encrypted;
           const securePart = isSecure ? ' Secure;' : '';
+          const authToken = makeAuthToken(tokenUsername);
           res.writeHead(200, {
             'Content-Type': 'application/json',
-            'Set-Cookie': `auth=${AUTH_TOKEN}; Path=/; Max-Age=86400; SameSite=Lax; HttpOnly;${securePart}`
+            'Set-Cookie': `auth=${authToken}; Path=/; Max-Age=86400; SameSite=Lax; HttpOnly;${securePart}`
           });
           res.end(JSON.stringify({ success: true }));
         } else {
@@ -1799,6 +2535,18 @@ const server = http.createServer(async (req, res) => {
       }
     });
     req.resume(); // Ensure data flows even if buffered
+    return;
+  }
+
+  // Handle logout
+  if (req.url === '/logout' || req.url === '/terminal/logout') {
+    const isSecure = req.headers['x-forwarded-proto'] === 'https' || (req.socket as any).encrypted;
+    const securePart = isSecure ? ' Secure;' : '';
+    res.writeHead(302, {
+      'Location': '/terminal',
+      'Set-Cookie': `auth=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly;${securePart}`,
+    });
+    res.end();
     return;
   }
 
@@ -1831,24 +2579,110 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // --- Serve static PWA assets (no auth required) ---
+  const parsedUrl = new URL(req.url || '/', `http://${req.headers.host}`);
+  const pathname = parsedUrl.pathname;
+  // Strip /terminal prefix so PWA assets work behind reverse proxy
+  const assetPath = pathname.startsWith('/terminal/') ? pathname.slice('/terminal'.length) : pathname;
+
+  if (assetPath === '/manifest.json' || assetPath === '/sw.js' ||
+      assetPath.startsWith('/icons/') || assetPath === '/favicon.ico') {
+    const MIME_TYPES: Record<string, string> = {
+      '.json': 'application/json',
+      '.js': 'application/javascript',
+      '.png': 'image/png',
+      '.svg': 'image/svg+xml',
+      '.ico': 'image/x-icon',
+    };
+    // Map /favicon.ico to the 32px PNG
+    const filePath = assetPath === '/favicon.ico'
+      ? path.join(__dirname, '..', 'public', 'icons', 'favicon-32.png')
+      : path.join(__dirname, '..', 'public', assetPath);
+    const ext = path.extname(filePath);
+    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+    try {
+      const data = await fs.promises.readFile(filePath);
+      const cacheControl = assetPath === '/sw.js' ? 'no-cache' : 'public, max-age=86400';
+      res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': cacheControl });
+      res.end(data);
+    } catch {
+      res.writeHead(404);
+      res.end('Not found');
+    }
+    return;
+  }
+
   // Check authentication
-  const cookies = parseCookies(req.headers.cookie);
-  if (cookies.auth !== AUTH_TOKEN) {
+  const auth = getAuthInfo(req);
+  if (!auth.authenticated) {
     res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(loginHtml);
+    res.end(getLoginHtml());
     return;
   }
 
   // --- Authenticated routes below ---
 
   // --- File browser API ---
-  const parsedUrl = new URL(req.url || '/', `http://${req.headers.host}`);
-  const pathname = parsedUrl.pathname;
+
+  if ((pathname === '/terminal/file-upload' || pathname === '/file-upload') && req.method === 'POST') {
+    try {
+      const targetDir = resolveSafePath(parsedUrl.searchParams.get('path') || '/');
+      const rawFilename = req.headers['x-filename'] as string;
+      let filename: string;
+      try { filename = decodeURIComponent(rawFilename); } catch { filename = rawFilename; }
+      if (!filename || filename.includes('/') || filename.includes('\\')) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid or missing X-Filename header' }));
+        return;
+      }
+
+      // Verify target directory exists and is a directory
+      const dirStat = await fs.promises.stat(targetDir);
+      if (!dirStat.isDirectory()) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Target path is not a directory' }));
+        return;
+      }
+
+      // Permission check: can user write to this directory?
+      const posixUser = auth.linuxUser ? getUserPosixInfo(auth.linuxUser) : null;
+      if (posixUser && !checkPosixAccess(dirStat, posixUser, 'write')) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Permission denied' }));
+        return;
+      }
+
+      // Read raw body
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+      const body = Buffer.concat(chunks);
+
+      const filePath = path.join(targetDir, filename);
+      await fs.promises.writeFile(filePath, body);
+
+      // Multi-user: chown file to user's uid/gid
+      if (posixUser) {
+        try { fs.chownSync(filePath, posixUser.uid, posixUser.gid); } catch {}
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, path: filePath }));
+    } catch (e: any) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message || 'Upload failed' }));
+    }
+    return;
+  }
 
   if ((pathname === '/terminal/files' || pathname === '/files') && req.method === 'GET') {
     try {
       const sid = parsedUrl.searchParams.get('session');
       if (!sid) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Session not found' })); return; }
+
+      // Determine user's home directory for fallback
+      const userHome = auth.linuxUser
+        ? (auth.linuxUser === 'root' ? '/root' : `/home/${auth.linuxUser}`)
+        : (process.env.HOME || '/');
 
       let requestedPath = parsedUrl.searchParams.get('path') || '';
       let dirPath: string;
@@ -1860,10 +2694,10 @@ const server = http.createServer(async (req, res) => {
             const cwdData = await cwdResp.json() as { cwd: string };
             dirPath = cwdData.cwd;
           } else {
-            dirPath = process.env.HOME || '/';
+            dirPath = userHome;
           }
         } catch {
-          dirPath = process.env.HOME || '/';
+          dirPath = userHome;
         }
       } else {
         dirPath = resolveSafePath(requestedPath);
@@ -1881,12 +2715,27 @@ const server = http.createServer(async (req, res) => {
         } catch {}
       }
 
+      // Permission check: can user read+execute (list) this directory?
+      const posixUser = auth.linuxUser ? getUserPosixInfo(auth.linuxUser) : null;
+      if (posixUser) {
+        const dirStat = await fs.promises.stat(dirPath);
+        if (!checkPosixAccess(dirStat, posixUser, 'read+execute')) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Permission denied' }));
+          return;
+        }
+      }
+
+      const showHidden = parsedUrl.searchParams.get('hidden') === '1';
       const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
       const items: any[] = [];
       for (const entry of entries) {
+        if (!showHidden && entry.name.startsWith('.')) continue;
         const fullPath = path.join(dirPath, entry.name);
         let stat;
         try { stat = await fs.promises.stat(fullPath); } catch { continue; }
+        // Filter: only show entries the user can at least stat
+        if (posixUser && !checkPosixAccess(stat, posixUser, 'read')) continue;
         items.push({
           name: entry.name,
           isDirectory: entry.isDirectory(),
@@ -1920,6 +2769,11 @@ const server = http.createServer(async (req, res) => {
       const stat = await fs.promises.stat(filePath);
       if (stat.isDirectory()) { res.writeHead(400); res.end('Cannot download directory'); return; }
 
+      const posixUser = auth.linuxUser ? getUserPosixInfo(auth.linuxUser) : null;
+      if (posixUser && !checkPosixAccess(stat, posixUser, 'read')) {
+        res.writeHead(403); res.end('Permission denied'); return;
+      }
+
       const mime = getMimeType(filePath);
       const fileName = path.basename(filePath);
       res.writeHead(200, {
@@ -1944,6 +2798,11 @@ const server = http.createServer(async (req, res) => {
 
       const stat = await fs.promises.stat(filePath);
       if (stat.isDirectory()) { res.writeHead(400); res.end('Cannot preview directory'); return; }
+
+      const posixUser = auth.linuxUser ? getUserPosixInfo(auth.linuxUser) : null;
+      if (posixUser && !checkPosixAccess(stat, posixUser, 'read')) {
+        res.writeHead(403); res.end('Permission denied'); return;
+      }
 
       const mime = getMimeType(filePath);
       const fileName = path.basename(filePath);
@@ -2026,10 +2885,12 @@ const server = http.createServer(async (req, res) => {
   if (action === 'new') {
     const id = 'sess_' + randomBytes(12).toString('hex');
     try {
+      const sessionBody: Record<string, string> = { id, owner: auth.username };
+      if (auth.linuxUser) sessionBody.linuxUser = auth.linuxUser;
       await ptyFetch('/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id }),
+        body: JSON.stringify(sessionBody),
       });
     } catch (e) {
       console.error('Failed to create session via PTY service:', e);
@@ -2048,7 +2909,7 @@ const server = http.createServer(async (req, res) => {
 
   // Session chooser (default for /terminal with no params, or any other path)
   res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
-  res.end(await buildSessionsHtml());
+  res.end(await buildSessionsHtml(auth.username));
 });
 
 // Terminal WebSocket server — proxies to PTY service
@@ -2056,9 +2917,11 @@ const terminalWss = new WebSocketServer({ noServer: true });
 terminalWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
   const url = new URL(req.url!, `http://${req.headers.host}`);
   const sessionId = url.searchParams.get('session') || 'default';
+  const wsAuth = getAuthInfo(req);
 
-  // Connect to PTY service WebSocket
-  const ptyWsUrl = `ws://127.0.0.1:${PTY_SERVICE_PORT}/ws/${encodeURIComponent(sessionId)}`;
+  // Connect to PTY service WebSocket, include owner for verification (root bypasses)
+  const ownerQuery = isMultiUser && wsAuth.username !== 'root' ? `?owner=${encodeURIComponent(wsAuth.username)}` : '';
+  const ptyWsUrl = `ws://127.0.0.1:${PTY_SERVICE_PORT}/ws/${encodeURIComponent(sessionId)}${ownerQuery}`;
   const ptyWs = new WebSocket(ptyWsUrl, {
     headers: { [PTY_INTERNAL_TOKEN_HEADER]: PTY_INTERNAL_TOKEN },
   });

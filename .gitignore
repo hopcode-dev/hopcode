@@ -39,4 +39,5 @@ server-node.mjs
 telemetry-id
 allowlist.json
 package-lock.json
+users.json
 .cursor/

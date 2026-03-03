@@ -15,6 +15,7 @@ export function getPtyInternalToken(): string {
 export interface SessionInfo {
   id: string;
   name: string;
+  owner: string;
   createdAt: number;
   lastActivity: number;
   clientCount: number;

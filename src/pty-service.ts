@@ -41,6 +41,8 @@ interface Session {
   headlessTerm: InstanceType<typeof HeadlessTerminal>;
   serializeAddon: InstanceType<typeof SerializeAddon>;
   name: string;
+  owner: string;
+  linuxUser: string;
   createdAt: number;
   lastActivity: number;
   cursorHidden: boolean;
@@ -51,27 +53,62 @@ let sessionCounter = 0;
 
 async function getSessionCwd(session: Session): Promise<string> {
   try {
-    return await fs.promises.readlink('/proc/' + session.pty.pid + '/cwd');
+    const pid = session.pty.pid;
+    if (session.linuxUser) {
+      // Multi-user: su forks a child shell — find the deepest child process's cwd
+      try {
+        const children = await fs.promises.readdir(`/proc/${pid}/task/${pid}/children`).catch(() => null);
+        // /proc/pid/task/pid/children doesn't work as a dir, read the file instead
+        const childrenData = await fs.promises.readFile(`/proc/${pid}/task/${pid}/children`, 'utf-8').catch(() => '');
+        const childPids = childrenData.trim().split(/\s+/).filter(Boolean);
+        if (childPids.length > 0) {
+          // Walk to the deepest child (su → bash → maybe another process)
+          let deepest = childPids[childPids.length - 1]!;
+          for (let i = 0; i < 5; i++) {
+            const grandChildren = await fs.promises.readFile(`/proc/${deepest}/task/${deepest}/children`, 'utf-8').catch(() => '');
+            const gc = grandChildren.trim().split(/\s+/).filter(Boolean);
+            if (gc.length === 0) break;
+            deepest = gc[gc.length - 1]!;
+          }
+          return await fs.promises.readlink(`/proc/${deepest}/cwd`);
+        }
+      } catch {}
+    }
+    return await fs.promises.readlink('/proc/' + pid + '/cwd');
   } catch {
     return process.env.HOME || '/';
   }
 }
 
-function createSession(id: string): Session {
-  const ptyProcess = pty.spawn('/bin/bash', ['--login', '-i'], {
-    name: 'xterm-256color',
-    cols: 120,
-    rows: 30,
-    cwd: process.env.HOME || '/',
-    env: {
-      ...Object.fromEntries(
-        Object.entries(process.env).filter(([k]) => k !== 'CLAUDECODE')
-      ) as { [key: string]: string },
-      TERM: 'xterm-256color',
-      SHELL: '/bin/bash',
-      PS1: '\\[\\033[32m\\]\\u\\[\\033[0m\\]:\\[\\033[34m\\]\\W\\[\\033[0m\\]\\$ ',
-    },
-  });
+function createSession(id: string, owner: string = 'admin', linuxUser?: string): Session {
+  let ptyProcess: pty.IPty;
+  if (linuxUser) {
+    // Multi-user mode: spawn shell as the target Linux user via su -
+    ptyProcess = pty.spawn('/bin/su', ['-', linuxUser], {
+      name: 'xterm-256color',
+      cols: 120,
+      rows: 30,
+      env: {
+        TERM: 'xterm-256color',
+      },
+    });
+  } else {
+    // Single-user mode: spawn bash directly (backward compat)
+    ptyProcess = pty.spawn('/bin/bash', ['--login', '-i'], {
+      name: 'xterm-256color',
+      cols: 120,
+      rows: 30,
+      cwd: process.env.HOME || '/',
+      env: {
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(([k]) => k !== 'CLAUDECODE')
+        ) as { [key: string]: string },
+        TERM: 'xterm-256color',
+        SHELL: '/bin/bash',
+        PS1: '\\[\\033[32m\\]\\u\\[\\033[0m\\]:\\[\\033[34m\\]\\W\\[\\033[0m\\]\\$ ',
+      },
+    });
+  }
 
   sessionCounter++;
 
@@ -85,6 +122,8 @@ function createSession(id: string): Session {
     headlessTerm,
     serializeAddon,
     name: `Session ${sessionCounter}`,
+    owner,
+    linuxUser: linuxUser || '',
     createdAt: Date.now(),
     lastActivity: Date.now(),
     cursorHidden: false,
@@ -125,8 +164,8 @@ function createSession(id: string): Session {
   return session;
 }
 
-function getSession(id: string): Session {
-  return sessions.get(id) || createSession(id);
+function getSession(id: string): Session | undefined {
+  return sessions.get(id);
 }
 
 // --- Internal token auth check ---
@@ -157,11 +196,17 @@ const server = http.createServer(async (req, res) => {
   const parsedUrl = new URL(req.url || '/', `http://${req.headers.host}`);
   const pathname = parsedUrl.pathname;
 
-  // GET /sessions — list all sessions
+  // GET /sessions — list sessions (optionally filtered by ?owner=)
   if (pathname === '/sessions' && req.method === 'GET') {
-    const list: SessionInfo[] = Array.from(sessions.entries()).map(([id, s]) => ({
+    const ownerFilter = parsedUrl.searchParams.get('owner');
+    let entries = Array.from(sessions.entries());
+    if (ownerFilter) {
+      entries = entries.filter(([, s]) => s.owner === ownerFilter);
+    }
+    const list: SessionInfo[] = entries.map(([id, s]) => ({
       id,
       name: s.name,
+      owner: s.owner,
       createdAt: s.createdAt,
       lastActivity: s.lastActivity,
       clientCount: s.clients.size,
@@ -184,7 +229,9 @@ const server = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ error: 'id required' }));
           return;
         }
-        createSession(id);
+        const owner = body.owner || 'admin';
+        const linuxUser = body.linuxUser || undefined;
+        createSession(id, owner, linuxUser);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ id }));
       } catch {
@@ -261,6 +308,20 @@ wss.on('connection', (ws, req) => {
   const sessionId = decodeURIComponent(pathParts[2] || 'default');
 
   const session = getSession(sessionId);
+  if (!session) {
+    console.log(`[pty-service] Rejected WS: session ${sessionId} not found`);
+    ws.close(4004, 'Session not found');
+    return;
+  }
+
+  // Verify owner if provided in query
+  const ownerParam = url.searchParams.get('owner');
+  if (ownerParam && session.owner !== ownerParam) {
+    console.log(`[pty-service] Rejected WS: owner mismatch for ${sessionId}`);
+    ws.close(4003, 'Forbidden');
+    return;
+  }
+
   session.clients.add(ws);
   console.log(`[pty-service] Client connected: ${sessionId} (${session.clients.size} clients)`);
 
