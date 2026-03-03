@@ -11,8 +11,16 @@
  *   4. Open that URL on your phone → instant authenticated terminal
  */
 
-import { spawn, type ChildProcess } from 'child_process';
+import { spawn, execSync, type ChildProcess } from 'child_process';
 import { createHmac, randomBytes } from 'crypto';
+import { existsSync } from 'fs';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const PROJECT_ROOT = resolve(__dirname, '..');
+const TSX = resolve(PROJECT_ROOT, 'node_modules', '.bin', 'tsx');
 
 const PORT = parseInt(process.env.PORT || '3000');
 const children: ChildProcess[] = [];
@@ -41,13 +49,42 @@ function makeAuthToken(password: string, username: string): string {
   return `${username}:${hmac}`;
 }
 
+function preflight() {
+  if (!existsSync(TSX)) {
+    console.error('  tsx not found. Run: bun install');
+    process.exit(1);
+  }
+
+  // Check node-pty native module
+  try {
+    execSync('node -e "require(\'node-pty\')"', {
+      cwd: PROJECT_ROOT,
+      stdio: 'ignore',
+      timeout: 5000,
+    });
+  } catch {
+    console.error(`
+  node-pty native module not built.
+  If you used bun install, run:
+
+    bun pm trust node-pty && bun install
+
+  Then try again.
+`);
+    process.exit(1);
+  }
+}
+
 async function main() {
+  preflight();
+
   const password = process.env.AUTH_PASSWORD || randomBytes(16).toString('hex');
   const token = makeAuthToken(password, 'admin');
   const env = { ...process.env, AUTH_PASSWORD: password };
 
   // Start PTY service
-  const pty = spawn('npx', ['tsx', 'src/pty-service.ts'], {
+  const pty = spawn(TSX, ['src/pty-service.ts'], {
+    cwd: PROJECT_ROOT,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -61,7 +98,8 @@ async function main() {
   });
 
   // Start UI service with tunnel
-  const ui = spawn('npx', ['tsx', 'src/server-node.ts', '--tunnel'], {
+  const ui = spawn(TSX, ['src/server-node.ts', '--tunnel'], {
+    cwd: PROJECT_ROOT,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
