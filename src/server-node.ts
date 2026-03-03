@@ -3222,11 +3222,15 @@ const server = http.createServer(async (req, res) => {
     try {
       const sessionBody: Record<string, string> = { id, owner: auth.username };
       if (auth.linuxUser) sessionBody.linuxUser = auth.linuxUser;
-      await ptyFetch('/sessions', {
+      const resp = await ptyFetch('/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(sessionBody),
       });
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => '');
+        console.error(`Failed to create session on PTY service: status=${resp.status} body=${body}`);
+      }
     } catch (e) {
       console.error('Failed to create session via PTY service:', e);
     }

@@ -48,6 +48,7 @@
     "typescript": "^5"
   },
   "trustedDependencies": [
+    "cloudflared",
     "node-pty",
     "sharp"
   ],
