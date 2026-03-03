@@ -14,7 +14,8 @@
     "go": "node ./node_modules/tsx/dist/cli.mjs src/quick.ts",
     "dev": "npx tsx src/pty-service.ts & npx tsx --watch src/server-node.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun run src/test-all.ts"
+    "test": "bun run src/test-all.ts",
+    "postinstall": "cd node_modules/node-pty && npx node-gyp rebuild || true"
   },
   "keywords": [
     "terminal",
