@@ -115,8 +115,8 @@ async function main() {
   Local: http://localhost:${PORT}
   Press Ctrl+C to stop
 `);
-      } else if (!tunnelUrl) {
-        // Show child output until tunnel is established (helps debug startup issues)
+      } else {
+        // Always forward child output (errors, warnings, etc.)
         process.stderr.write(`[ui] ${line}\n`);
       }
     }

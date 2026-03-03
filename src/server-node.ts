@@ -229,7 +229,12 @@ async function ptyFetch(urlPath: string, options?: RequestInit): Promise<Respons
   const url = PTY_BASE_URL + urlPath;
   const headers = new Headers(options?.headers);
   headers.set(PTY_INTERNAL_TOKEN_HEADER, PTY_INTERNAL_TOKEN);
-  return fetch(url, { ...options, headers });
+  const resp = await fetch(url, { ...options, headers });
+  if (!resp.ok) {
+    const body = await resp.clone().text().catch(() => '');
+    console.error(`[ptyFetch] ${options?.method || 'GET'} ${urlPath} → ${resp.status}: ${body}`);
+  }
+  return resp;
 }
 
 // --- File browser helpers ---
