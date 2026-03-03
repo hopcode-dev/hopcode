@@ -1189,6 +1189,8 @@ const indexHtml = `<!DOCTYPE html>
     <div id="fb-header">
       <button id="fb-close">&times;</button>
       <span id="fb-title">Files</span>
+      <button id="fb-upload-btn" class="key-btn" title="Upload files" style="font-size:14px;">&#x2191;</button>
+      <input type="file" id="fb-upload-input" multiple style="display:none;">
       <button id="fb-hidden-btn" class="key-btn" title="Toggle hidden files" style="font-size:10px;opacity:0.5">.*</button>
       <button id="fb-cwd-btn" class="key-btn" title="Go to PTY working directory">CWD</button>
     </div>
@@ -2529,6 +2531,14 @@ const indexHtml = `<!DOCTYPE html>
     });
     document.getElementById('fb-close').addEventListener('click', fbClose);
     document.getElementById('fb-cwd-btn').addEventListener('click', function() { fbLoadDir(''); });
+    var fbUploadInput = document.getElementById('fb-upload-input');
+    document.getElementById('fb-upload-btn').addEventListener('click', function() { fbUploadInput.click(); });
+    fbUploadInput.addEventListener('change', function() {
+      if (fbUploadInput.files && fbUploadInput.files.length > 0) {
+        fbUploadFiles(fbUploadInput.files);
+        fbUploadInput.value = '';
+      }
+    });
     fbHiddenBtn.addEventListener('click', function() {
       fbShowHidden = !fbShowHidden;
       fbHiddenBtn.style.opacity = fbShowHidden ? '1' : '0.5';
