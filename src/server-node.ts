@@ -779,13 +779,13 @@ async function buildSessionsHtml(username?: string): Promise<string> {
           restore(d.success ? newName : name);
         }).catch(function() { restore(name); });
       }
-      var committed = false;
+      var done = false;
       input.addEventListener('click', function(ev) { ev.preventDefault(); ev.stopPropagation(); });
       input.addEventListener('keydown', function(ev) {
-        if (ev.key === 'Enter') { ev.preventDefault(); committed = true; save(); }
-        if (ev.key === 'Escape') { ev.preventDefault(); restore(name); }
+        if (ev.key === 'Enter') { ev.preventDefault(); if (!done) { done = true; save(); } }
+        if (ev.key === 'Escape') { ev.preventDefault(); if (!done) { done = true; restore(name); } }
       });
-      input.addEventListener('blur', function() { if (!committed) restore(name); });
+      input.addEventListener('blur', function() { if (!done) { done = true; save(); } });
     }
 
     // --- Delete confirmation ---
