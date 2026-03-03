@@ -292,6 +292,34 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // DELETE /sessions/:id — kill and remove session
+  const deleteMatch = pathname.match(/^\/sessions\/([^/]+)$/);
+  if (deleteMatch && req.method === 'DELETE') {
+    const sid = decodeURIComponent(deleteMatch[1]!);
+    const session = sessions.get(sid);
+    if (!session) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Session not found' }));
+      return;
+    }
+    // Kill the PTY process — onExit handler will clean up clients & remove from map
+    try { session.pty.kill(); } catch {}
+    // In case onExit doesn't fire immediately, also clean up
+    setTimeout(() => {
+      if (sessions.has(sid)) {
+        for (const client of session.clients) {
+          try { client.close(); } catch {}
+        }
+        try { session.headlessTerm.dispose(); } catch {}
+        sessions.delete(sid);
+      }
+    }, 500);
+    console.log(`[pty-service] Session deleted: ${sid}`);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true }));
+    return;
+  }
+
   // 404
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ error: 'Not found' }));

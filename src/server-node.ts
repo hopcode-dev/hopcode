@@ -534,17 +534,21 @@ async function buildSessionsHtml(username?: string): Promise<string> {
   }
 
   function renderCard(s: typeof sessionList[0]): string {
-    const cl = s.clients === 0 ? 'idle' : s.clients === 1 ? '1 client' : s.clients + ' clients';
-    const badgeClass = s.clients > 0 ? ' active' : '';
-    return `<a class="session-card" href="/terminal?session=${encodeURIComponent(s.id)}">
-      <div class="session-info"><div class="session-name" data-session="${esc(s.id)}"><span class="session-name-text">${esc(s.name)}</span><button class="rename-btn" title="Rename session">&#9998;</button></div>
-      <div class="session-meta">Active ${fmtAge(s.lastActivity)} · Created ${fmtAge(s.createdAt)}</div></div>
-      <span class="session-badge${badgeClass}">${cl}</span></a>`;
+    const isActive = s.clients > 0;
+    const barClass = isActive ? 'bar-active' : 'bar-idle';
+    return `<a class="session-card" href="/terminal?session=${encodeURIComponent(s.id)}" data-session-id="${esc(s.id)}">
+      <div class="card-bar ${barClass}"></div>
+      <div class="session-info">
+        <div class="session-name" data-session="${esc(s.id)}"><span class="session-name-text">${esc(s.name)}</span></div>
+        <div class="session-meta">${fmtAge(s.lastActivity)}</div>
+      </div>
+      <button class="delete-btn" title="Delete session">&times;</button>
+    </a>`;
   }
 
   let cardsHtml = '';
   if (sessionList.length === 0) {
-    cardsHtml = '<div class="empty-state"><p>No active sessions</p><a class="new-btn" href="/terminal?action=new">Create your first session</a></div>';
+    cardsHtml = '<div class="empty-state"><p>No active sessions</p><p class="empty-sub">Create one to get started</p></div>';
   } else if (isRoot) {
     // Group by owner, root's own sessions first
     const groups = new Map<string, typeof sessionList>();
@@ -559,8 +563,20 @@ async function buildSessionsHtml(username?: string): Promise<string> {
       return a.localeCompare(b);
     });
     for (const owner of sortedOwners) {
-      cardsHtml += `<div class="group-header">${esc(owner)}</div>`;
+      const initial = owner.charAt(0).toUpperCase();
+      const count = groups.get(owner)!.length;
+      cardsHtml += `<div class="group-section">
+        <div class="group-header" data-owner="${esc(owner)}">
+          <div class="group-left">
+            <span class="avatar">${initial}</span>
+            <span class="group-name">${esc(owner)}</span>
+            <span class="group-count">${count}</span>
+          </div>
+          <span class="group-chevron">&#9662;</span>
+        </div>
+        <div class="group-body">`;
       for (const s of groups.get(owner)!) cardsHtml += renderCard(s);
+      cardsHtml += `</div></div>`;
     }
   } else {
     for (const s of sessionList) cardsHtml += renderCard(s);
@@ -571,7 +587,7 @@ async function buildSessionsHtml(username?: string): Promise<string> {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <meta name="theme-color" content="#1a1a2e">
+  <meta name="theme-color" content="#111827">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Hopcode">
@@ -582,89 +598,155 @@ async function buildSessionsHtml(username?: string): Promise<string> {
   <title>Hopcode - Sessions</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { min-height: 100%; background: #1a1a2e; font-family: system-ui; color: #e0e0e0; }
-    .container { max-width: 700px; margin: 0 auto; padding: 24px; }
-    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
-    h1 { color: #4ade80; font-size: 24px; }
+    html, body { min-height: 100%; background: #111827; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; color: #e5e7eb; }
+    .container { max-width: 600px; margin: 0 auto; padding: 20px 16px; }
+
+    /* Header */
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+    .header-left { display: flex; align-items: center; gap: 10px; }
+    .header-left h1 { color: #4ade80; font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
+    .header-right { display: flex; align-items: center; gap: 8px; }
+    .user-info { color: #6b7280; font-size: 12px; }
     .new-btn {
-      padding: 10px 20px; background: #4ade80; color: #000; border: none;
-      border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer;
+      padding: 6px 14px; background: #4ade80; color: #000; border: none;
+      border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer;
       text-decoration: none; display: inline-block;
-      -webkit-tap-highlight-color: transparent;
+      -webkit-tap-highlight-color: transparent; transition: background 0.15s;
     }
     .new-btn:hover { background: #22c55e; }
-    .session-list { display: grid; gap: 12px; }
+    .logout-btn { color: #6b7280; font-size: 12px; text-decoration: none; padding: 4px 8px; border-radius: 6px; transition: all 0.15s; }
+    .logout-btn:hover { color: #f87171; background: rgba(248,113,113,0.1); }
+
+    /* Session list */
+    .session-list { display: flex; flex-direction: column; gap: 6px; }
+
+    /* Card */
     .session-card {
-      background: #16213e; border: 2px solid #0f3460; border-radius: 12px;
-      padding: 20px; cursor: pointer; transition: border-color 0.2s;
-      display: flex; justify-content: space-between; align-items: center;
+      display: flex; align-items: center; gap: 0;
+      background: #1f2937; border-radius: 10px;
       text-decoration: none; color: inherit;
+      transition: background 0.15s, transform 0.1s;
+      -webkit-tap-highlight-color: transparent;
+      position: relative; overflow: hidden;
+    }
+    .session-card:hover { background: #273548; }
+    .session-card:active { transform: scale(0.985); }
+    .card-bar { width: 4px; align-self: stretch; border-radius: 4px 0 0 4px; flex-shrink: 0; }
+    .bar-active { background: #4ade80; }
+    .bar-idle { background: #374151; }
+    .session-info { flex: 1; min-width: 0; padding: 14px 12px; }
+    .session-name { display: flex; align-items: center; }
+    .session-name-text { font-size: 15px; font-weight: 600; color: #f3f4f6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .session-meta { font-size: 12px; color: #6b7280; margin-top: 2px; }
+
+    /* Delete button */
+    .delete-btn {
+      background: none; border: none; color: #6b7280; font-size: 20px; line-height: 1;
+      cursor: pointer; padding: 14px 14px 14px 8px; flex-shrink: 0;
+      opacity: 0; transition: opacity 0.15s, color 0.15s;
       -webkit-tap-highlight-color: transparent;
     }
-    .session-card:hover, .session-card:active { border-color: #4ade80; }
-    .session-info { flex: 1; min-width: 0; }
-    .session-name { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
-    .session-meta { font-size: 13px; color: #888; }
-    .session-badge {
-      padding: 4px 10px; border-radius: 12px; font-size: 12px;
-      background: #1a1a2e; color: #888; white-space: nowrap; margin-left: 12px;
-    }
-    .session-badge.active { background: #4ade80; color: #000; }
-    .session-name { display: flex; align-items: center; gap: 8px; }
-    .rename-btn {
-      background: none; border: 1px solid #444; color: #888; border-radius: 4px;
-      cursor: pointer; font-size: 13px; padding: 1px 5px; line-height: 1;
-      opacity: 0; transition: opacity 0.15s;
-      flex-shrink: 0;
-    }
-    .session-card:hover .rename-btn { opacity: 1; }
-    .rename-btn:hover { color: #4ade80; border-color: #4ade80; }
+    .session-card:hover .delete-btn { opacity: 1; }
+    .delete-btn:hover { color: #f87171; }
+
+    /* Rename input */
     .session-name-input {
-      background: #1a1a2e; color: #e0e0e0; border: 1px solid #4ade80; border-radius: 4px;
-      font-size: inherit; font-weight: inherit; font-family: inherit; padding: 2px 6px;
+      background: #111827; color: #f3f4f6; border: 1px solid #4ade80; border-radius: 4px;
+      font-size: 15px; font-weight: 600; font-family: inherit; padding: 2px 6px;
       width: 100%; outline: none;
     }
-    @media (max-width: 500px) {
-      .rename-btn { opacity: 1; }
-    }
+
+    /* Group sections (root view) */
+    .group-section { margin-bottom: 4px; }
     .group-header {
-      font-size: 13px; font-weight: 600; color: #60a5fa; padding: 16px 4px 6px;
-      border-bottom: 1px solid #0f3460; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px;
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 10px 8px 6px; cursor: pointer;
+      -webkit-tap-highlight-color: transparent; user-select: none;
     }
-    .group-header:first-child { padding-top: 0; }
-    .empty-state { text-align: center; padding: 60px 20px; color: #666; }
-    .empty-state p { margin-bottom: 16px; font-size: 18px; }
+    .group-left { display: flex; align-items: center; gap: 8px; }
+    .avatar {
+      width: 26px; height: 26px; border-radius: 50%; background: #374151;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 700; color: #9ca3af; flex-shrink: 0;
+    }
+    .group-name { font-size: 13px; font-weight: 600; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.5px; }
+    .group-count { font-size: 11px; color: #6b7280; background: #1f2937; padding: 1px 6px; border-radius: 8px; }
+    .group-chevron { color: #6b7280; font-size: 12px; transition: transform 0.2s; padding: 0 4px; }
+    .group-header.collapsed .group-chevron { transform: rotate(-90deg); }
+    .group-body { display: flex; flex-direction: column; gap: 6px; }
+    .group-body.collapsed { display: none; }
+
+    /* Empty state */
+    .empty-state { text-align: center; padding: 60px 20px; }
+    .empty-state p { font-size: 16px; color: #6b7280; }
+    .empty-sub { font-size: 13px; color: #4b5563; margin-top: 6px; }
+
+    /* Delete confirm overlay */
+    .confirm-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 1000;
+      background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center;
+      animation: fadeIn 0.15s ease;
+    }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    .confirm-box {
+      background: #1f2937; border: 1px solid #374151; border-radius: 12px;
+      padding: 20px; max-width: 320px; width: calc(100% - 40px); text-align: center;
+    }
+    .confirm-box p { font-size: 14px; color: #d1d5db; margin-bottom: 16px; }
+    .confirm-box .confirm-name { color: #f3f4f6; font-weight: 600; }
+    .confirm-btns { display: flex; gap: 10px; }
+    .confirm-btns button {
+      flex: 1; padding: 10px; border: none; border-radius: 8px; font-size: 14px;
+      font-weight: 600; cursor: pointer; font-family: inherit;
+    }
+    .btn-cancel { background: #374151; color: #d1d5db; }
+    .btn-cancel:hover { background: #4b5563; }
+    .btn-delete { background: #dc2626; color: #fff; }
+    .btn-delete:hover { background: #ef4444; }
+
+    /* Swipe-to-delete (mobile) */
+    .session-card.swiping { transition: none; }
+    .session-card .swipe-bg {
+      position: absolute; top: 0; right: 0; bottom: 0; width: 80px;
+      background: #dc2626; display: flex; align-items: center; justify-content: center;
+      color: #fff; font-size: 13px; font-weight: 600;
+      opacity: 0; transition: opacity 0.15s; border-radius: 0 10px 10px 0;
+    }
+    .session-card.swiped .swipe-bg { opacity: 1; }
+
+    /* Mobile */
     @media (max-width: 500px) {
-      .container { padding: 16px; }
-      .session-name { font-size: 16px; }
-      .session-card { padding: 16px; }
-      h1 { font-size: 20px; }
-      .new-btn { padding: 8px 14px; font-size: 14px; }
+      .container { padding: 14px 12px; }
+      .header-left h1 { font-size: 18px; }
+      .session-info { padding: 12px 10px; }
+      .session-name-text { font-size: 14px; }
+      .new-btn { padding: 6px 12px; font-size: 12px; }
+      .delete-btn { opacity: 0.7; }
     }
-    .header-right { display: flex; align-items: center; gap: 12px; }
-    .user-info { color: #888; font-size: 13px; }
-    .logout-btn { color: #888; font-size: 13px; text-decoration: none; padding: 4px 8px; border-radius: 6px; }
-    .logout-btn:hover { color: #f87171; background: rgba(248,113,113,0.1); }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="header">
-      <h1>Hopcode</h1>
+      <div class="header-left">
+        <h1>Hopcode</h1>
+      </div>
       <div class="header-right">
         ${isMultiUser && username ? `<span class="user-info">${esc(username)}</span>` : ''}
-        <a class="new-btn" href="/terminal?action=new">+ New Session</a>
+        <a class="new-btn" href="/terminal?action=new">+ New</a>
         <a class="logout-btn" href="/terminal/logout">Logout</a>
       </div>
     </div>
     <div class="session-list">${cardsHtml}</div>
   </div>
+
   <script>
+  (function() {
+    // --- Double-click to rename ---
     function startRename(nameEl) {
       if (nameEl.querySelector('input')) return;
       var textSpan = nameEl.querySelector('.session-name-text');
-      var renameBtn = nameEl.querySelector('.rename-btn');
-      var name = textSpan ? textSpan.textContent : nameEl.textContent;
+      var name = textSpan ? textSpan.textContent : '';
       var sessionId = nameEl.getAttribute('data-session');
       var input = document.createElement('input');
       input.type = 'text';
@@ -680,18 +762,10 @@ async function buildSessionsHtml(username?: string): Promise<string> {
         span.className = 'session-name-text';
         span.textContent = text;
         nameEl.appendChild(span);
-        var btn = document.createElement('button');
-        btn.className = 'rename-btn';
-        btn.title = 'Rename session';
-        btn.innerHTML = '&#9998;';
-        nameEl.appendChild(btn);
       }
       function save() {
         var newName = input.value.trim();
-        if (!newName || newName === name) {
-          restore(name);
-          return;
-        }
+        if (!newName || newName === name) { restore(name); return; }
         fetch('/terminal/rename', {
           method: 'POST', credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
@@ -706,26 +780,120 @@ async function buildSessionsHtml(username?: string): Promise<string> {
         if (ev.key === 'Enter') { ev.preventDefault(); committed = true; save(); }
         if (ev.key === 'Escape') { ev.preventDefault(); restore(name); }
       });
-      input.addEventListener('blur', function() {
-        if (!committed) restore(name);
-      });
+      input.addEventListener('blur', function() { if (!committed) restore(name); });
     }
+
+    // --- Delete confirmation ---
+    function confirmDelete(sessionId, sessionName, cardEl) {
+      var overlay = document.createElement('div');
+      overlay.className = 'confirm-overlay';
+      overlay.innerHTML = '<div class="confirm-box">' +
+        '<p>Delete <span class="confirm-name">' + sessionName.replace(/</g,'&lt;') + '</span>?</p>' +
+        '<div class="confirm-btns">' +
+        '<button class="btn-cancel">Cancel</button>' +
+        '<button class="btn-delete">Delete</button>' +
+        '</div></div>';
+      document.body.appendChild(overlay);
+      overlay.querySelector('.btn-cancel').onclick = function() { overlay.remove(); };
+      overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+      overlay.querySelector('.btn-delete').onclick = function() {
+        fetch('/terminal/sessions/' + encodeURIComponent(sessionId), {
+          method: 'DELETE', credentials: 'include'
+        }).then(function(r) { return r.json(); }).then(function(d) {
+          overlay.remove();
+          if (d.success) {
+            cardEl.style.transition = 'opacity 0.2s, transform 0.2s';
+            cardEl.style.opacity = '0';
+            cardEl.style.transform = 'translateX(40px)';
+            setTimeout(function() { cardEl.remove(); }, 200);
+          }
+        }).catch(function() { overlay.remove(); });
+      };
+    }
+
+    // --- Group collapse ---
+    document.querySelectorAll('.group-header').forEach(function(hdr) {
+      hdr.addEventListener('click', function() {
+        hdr.classList.toggle('collapsed');
+        var body = hdr.nextElementSibling;
+        if (body) body.classList.toggle('collapsed');
+      });
+    });
+
+    // --- Card events ---
     document.querySelectorAll('.session-card').forEach(function(card) {
+      var dblClickTimer = null;
+      var clickCount = 0;
+
+      // Double-click on name to rename
       card.addEventListener('click', function(e) {
-        var nameEl = card.querySelector('.session-name');
-        if (!nameEl) return;
         var target = e.target;
-        // Click on rename button or session name text triggers rename
-        if (target.classList.contains('rename-btn') || target.classList.contains('session-name-text')) {
+        // Delete button
+        if (target.classList.contains('delete-btn')) {
           e.preventDefault();
-          startRename(nameEl);
+          e.stopPropagation();
+          var nameSpan = card.querySelector('.session-name-text');
+          confirmDelete(card.getAttribute('data-session-id'), nameSpan ? nameSpan.textContent : '', card);
+          return;
         }
-        // Click on input inside name — just prevent navigation
+        // Input inside rename
         if (target.classList.contains('session-name-input')) {
           e.preventDefault();
+          return;
+        }
+        // Double-click on name area to rename
+        var nameEl = card.querySelector('.session-name');
+        if (nameEl && nameEl.contains(target)) {
+          clickCount++;
+          if (clickCount === 1) {
+            e.preventDefault();
+            dblClickTimer = setTimeout(function() {
+              clickCount = 0;
+              // Single click — navigate
+              window.location.href = card.getAttribute('href');
+            }, 250);
+          } else if (clickCount === 2) {
+            e.preventDefault();
+            clearTimeout(dblClickTimer);
+            clickCount = 0;
+            startRename(nameEl);
+          }
+          return;
+        }
+      });
+
+      // Mobile swipe-to-delete
+      var startX = 0, currentX = 0, swiping = false;
+      card.addEventListener('touchstart', function(e) {
+        if (e.target.classList.contains('session-name-input')) return;
+        startX = e.touches[0].clientX;
+        currentX = startX;
+        swiping = false;
+      }, { passive: true });
+      card.addEventListener('touchmove', function(e) {
+        currentX = e.touches[0].clientX;
+        var dx = startX - currentX;
+        if (dx > 15) {
+          swiping = true;
+          card.classList.add('swiping');
+          var offset = Math.min(dx, 80);
+          card.style.transform = 'translateX(-' + offset + 'px)';
+          if (dx > 60) card.classList.add('swiped');
+          else card.classList.remove('swiped');
+        }
+      }, { passive: true });
+      card.addEventListener('touchend', function(e) {
+        if (!swiping) return;
+        var dx = startX - currentX;
+        card.classList.remove('swiping', 'swiped');
+        card.style.transform = '';
+        if (dx > 60) {
+          var nameSpan = card.querySelector('.session-name-text');
+          confirmDelete(card.getAttribute('data-session-id'), nameSpan ? nameSpan.textContent : '', card);
         }
       });
     });
+  })();
   </script>
   <script>if('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js');</script>
 </body>
@@ -805,6 +973,7 @@ const indexHtml = `<!DOCTYPE html>
     body.light-mode .app-menu-btn { background:#ddd;color:#333; }
     body.light-mode .app-menu-fk-chip { background:#ddd;color:#333; }
     body.light-mode { background:#f5f5f5; }
+    body.light-mode #terminal { filter: invert(1) hue-rotate(180deg); }
     body.light-mode #voice-bar { background:rgba(240,240,240,0.95);border-top-color:#ccc; }
     body.light-mode .key-btn { background:#c8c8c8;color:#111; }
     body.light-mode .key-btn:active { background:#4ade80;color:#000; }
@@ -953,7 +1122,7 @@ const indexHtml = `<!DOCTYPE html>
     }
     #fb-preview-dl { font-size: 12px; padding: 6px 12px; }
     body.mobile #file-browser { max-width: 100%; }
-    #files-btn { font-size: 11px; padding: 0 6px; }
+
   </style>
 </head>
 <body>
@@ -980,7 +1149,6 @@ const indexHtml = `<!DOCTYPE html>
       </div>
       <div id="bar-row2">
         <button id="menu-btn-mobile" class="key-btn mobile-only" style="font-size:16px;min-width:32px;">&#x22EF;</button>
-        <button id="files-btn" class="key-btn" title="Files">Files</button>
         <div id="status">Hold Option to speak</div>
         <div id="text"></div>
         <button id="return-btn" class="key-btn" title="Return" style="font-size:20px;">&#x23CE;</button>
@@ -1049,6 +1217,7 @@ const indexHtml = `<!DOCTYPE html>
     <div class="app-menu-backdrop"></div>
     <div class="app-menu-panel">
       <a class="app-menu-item" href="/terminal">&#x2630; Sessions</a>
+      <div class="app-menu-item" id="menu-files">&#x1F4C1; Files</div>
       <div class="app-menu-sep"></div>
       <div class="app-menu-section">Font Size</div>
       <div class="app-menu-row" style="padding:6px 16px;gap:10px;">
@@ -1061,6 +1230,7 @@ const indexHtml = `<!DOCTYPE html>
       <div id="menu-fk-list" style="padding:6px 16px;display:flex;flex-direction:column;gap:4px;"></div>
       <div class="app-menu-row" style="padding:6px 16px;gap:8px;">
         <button class="app-menu-btn" id="menu-fk-add">+ Add</button>
+        <button class="app-menu-btn" id="menu-fk-hide">Hide</button>
         <button class="app-menu-btn" id="menu-fk-reset" style="background:#333;color:#f87171;">Reset</button>
       </div>
       <div class="app-menu-sep"></div>
@@ -1376,27 +1546,7 @@ const indexHtml = `<!DOCTYPE html>
           e.stopPropagation();
           var blob = items[i].getAsFile();
           if (!blob) return;
-          var statusEl = document.getElementById('status');
-          var prevStatus = statusEl ? statusEl.textContent : '';
-          if (statusEl) { statusEl.textContent = 'Uploading image...'; statusEl.style.background = '#60a5fa'; }
-          fetch('/terminal/upload', {
-            method: 'POST',
-            credentials: 'include',
-            headers: { 'Content-Type': blob.type },
-            body: blob
-          }).then(function(r) {
-            if (!r.ok) throw new Error('HTTP ' + r.status);
-            return r.json();
-          }).then(function(data) {
-            if (data.error) throw new Error(data.error);
-            if (data.path) sendInput(data.path + ' ');
-            if (statusEl) { statusEl.textContent = 'Image uploaded'; statusEl.style.background = '#4ade80'; }
-            setTimeout(function() { if (statusEl) { statusEl.textContent = prevStatus; statusEl.style.background = ''; } }, 2000);
-          }).catch(function(err) {
-            console.error('[paste] upload failed:', err);
-            if (statusEl) { statusEl.textContent = 'Upload failed: ' + err.message; statusEl.style.background = '#f87171'; }
-            setTimeout(function() { if (statusEl) { statusEl.textContent = prevStatus; statusEl.style.background = ''; } }, 5000);
-          });
+          pasteUploadFile(blob);
           return;
         }
       }
@@ -1450,13 +1600,33 @@ const indexHtml = `<!DOCTYPE html>
     pasteOverlay.innerHTML = '<div style="width:100%;max-width:480px;background:#16213e;border:2px solid #0f3460;border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:12px;">'
       + '<div style="color:#e0e0e0;font-size:14px;font-family:system-ui;">Paste content here:</div>'
       + '<textarea id="paste-input" style="width:100%;height:120px;background:#1a1a2e;color:#e0e0e0;border:1px solid #333;border-radius:8px;padding:10px;font-family:monospace;font-size:14px;resize:vertical;outline:none;" placeholder="Long press or Ctrl+V to paste..."></textarea>'
-      + '<div style="display:flex;gap:8px;justify-content:flex-end;">'
+      + '<div id="paste-file-preview" style="display:none;text-align:center;"><img id="paste-file-thumb" style="max-width:100%;max-height:120px;border-radius:6px;border:1px solid #333;"><div id="paste-file-icon" style="display:none;font-size:40px;padding:10px;">&#x1F4CE;</div><div id="paste-file-name" style="font-size:12px;color:#888;margin-top:4px;"></div></div>'
+      + '<div style="display:flex;gap:8px;justify-content:flex-end;align-items:center;">'
+      + '<button id="paste-file-btn" style="padding:8px 12px;background:#0f3460;color:#e0e0e0;border:none;border-radius:6px;font-size:13px;cursor:pointer;margin-right:auto;" title="Upload file">&#x1F4CE; File</button>'
+      + '<input type="file" id="paste-file-input" style="display:none;">'
       + '<button id="paste-cancel" style="padding:8px 16px;background:#333;color:#e0e0e0;border:none;border-radius:6px;font-size:14px;cursor:pointer;">Cancel</button>'
       + '<button id="paste-send" style="padding:8px 16px;background:#4ade80;color:#000;border:none;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer;">Send</button>'
       + '</div></div>';
     document.body.appendChild(pasteOverlay);
 
+    var pasteFileInput = document.getElementById('paste-file-input');
+    var pasteFilePreview = document.getElementById('paste-file-preview');
+    var pasteFileThumb = document.getElementById('paste-file-thumb');
+    var pasteFileIcon = document.getElementById('paste-file-icon');
+    var pasteFileName = document.getElementById('paste-file-name');
+    var pasteFile = null;
+
+    function pasteReset() {
+      pasteFile = null;
+      pasteFilePreview.style.display = 'none';
+      pasteFileThumb.style.display = 'none';
+      pasteFileThumb.src = '';
+      pasteFileIcon.style.display = 'none';
+      pasteFileName.textContent = '';
+      pasteFileInput.value = '';
+    }
     function pasteShow() {
+      pasteReset();
       var inp = document.getElementById('paste-input');
       inp.value = '';
       pasteOverlay.style.display = 'flex';
@@ -1464,7 +1634,30 @@ const indexHtml = `<!DOCTYPE html>
     }
     function pasteHide() {
       pasteOverlay.style.display = 'none';
+      pasteReset();
       term.focus();
+    }
+    function pasteUploadFile(file) {
+      pasteHide();
+      var statusEl = document.getElementById('status');
+      var prevStatus = statusEl ? statusEl.textContent : '';
+      if (statusEl) { statusEl.textContent = 'Uploading...'; statusEl.style.background = '#60a5fa'; }
+      fetch('/terminal/upload', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-Filename': encodeURIComponent(file.name) },
+        body: file
+      }).then(function(r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      }).then(function(data) {
+        if (data.error) throw new Error(data.error);
+        if (data.path) sendInput(data.path + ' ');
+        if (statusEl) { statusEl.textContent = 'Uploaded'; statusEl.style.background = '#4ade80'; }
+        setTimeout(function() { if (statusEl) { statusEl.textContent = prevStatus; statusEl.style.background = ''; } }, 2000);
+      }).catch(function(err) {
+        if (statusEl) { statusEl.textContent = 'Upload failed: ' + err.message; statusEl.style.background = '#f87171'; }
+        setTimeout(function() { if (statusEl) { statusEl.textContent = prevStatus; statusEl.style.background = ''; } }, 5000);
+      });
     }
     document.getElementById('paste-btn').addEventListener('click', function(e) {
       e.preventDefault();
@@ -1472,13 +1665,41 @@ const indexHtml = `<!DOCTYPE html>
       pasteShow();
     });
     document.getElementById('paste-send').addEventListener('click', function() {
-      var text = document.getElementById('paste-input').value;
-      pasteHide();
-      if (text) sendInput(text);
+      if (pasteFile) {
+        pasteUploadFile(pasteFile);
+      } else {
+        var text = document.getElementById('paste-input').value;
+        pasteHide();
+        if (text) sendInput(text);
+      }
     });
     document.getElementById('paste-cancel').addEventListener('click', pasteHide);
     pasteOverlay.addEventListener('click', function(e) {
       if (e.target === pasteOverlay) pasteHide();
+    });
+    document.getElementById('paste-file-btn').addEventListener('click', function(e) {
+      e.preventDefault();
+      pasteFileInput.click();
+    });
+    pasteFileInput.addEventListener('change', function() {
+      var file = pasteFileInput.files && pasteFileInput.files[0];
+      if (!file) return;
+      pasteFile = file;
+      pasteFileName.textContent = file.name;
+      if (file.type && file.type.indexOf('image/') === 0) {
+        var reader = new FileReader();
+        reader.onload = function(ev) {
+          pasteFileThumb.src = ev.target.result;
+          pasteFileThumb.style.display = '';
+          pasteFileIcon.style.display = 'none';
+          pasteFilePreview.style.display = 'block';
+        };
+        reader.readAsDataURL(file);
+      } else {
+        pasteFileThumb.style.display = 'none';
+        pasteFileIcon.style.display = 'block';
+        pasteFilePreview.style.display = 'block';
+      }
     });
 
     // App menu (... button)
@@ -1663,7 +1884,10 @@ const indexHtml = `<!DOCTYPE html>
       e.stopPropagation();
       fkKeys = fkDefaults.slice();
       fkSave(fkKeys);
+      fkHidden = false;
+      localStorage.setItem('hopcode_fk_hidden', '');
       fkRender();
+      fkApplyVisibility();
       menuRenderFk();
     });
 
@@ -1672,9 +1896,8 @@ const indexHtml = `<!DOCTYPE html>
     var themeToggle = document.getElementById('theme-toggle');
     function applyTheme() {
       document.body.classList.toggle('light-mode', isLight);
-      term.options.theme = isLight
-        ? { background: '#f5f5f5', foreground: '#333', cursor: '#333', selectionBackground: 'rgba(0,0,0,0.15)' }
-        : { background: '#000', foreground: '#e0e0e0', cursor: '#4ade80' };
+      // Keep dark theme colors; CSS filter handles light mode inversion
+      term.options.theme = { background: '#000', foreground: '#e0e0e0', cursor: isLight ? '#333' : '#4ade80' };
       themeToggle.innerHTML = isLight ? '&#x2600; Light mode' : '&#x263E; Dark mode';
     }
     applyTheme();
@@ -1814,6 +2037,10 @@ const indexHtml = `<!DOCTYPE html>
 
     async function acquireMic() {
       if (audioReady) return true;
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        status.textContent = window.isSecureContext ? 'Mic not available' : 'Mic needs HTTPS';
+        return false;
+      }
       try {
         audioStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } });
         audioContext = new AudioContext({ sampleRate: 16000 });
@@ -1833,7 +2060,13 @@ const indexHtml = `<!DOCTYPE html>
         audioReady = true;
         return true;
       } catch (e) {
-        status.textContent = 'Mic error';
+        if (e.name === 'NotAllowedError') {
+          status.textContent = 'Mic denied - check browser settings';
+        } else if (e.name === 'SecurityError') {
+          status.textContent = 'Mic blocked - not secure context';
+        } else {
+          status.textContent = 'Mic error: ' + (e.message || e.name || 'unknown');
+        }
         return false;
       }
     }
@@ -1933,10 +2166,9 @@ const indexHtml = `<!DOCTYPE html>
     var menuBtn = document.getElementById('menu-btn');
     var menuBtnMobile = document.getElementById('menu-btn-mobile');
     var specialKeys = document.getElementById('special-keys');
-    var filesBtn = document.getElementById('files-btn');
     var returnBtn = document.getElementById('return-btn');
     function isExcluded(el) {
-      return (fontControls && fontControls.contains(el)) || (menuBtn && menuBtn.contains(el)) || (menuBtnMobile && menuBtnMobile.contains(el)) || (specialKeys && specialKeys.contains(el)) || (filesBtn && filesBtn.contains(el)) || (returnBtn && returnBtn.contains(el));
+      return (fontControls && fontControls.contains(el)) || (menuBtn && menuBtn.contains(el)) || (menuBtnMobile && menuBtnMobile.contains(el)) || (specialKeys && specialKeys.contains(el)) || (returnBtn && returnBtn.contains(el));
     }
     voiceBar.addEventListener('touchstart', (e) => {
       if (isExcluded(e.target)) return;
@@ -2069,6 +2301,24 @@ const indexHtml = `<!DOCTYPE html>
     });
 
     fkRender();
+
+    // Floating keys hide/show
+    var fkHidden = localStorage.getItem('hopcode_fk_hidden') === '1';
+    var fkHideBtn = document.getElementById('menu-fk-hide');
+    function fkApplyVisibility() {
+      // Hide individual float-key buttons but keep bar-handle visible
+      fkContainer.querySelectorAll('.float-key').forEach(function(btn) {
+        btn.style.display = fkHidden ? 'none' : '';
+      });
+      fkHideBtn.textContent = fkHidden ? 'Show' : 'Hide';
+    }
+    fkApplyVisibility();
+    fkHideBtn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      fkHidden = !fkHidden;
+      localStorage.setItem('hopcode_fk_hidden', fkHidden ? '1' : '');
+      fkApplyVisibility();
+    });
 
     // Reposition floating keys when keyboard appears/disappears
     if (isMobile && window.visualViewport) {
@@ -2271,8 +2521,9 @@ const indexHtml = `<!DOCTYPE html>
     fbList.addEventListener('pointercancel', function() { fbLpClear(); });
 
     // Wire up buttons
-    document.getElementById('files-btn').addEventListener('click', function(e) {
+    document.getElementById('menu-files').addEventListener('click', function(e) {
       e.preventDefault();
+      menuHide();
       fbOpen();
       if (isMobile && xtermTextarea) xtermTextarea.blur();
     });
@@ -2579,6 +2830,42 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Handle session delete — proxy to PTY service
+  const deleteSessionMatch = (req.url || '').match(/^(?:\/terminal)?\/sessions\/([^/?]+)$/);
+  if (deleteSessionMatch && req.method === 'DELETE') {
+    if (!isAuthenticated(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'Unauthorized' }));
+      return;
+    }
+    const sessionId = decodeURIComponent(deleteSessionMatch[1]!);
+    // Check ownership (non-root can only delete own sessions)
+    const auth = getAuthInfo(req);
+    if (auth.username !== 'root') {
+      try {
+        const listResp = await ptyFetch(`/sessions?owner=${encodeURIComponent(auth.username!)}`);
+        if (listResp.ok) {
+          const list: SessionInfo[] = await listResp.json() as SessionInfo[];
+          if (!list.some(s => s.id === sessionId)) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'Forbidden' }));
+            return;
+          }
+        }
+      } catch {}
+    }
+    try {
+      const resp = await ptyFetch(`/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
+      const data = await resp.json();
+      res.writeHead(resp.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(data));
+    } catch {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'Internal error' }));
+    }
+    return;
+  }
+
   // --- Serve static PWA assets (no auth required) ---
   const parsedUrl = new URL(req.url || '/', `http://${req.headers.host}`);
   const pathname = parsedUrl.pathname;
@@ -2849,21 +3136,37 @@ const server = http.createServer(async (req, res) => {
 
   // --- Clipboard image upload ---
   if ((pathname === '/terminal/upload' || pathname === '/upload') && req.method === 'POST') {
-    const UPLOAD_DIR = '/tmp/hopcode-clipboard';
-    const contentType = req.headers['content-type'] || 'image/png';
-    const extMap: Record<string, string> = {
-      'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif',
-      'image/webp': 'webp', 'image/bmp': 'bmp', 'image/svg+xml': 'svg',
-    };
-    const ext = extMap[contentType] || 'png';
-    const fileName = `img-${Date.now()}.${ext}`;
-    const filePath = path.join(UPLOAD_DIR, fileName);
+    const userHome = auth.linuxUser
+      ? (auth.linuxUser === 'root' ? '/root' : `/home/${auth.linuxUser}`)
+      : '/tmp';
+    const userDir = path.join(userHome, '.hopcode', 'uploads');
+    const contentType = req.headers['content-type'] || 'application/octet-stream';
+    // Use original filename from header if provided, otherwise derive from content-type
+    const origName = req.headers['x-filename'] ? decodeURIComponent(req.headers['x-filename'] as string) : '';
+    let fileName: string;
+    if (origName) {
+      // Sanitize: strip path separators, prepend timestamp to avoid collisions
+      const safe = origName.replace(/[\/\\]/g, '_');
+      fileName = `${Date.now()}-${safe}`;
+    } else {
+      const extMap: Record<string, string> = {
+        'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif',
+        'image/webp': 'webp', 'image/bmp': 'bmp', 'image/svg+xml': 'svg',
+        'application/pdf': 'pdf', 'text/plain': 'txt', 'text/csv': 'csv',
+        'application/json': 'json', 'application/zip': 'zip',
+        'application/gzip': 'gz', 'application/x-tar': 'tar',
+        'video/mp4': 'mp4', 'audio/mpeg': 'mp3', 'audio/wav': 'wav',
+      };
+      const ext = extMap[contentType] || 'bin';
+      fileName = `file-${Date.now()}.${ext}`;
+    }
+    const filePath = path.join(userDir, fileName);
 
     const chunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('end', async () => {
       try {
-        await fs.promises.mkdir(UPLOAD_DIR, { recursive: true });
+        await fs.promises.mkdir(userDir, { recursive: true, mode: 0o700 });
         await fs.promises.writeFile(filePath, Buffer.concat(chunks));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ path: filePath }));
