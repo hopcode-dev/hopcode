@@ -34,13 +34,10 @@ A web-based terminal you can access from any device — with voice input, a file
 ## Quick Start
 
 ```bash
-git clone https://github.com/hopcode-dev/hopcode.git
-cd hopcode
-bun install
-bun run go
+git clone https://github.com/hopcode-dev/hopcode.git && cd hopcode && bun install && bun run go
 ```
 
-That's it. A public HTTPS URL with an auth token is printed to your terminal — open it on your phone and you're in.
+A public HTTPS URL with an auth token is printed to your terminal — open it on your phone and you're in.
 
 ### Docker
 
