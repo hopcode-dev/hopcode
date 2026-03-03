@@ -1,4 +1,4 @@
-.PHONY: dev start stop typecheck clean install
+.PHONY: dev start stop typecheck test clean install
 
 install:
 	bun install
@@ -14,6 +14,9 @@ stop:
 
 typecheck:
 	bunx tsc --noEmit
+
+test:
+	bun test
 
 clean:
 	rm -rf node_modules dist out
