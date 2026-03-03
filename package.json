@@ -47,6 +47,10 @@
   "peerDependencies": {
     "typescript": "^5"
   },
+  "trustedDependencies": [
+    "node-pty",
+    "sharp"
+  ],
   "dependencies": {
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/headless": "^6.0.0",
