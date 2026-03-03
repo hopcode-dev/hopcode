@@ -93,8 +93,11 @@ async function main() {
     const line = d.toString();
     if (!line.includes('ExperimentalWarning')) process.stderr.write(`[pty] ${line}`);
   });
-  pty.on('exit', (code) => {
-    if (!shuttingDown) console.error(`PTY service exited with code ${code}`);
+  pty.on('error', (err) => {
+    console.error(`Failed to start PTY service: ${err.message}`);
+  });
+  pty.on('exit', (code, signal) => {
+    if (!shuttingDown) console.error(`PTY service exited (code=${code}, signal=${signal})`);
   });
 
   // Start UI service with tunnel
@@ -132,9 +135,12 @@ async function main() {
 
   ui.stdout?.on('data', handleOutput);
   ui.stderr?.on('data', handleOutput);
-  ui.on('exit', (code) => {
+  ui.on('error', (err) => {
+    console.error(`Failed to start UI service: ${err.message}`);
+  });
+  ui.on('exit', (code, signal) => {
     if (!shuttingDown) {
-      console.error(`UI service exited with code ${code}`);
+      console.error(`UI service exited (code=${code}, signal=${signal})`);
       cleanup();
     }
   });

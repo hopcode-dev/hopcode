@@ -11,7 +11,7 @@
     "start:ui": "npx tsx src/server-node.ts",
     "start:pty": "npx tsx src/pty-service.ts",
     "start:tunnel": "npx tsx src/server-node.ts --tunnel",
-    "go": "npx tsx src/quick.ts",
+    "go": "node ./node_modules/tsx/dist/cli.mjs src/quick.ts",
     "dev": "npx tsx src/pty-service.ts & npx tsx --watch src/server-node.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun run src/test-all.ts"
