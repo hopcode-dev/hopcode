@@ -547,6 +547,7 @@ async function buildSessionsHtml(username?: string): Promise<string> {
         <div class="session-name" data-session="${esc(s.id)}"><span class="session-name-text">${esc(s.name)}</span></div>
         <div class="session-meta">${fmtAge(s.lastActivity)}</div>
       </div>
+      <button class="rename-btn" title="Rename session">&#9998;</button>
       <button class="delete-btn" title="Delete session">&times;</button>
     </a>`;
   }
@@ -644,14 +645,16 @@ async function buildSessionsHtml(username?: string): Promise<string> {
     .session-name-text { font-size: 15px; font-weight: 600; color: #f3f4f6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .session-meta { font-size: 12px; color: #6b7280; margin-top: 2px; }
 
-    /* Delete button */
-    .delete-btn {
-      background: none; border: none; color: #6b7280; font-size: 20px; line-height: 1;
-      cursor: pointer; padding: 14px 14px 14px 8px; flex-shrink: 0;
-      opacity: 0; transition: opacity 0.15s, color 0.15s;
+    /* Card action buttons */
+    .rename-btn, .delete-btn {
+      background: none; border: none; color: #6b7280; line-height: 1;
+      cursor: pointer; flex-shrink: 0;
+      transition: opacity 0.15s, color 0.15s;
       -webkit-tap-highlight-color: transparent;
     }
-    .session-card:hover .delete-btn { opacity: 1; }
+    .rename-btn { font-size: 16px; padding: 14px 4px 14px 8px; }
+    .delete-btn { font-size: 20px; padding: 14px 14px 14px 4px; }
+    .rename-btn:hover { color: #4ade80; }
     .delete-btn:hover { color: #f87171; }
 
     /* Rename input */
@@ -833,6 +836,14 @@ async function buildSessionsHtml(username?: string): Promise<string> {
       // Double-click on name to rename
       card.addEventListener('click', function(e) {
         var target = e.target;
+        // Rename button
+        if (target.classList.contains('rename-btn')) {
+          e.preventDefault();
+          e.stopPropagation();
+          var nameEl = card.querySelector('.session-name');
+          if (nameEl) startRename(nameEl);
+          return;
+        }
         // Delete button
         if (target.classList.contains('delete-btn')) {
           e.preventDefault();
