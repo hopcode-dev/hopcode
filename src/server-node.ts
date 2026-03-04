@@ -1388,15 +1388,42 @@ const indexHtml = `<!DOCTYPE html>
       cursorStyle: 'bar',
       fontSize: fontSize,
       fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-      scrollback: 5000,
+      scrollback: 1000,
       theme: { background: '#1a1a2e', foreground: '#e0e0e0', cursor: '#4ade80' }
     });
     const fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
     var termEl = document.getElementById('terminal');
     term.open(termEl);
-    try { term.loadAddon(new WebglAddon.WebglAddon()); } catch(e) { console.warn('WebGL addon failed, using DOM renderer:', e); }
+    var hasWebGL = false;
+    try { term.loadAddon(new WebglAddon.WebglAddon()); hasWebGL = true; } catch(e) {
+      console.warn('WebGL addon failed, using DOM renderer:', e);
+      term.options.scrollback = 500;
+    }
     fitAddon.fit();
+
+    // --- Performance self-check: monitor write latency, auto-trim if degraded ---
+    var writeTimes = [];
+    var perfTrimCount = 0;
+    function perfWrite(data, cb) {
+      var t0 = performance.now();
+      term.write(data, function() {
+        var elapsed = performance.now() - t0;
+        writeTimes.push(elapsed);
+        if (writeTimes.length > 10) writeTimes.shift();
+        // Check if avg of last 10 writes exceeds 150ms
+        if (writeTimes.length >= 10) {
+          var avg = writeTimes.reduce(function(a,b){return a+b;},0) / writeTimes.length;
+          if (avg > 150) {
+            term.clear();
+            writeTimes.length = 0;
+            perfTrimCount++;
+            console.warn('[perf] Auto-trimmed scrollback (avg write: ' + Math.round(avg) + 'ms, count: ' + perfTrimCount + ')');
+          }
+        }
+        if (cb) cb();
+      });
+    }
     var visibleRows = term.rows;
     var lastCols = term.cols, lastRows = 0;
     function sendResize() {
@@ -1528,11 +1555,10 @@ const indexHtml = `<!DOCTYPE html>
           var buf = term.buffer.active;
           var wasAtBottom = buf.viewportY >= buf.baseY;
           var savedViewportY = buf.viewportY;
-          term.write(msg.data, function() {
+          perfWrite(msg.data, function() {
             if (wasAtBottom) {
               term.scrollToBottom();
             } else {
-              // Restore viewport — don't let cursor-following writes pull user out of scrollback
               if (term.buffer.active.viewportY !== savedViewportY) {
                 term.scrollToLine(savedViewportY);
               }
