@@ -1319,6 +1319,7 @@ const indexHtml = `<!DOCTYPE html>
       </div>
       <div class="app-menu-sep"></div>
       <div class="app-menu-item" id="menu-files">&#x1F4C1; Files</div>
+      <a class="app-menu-item" href="/terminal" style="text-decoration:none;">&#x1F3E0; Home</a>
       <div class="app-menu-sep"></div>
       <div class="app-menu-section">Font Size</div>
       <div class="app-menu-row" style="padding:6px 16px;gap:10px;">
