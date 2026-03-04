@@ -1025,6 +1025,16 @@ const indexHtml = `<!DOCTYPE html>
     .app-menu-item:hover,.app-menu-item:active { background:rgba(255,255,255,0.06); }
     .app-menu-sep { height:1px;background:#0f3460;margin:4px 12px; }
     .app-menu-section { font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;padding:8px 16px 2px; }
+    .app-menu-section.collapsible {
+      cursor:pointer;display:flex;align-items:center;justify-content:space-between;padding:10px 16px;
+      font-size:14px;color:#e0e0e0;text-transform:none;letter-spacing:0;font-family:system-ui;gap:6px;
+    }
+    .app-menu-section.collapsible:hover { background:rgba(255,255,255,0.06); }
+    .app-menu-section.collapsible::after { content:'\\25B8';font-size:10px;color:#888; }
+    .app-menu-section.collapsible.open::after { content:'\\25BE'; }
+    body.light-mode .app-menu-section.collapsible { color:#333; }
+    .app-menu-collapse { display:none; }
+    .app-menu-collapse.open { display:block; }
     .app-menu-row { display:flex;align-items:center; }
     .app-menu-btn {
       padding:6px 12px;background:#0f3460;color:#e0e0e0;border:none;border-radius:6px;
@@ -1033,12 +1043,27 @@ const indexHtml = `<!DOCTYPE html>
     .app-menu-btn:active { background:#4ade80;color:#000; }
     .menu-sess-list { max-height:200px;overflow-y:auto;padding:2px 0; }
     .menu-sess-item {
-      display:flex;align-items:center;gap:8px;padding:8px 16px;color:#e0e0e0;font-size:13px;
+      display:flex;align-items:center;gap:8px;padding:6px 16px;color:#e0e0e0;font-size:13px;
       font-family:system-ui;cursor:pointer;text-decoration:none;overflow:hidden;
     }
     .menu-sess-item:hover,.menu-sess-item:active { background:rgba(255,255,255,0.06); }
     .menu-sess-item.current { background:rgba(74,222,128,0.12);color:#4ade80; }
     .menu-sess-name { overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1; }
+    .menu-sess-owner { font-size:10px;color:#888;background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:3px;flex-shrink:0; }
+    body.light-mode .menu-sess-owner { background:rgba(0,0,0,0.06);color:#999; }
+    .menu-sess-actions { display:none;gap:4px;flex-shrink:0; }
+    .menu-sess-item:hover .menu-sess-actions { display:flex; }
+    .menu-sess-act { background:none;border:none;color:#888;font-size:12px;cursor:pointer;padding:2px 4px;border-radius:3px;line-height:1; }
+    .menu-sess-act:hover { color:#fff;background:rgba(255,255,255,0.1); }
+    .menu-sess-act.kill { color:#f87171; }
+    .menu-sess-act.kill:hover { background:rgba(248,113,113,0.15); }
+    .menu-sess-rename-input {
+      background:#0a1628;border:1px solid #4ade80;color:#e0e0e0;font-size:13px;font-family:system-ui;
+      padding:2px 6px;border-radius:4px;outline:none;flex:1;min-width:0;
+    }
+    body.light-mode .menu-sess-rename-input { background:#fff;border-color:#16a34a;color:#333; }
+    body.light-mode .menu-sess-act { color:#999; }
+    body.light-mode .menu-sess-act:hover { color:#333;background:rgba(0,0,0,0.06); }
     .menu-sess-dot { width:6px;height:6px;border-radius:50%;flex-shrink:0; }
     .menu-sess-dot.active { background:#4ade80; }
     .menu-sess-dot.idle { background:#555; }
@@ -1220,7 +1245,7 @@ const indexHtml = `<!DOCTYPE html>
     <textarea id="copy-overlay" readonly></textarea>
     <div id="voice-bar">
       <div id="bar-row1">
-        <button id="menu-btn" class="key-btn" style="font-size:16px;min-width:32px;">&#x22EF;</button>
+        <button id="menu-btn" class="key-btn" style="min-width:32px;padding:2px 6px;"><svg viewBox="0 0 512 512" fill="none" style="width:20px;height:20px;vertical-align:middle;"><circle cx="185" cy="175" r="42" fill="#4ade80"/><circle cx="327" cy="175" r="42" fill="#4ade80"/><circle cx="185" cy="175" r="16" fill="#1a1a2e"/><circle cx="327" cy="175" r="16" fill="#1a1a2e"/><rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/><path d="M205 218L230 240L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M242 240L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/><rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/><rect x="165" y="340" width="50" height="20" rx="10" fill="#22c55e"/><rect x="297" y="340" width="50" height="20" rx="10" fill="#22c55e"/></svg></button>
         <div id="special-keys">
           <button class="key-btn" id="bar-hide-btn" style="font-size:14px;">&#x276F;</button>
           <button class="key-btn" data-key="esc">Esc</button>
@@ -1237,7 +1262,7 @@ const indexHtml = `<!DOCTYPE html>
         </div>
       </div>
       <div id="bar-row2">
-        <button id="menu-btn-mobile" class="key-btn mobile-only" style="font-size:16px;min-width:32px;">&#x22EF;</button>
+        <button id="menu-btn-mobile" class="key-btn mobile-only" style="min-width:32px;padding:2px 6px;"><svg viewBox="0 0 512 512" fill="none" style="width:20px;height:20px;vertical-align:middle;"><circle cx="185" cy="175" r="42" fill="#4ade80"/><circle cx="327" cy="175" r="42" fill="#4ade80"/><circle cx="185" cy="175" r="16" fill="#1a1a2e"/><circle cx="327" cy="175" r="16" fill="#1a1a2e"/><rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/><path d="M205 218L230 240L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M242 240L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/><rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/><rect x="165" y="340" width="50" height="20" rx="10" fill="#22c55e"/><rect x="297" y="340" width="50" height="20" rx="10" fill="#22c55e"/></svg></button>
         <div id="status">Hold Option to speak</div>
         <div id="text"></div>
         <button id="return-btn" class="key-btn" title="Return" style="font-size:20px;">&#x23CE;</button>
@@ -1312,27 +1337,32 @@ const indexHtml = `<!DOCTYPE html>
   <div id="app-menu" style="display:none;">
     <div class="app-menu-backdrop"></div>
     <div class="app-menu-panel">
-      <div class="app-menu-section">Sessions</div>
-      <div id="menu-sessions" class="menu-sess-list"><div style="padding:8px 16px;color:#888;font-size:13px;">Loading...</div></div>
-      <div style="padding:4px 16px 6px;">
-        <button class="app-menu-btn" id="menu-new-session" style="width:100%">+ New Session</button>
+      <div class="app-menu-section collapsible" data-collapse="menu-sessions-body">&#x1F4CB; Sessions</div>
+      <div id="menu-sessions-body" class="app-menu-collapse">
+        <div id="menu-sessions" class="menu-sess-list"><div style="padding:8px 16px;color:#888;font-size:13px;">Loading...</div></div>
+        <div style="padding:4px 16px 6px;">
+          <button class="app-menu-btn" id="menu-new-session" style="width:100%">+ New Session</button>
+        </div>
       </div>
       <div class="app-menu-sep"></div>
-      <div class="app-menu-section">Terminal</div>
-      <div class="app-menu-row" style="padding:6px 16px;gap:10px;">
-        <button class="app-menu-btn" id="menu-font-down">A&#x2212;</button>
-        <span id="menu-font-val" style="font-size:14px;min-width:40px;text-align:center;color:#fff;font-weight:600;"></span>
-        <button class="app-menu-btn" id="menu-font-up">A+</button>
-        <span style="flex:1;"></span>
-        <button class="app-menu-btn" id="theme-toggle">&#x263E;</button>
+      <div class="app-menu-section collapsible" data-collapse="menu-terminal-body">&#x2699; Terminal</div>
+      <div id="menu-terminal-body" class="app-menu-collapse">
+        <div class="app-menu-row" style="padding:6px 16px;gap:10px;">
+          <button class="app-menu-btn" id="menu-font-down">A&#x2212;</button>
+          <span id="menu-font-val" style="font-size:14px;min-width:40px;text-align:center;color:#fff;font-weight:600;"></span>
+          <button class="app-menu-btn" id="menu-font-up">A+</button>
+          <span style="flex:1;"></span>
+          <button class="app-menu-btn" id="theme-toggle">&#x263E;</button>
+        </div>
       </div>
-      <div class="app-menu-sep"></div>
-      <div class="app-menu-section">Floating Keys</div>
-      <div id="menu-fk-list" style="padding:6px 16px;display:flex;flex-direction:column;gap:4px;"></div>
-      <div class="app-menu-row" style="padding:6px 16px;gap:8px;">
-        <button class="app-menu-btn" id="menu-fk-add">+ Add</button>
-        <button class="app-menu-btn" id="menu-fk-hide">Hide</button>
-        <button class="app-menu-btn" id="menu-fk-reset" style="background:#333;color:#f87171;">Reset</button>
+      <div class="app-menu-section collapsible" data-collapse="menu-fk-body">&#x2328; Floating Keys</div>
+      <div id="menu-fk-body" class="app-menu-collapse">
+        <div id="menu-fk-list" style="padding:6px 16px;display:flex;flex-direction:column;gap:4px;"></div>
+        <div class="app-menu-row" style="padding:6px 16px;gap:8px;">
+          <button class="app-menu-btn" id="menu-fk-add">+ Add</button>
+          <button class="app-menu-btn" id="menu-fk-hide">Hide</button>
+          <button class="app-menu-btn" id="menu-fk-reset" style="background:#333;color:#f87171;">Reset</button>
+        </div>
       </div>
       <div class="app-menu-sep"></div>
       <div class="app-menu-item" id="menu-files">&#x1F4C1; Files</div>
@@ -1853,11 +1883,57 @@ const indexHtml = `<!DOCTYPE html>
 
     // App menu (... button)
     var appMenu = document.getElementById('app-menu');
+    function menuSessRename(sid, item) {
+      var nameEl = item.querySelector('.menu-sess-name');
+      var oldName = nameEl.textContent;
+      var input = document.createElement('input');
+      input.className = 'menu-sess-rename-input';
+      input.value = oldName;
+      nameEl.style.display = 'none';
+      item.querySelector('.menu-sess-actions').style.display = 'none';
+      nameEl.parentNode.insertBefore(input, nameEl.nextSibling);
+      input.focus();
+      input.select();
+      function save() {
+        var val = input.value.trim();
+        if (input._done) return; input._done = true;
+        input.remove();
+        nameEl.style.display = '';
+        if (val && val !== oldName) {
+          nameEl.textContent = val;
+          fetch('/terminal/rename', {
+            method: 'POST', credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session: sid, name: val })
+          });
+        }
+      }
+      input.addEventListener('keydown', function(e) {
+        e.stopPropagation();
+        if (e.key === 'Enter') save();
+        if (e.key === 'Escape') { input._done = true; input.remove(); nameEl.style.display = ''; }
+      });
+      input.addEventListener('blur', save);
+    }
+    function menuSessKill(sid, item) {
+      if (!confirm('Delete this session?')) return;
+      item.style.opacity = '0.4';
+      fetch('/terminal/sessions/' + encodeURIComponent(sid), {
+        method: 'DELETE', credentials: 'include'
+      }).then(function(r) {
+        if (r.ok) {
+          item.remove();
+          if (sid === sessionId) location.href = '/terminal';
+        } else { item.style.opacity = ''; }
+      }).catch(function() { item.style.opacity = ''; });
+    }
     function menuLoadSessions() {
       var container = document.getElementById('menu-sessions');
       fetch('/terminal/api/sessions', { credentials: 'include' })
         .then(function(r) { return r.json(); })
-        .then(function(sessions) {
+        .then(function(data) {
+          var currentUser = data.currentUser;
+          var sessions = data.sessions;
           if (!sessions.length) {
             container.innerHTML = '<div style="padding:8px 16px;color:#888;font-size:13px;">No sessions</div>';
             return;
@@ -1868,12 +1944,33 @@ const indexHtml = `<!DOCTYPE html>
             a.className = 'menu-sess-item' + (s.id === sessionId ? ' current' : '');
             a.href = '/terminal?session=' + encodeURIComponent(s.id);
             var dot = document.createElement('span');
-            dot.className = 'menu-sess-dot ' + (s.clients > 0 ? 'active' : 'idle');
+            dot.className = 'menu-sess-dot ' + (s.clientCount > 0 || s.clients > 0 ? 'active' : 'idle');
             var name = document.createElement('span');
             name.className = 'menu-sess-name';
             name.textContent = s.name || s.id;
             a.appendChild(dot);
             a.appendChild(name);
+            if (currentUser === 'root' && s.owner && s.owner !== 'root') {
+              var ownerTag = document.createElement('span');
+              ownerTag.className = 'menu-sess-owner';
+              ownerTag.textContent = s.owner;
+              a.appendChild(ownerTag);
+            }
+            var actions = document.createElement('span');
+            actions.className = 'menu-sess-actions';
+            var renameBtn = document.createElement('button');
+            renameBtn.className = 'menu-sess-act';
+            renameBtn.textContent = '✎';
+            renameBtn.title = 'Rename';
+            renameBtn.addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); menuSessRename(s.id, a); });
+            var killBtn = document.createElement('button');
+            killBtn.className = 'menu-sess-act kill';
+            killBtn.textContent = '✕';
+            killBtn.title = 'Delete';
+            killBtn.addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); menuSessKill(s.id, a); });
+            actions.appendChild(renameBtn);
+            actions.appendChild(killBtn);
+            a.appendChild(actions);
             container.appendChild(a);
           });
         })
@@ -1904,6 +2001,13 @@ const indexHtml = `<!DOCTYPE html>
     document.getElementById('menu-btn').addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); menuShow(); });
     document.getElementById('menu-btn-mobile').addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); menuShow(); });
     appMenu.querySelector('.app-menu-backdrop').addEventListener('click', menuHide);
+    appMenu.querySelector('.app-menu-panel').addEventListener('click', function(e) {
+      var sec = e.target.closest('.app-menu-section.collapsible');
+      if (!sec) return;
+      e.stopPropagation();
+      var target = document.getElementById(sec.getAttribute('data-collapse'));
+      if (target) { sec.classList.toggle('open'); target.classList.toggle('open'); }
+    });
 
     // Menu: font size
     document.getElementById('menu-font-down').addEventListener('click', function(e) {
@@ -3154,7 +3258,7 @@ const server = http.createServer(async (req, res) => {
       const resp = await ptyFetch(`/sessions${ownerParam}`);
       const sessions = await resp.json();
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(sessions));
+      res.end(JSON.stringify({ currentUser: auth.username, sessions }));
     } catch {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Internal error' }));
