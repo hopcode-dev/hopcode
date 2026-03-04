@@ -1372,6 +1372,7 @@ const indexHtml = `<!DOCTYPE html>
 
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-webgl@0.16.0/lib/xterm-addon-webgl.min.js"></script>
   <script>
     window.onerror = function(msg, src, line) {
       document.getElementById('status').textContent = 'JS Error: ' + msg;
@@ -1387,13 +1388,14 @@ const indexHtml = `<!DOCTYPE html>
       cursorStyle: 'bar',
       fontSize: fontSize,
       fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-      scrollback: 50000,
+      scrollback: 5000,
       theme: { background: '#1a1a2e', foreground: '#e0e0e0', cursor: '#4ade80' }
     });
     const fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
     var termEl = document.getElementById('terminal');
     term.open(termEl);
+    try { term.loadAddon(new WebglAddon.WebglAddon()); } catch(e) { console.warn('WebGL addon failed, using DOM renderer:', e); }
     fitAddon.fit();
     var visibleRows = term.rows;
     var lastCols = term.cols, lastRows = 0;
