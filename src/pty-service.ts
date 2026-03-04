@@ -1,7 +1,7 @@
 /**
- * PTY Service — standalone daemon that manages terminal sessions
- * Runs on localhost:3001, internal token auth
- * UI service proxies browser connections to this service
+ * PTY Service — main process that manages worker processes
+ * Each session runs in an isolated worker process
+ * Worker exit = automatic memory cleanup
  */
 
 process.on('SIGPIPE', () => {});
@@ -16,13 +16,10 @@ process.on('unhandledRejection', (err: any) => {
 
 import 'dotenv/config';
 import * as http from 'http';
-import * as pty from 'node-pty';
 import { WebSocketServer, WebSocket } from 'ws';
-import * as fs from 'fs';
+import { fork, ChildProcess } from 'child_process';
 import * as path from 'path';
-import xtermHeadless from '@xterm/headless';
-const HeadlessTerminal = xtermHeadless.Terminal;
-import { SerializeAddon } from '@xterm/addon-serialize';
+import { fileURLToPath } from 'url';
 
 import {
   PTY_SERVICE_PORT,
@@ -31,136 +28,122 @@ import {
   type SessionInfo,
 } from './shared/protocol.js';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const INTERNAL_TOKEN = getPtyInternalToken();
 
-// --- PTY Session management (extracted from server-node.ts) ---
+// --- Session (Worker) Management ---
 
 interface Session {
-  pty: pty.IPty;
-  clients: Set<WebSocket>;  // internal WS connections from UI service
-  headlessTerm: InstanceType<typeof HeadlessTerminal>;
-  serializeAddon: InstanceType<typeof SerializeAddon>;
+  worker: ChildProcess;
+  clients: Set<WebSocket>;
   name: string;
   owner: string;
   linuxUser: string;
   createdAt: number;
   lastActivity: number;
-  cursorHidden: boolean;
+  ready: boolean;
+  pendingScrollback: ((data: string) => void)[];
 }
 
 const sessions = new Map<string, Session>();
 let sessionCounter = 0;
 
-async function getSessionCwd(session: Session): Promise<string> {
-  try {
-    const pid = session.pty.pid;
-    if (session.linuxUser) {
-      // Multi-user: su forks a child shell — find the deepest child process's cwd
-      try {
-        const children = await fs.promises.readdir(`/proc/${pid}/task/${pid}/children`).catch(() => null);
-        // /proc/pid/task/pid/children doesn't work as a dir, read the file instead
-        const childrenData = await fs.promises.readFile(`/proc/${pid}/task/${pid}/children`, 'utf-8').catch(() => '');
-        const childPids = childrenData.trim().split(/\s+/).filter(Boolean);
-        if (childPids.length > 0) {
-          // Walk to the deepest child (su → bash → maybe another process)
-          let deepest = childPids[childPids.length - 1]!;
-          for (let i = 0; i < 5; i++) {
-            const grandChildren = await fs.promises.readFile(`/proc/${deepest}/task/${deepest}/children`, 'utf-8').catch(() => '');
-            const gc = grandChildren.trim().split(/\s+/).filter(Boolean);
-            if (gc.length === 0) break;
-            deepest = gc[gc.length - 1]!;
-          }
-          return await fs.promises.readlink(`/proc/${deepest}/cwd`);
-        }
-      } catch {}
-    }
-    return await fs.promises.readlink('/proc/' + pid + '/cwd');
-  } catch {
-    return process.env.HOME || '/';
-  }
-}
-
 function createSession(id: string, owner: string = 'admin', linuxUser?: string): Session {
-  let ptyProcess: pty.IPty;
-  if (linuxUser) {
-    // Multi-user mode: spawn shell as the target Linux user via su -
-    ptyProcess = pty.spawn('/bin/su', ['-', linuxUser], {
-      name: 'xterm-256color',
-      cols: 120,
-      rows: 30,
-      env: {
-        TERM: 'xterm-256color',
-      },
-    });
-  } else {
-    // Single-user mode: spawn bash directly (backward compat)
-    ptyProcess = pty.spawn('/bin/bash', ['--login', '-i'], {
-      name: 'xterm-256color',
-      cols: 120,
-      rows: 30,
-      cwd: process.env.HOME || '/',
-      env: {
-        ...Object.fromEntries(
-          Object.entries(process.env).filter(([k]) => k !== 'CLAUDECODE')
-        ) as { [key: string]: string },
-        TERM: 'xterm-256color',
-        SHELL: '/bin/bash',
-        PS1: '\\[\\033[32m\\]\\u\\[\\033[0m\\]:\\[\\033[34m\\]\\W\\[\\033[0m\\]\\$ ',
-      },
-    });
-  }
-
   sessionCounter++;
+  const name = `Session ${sessionCounter}`;
 
-  const headlessTerm = new HeadlessTerminal({ cols: 120, rows: 30, scrollback: 500, allowProposedApi: true });
-  const serializeAddon = new SerializeAddon();
-  headlessTerm.loadAddon(serializeAddon);
+  // Fork worker process
+  const worker = fork(path.join(__dirname, 'pty-worker.ts'), [], {
+    execArgv: ['--import', 'tsx'],
+    stdio: ['pipe', 'inherit', 'inherit', 'ipc'],
+  });
 
   const session: Session = {
-    pty: ptyProcess,
+    worker,
     clients: new Set(),
-    headlessTerm,
-    serializeAddon,
-    name: `Session ${sessionCounter}`,
+    name,
     owner,
     linuxUser: linuxUser || '',
     createdAt: Date.now(),
     lastActivity: Date.now(),
-    cursorHidden: false,
+    ready: false,
+    pendingScrollback: [],
   };
 
-  console.log(`[pty-service] Created session: ${id} - ${session.name}`);
-
-  // Broadcast PTY output to all connected internal WS clients
-  ptyProcess.onData((data) => {
+  // Handle messages from worker
+  worker.on('message', (msg: any) => {
     session.lastActivity = Date.now();
-    // Track DECTCEM cursor visibility: \e[?25l = hide, \e[?25h = show
-    if (data.includes('\x1b[?25l')) session.cursorHidden = true;
-    if (data.includes('\x1b[?25h')) session.cursorHidden = false;
-    session.headlessTerm.write(data);
-    const message = JSON.stringify({ type: 'output', data });
-    for (const client of session.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(message);
-      }
+
+    switch (msg.type) {
+      case 'ready':
+        session.ready = true;
+        session.name = msg.name || session.name;
+        console.log(`[pty-service] Worker ready: ${id} - ${session.name}`);
+        break;
+
+      case 'output':
+        // Broadcast to all connected clients
+        const outputMsg = JSON.stringify({ type: 'output', data: msg.data });
+        for (const client of session.clients) {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(outputMsg);
+          }
+        }
+        break;
+
+      case 'scrollback':
+        // Send to pending scrollback requests
+        for (const cb of session.pendingScrollback) {
+          cb(msg.data);
+        }
+        session.pendingScrollback = [];
+        break;
+
+      case 'exit':
+        console.log(`[pty-service] Worker exited: ${id} (code ${msg.code})`);
+        // Notify all clients
+        const exitMsg = JSON.stringify({ type: 'session_exit' });
+        for (const client of session.clients) {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(exitMsg);
+          }
+          client.close();
+        }
+        sessions.delete(id);
+        break;
     }
   });
 
-  ptyProcess.onExit(({ exitCode }) => {
-    console.log(`[pty-service] PTY exited: ${id} (code ${exitCode})`);
-    // Notify all clients
-    const exitMsg = JSON.stringify({ type: 'session_exit' });
-    for (const client of session.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(exitMsg);
+  worker.on('error', (err) => {
+    console.error(`[pty-service] Worker error: ${id}`, err.message);
+  });
+
+  worker.on('exit', (code) => {
+    console.log(`[pty-service] Worker process exited: ${id} (code ${code})`);
+    // Clean up if not already done
+    if (sessions.has(id)) {
+      for (const client of session.clients) {
+        try {
+          client.send(JSON.stringify({ type: 'session_exit' }));
+          client.close();
+        } catch {}
       }
-      client.close();
+      sessions.delete(id);
     }
-    session.headlessTerm.dispose();
-    sessions.delete(id);
+  });
+
+  // Send init message to worker
+  worker.send({
+    type: 'init',
+    sessionId: id,
+    owner,
+    linuxUser,
+    name,
   });
 
   sessions.set(id, session);
+  console.log(`[pty-service] Created session: ${id} - ${name} (worker PID: ${worker.pid})`);
+
   return session;
 }
 
@@ -182,7 +165,7 @@ const server = http.createServer(async (req, res) => {
   // Health check (no auth needed)
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok' }));
+    res.end(JSON.stringify({ status: 'ok', sessions: sessions.size }));
     return;
   }
 
@@ -196,7 +179,7 @@ const server = http.createServer(async (req, res) => {
   const parsedUrl = new URL(req.url || '/', `http://${req.headers.host}`);
   const pathname = parsedUrl.pathname;
 
-  // GET /sessions — list sessions (optionally filtered by ?owner=)
+  // GET /sessions — list sessions
   if (pathname === '/sessions' && req.method === 'GET') {
     const ownerFilter = parsedUrl.searchParams.get('owner');
     let entries = Array.from(sessions.entries());
@@ -234,7 +217,8 @@ const server = http.createServer(async (req, res) => {
         createSession(id, owner, linuxUser);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ id }));
-      } catch {
+      } catch (err: any) {
+        console.error(`[pty-service] POST /sessions error:`, err.message || err);
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Bad request' }));
       }
@@ -276,7 +260,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // GET /sessions/:id/cwd
+  // GET /sessions/:id/cwd — get current working directory
   const cwdMatch = pathname.match(/^\/sessions\/([^/]+)\/cwd$/);
   if (cwdMatch && req.method === 'GET') {
     const sid = decodeURIComponent(cwdMatch[1]!);
@@ -286,13 +270,26 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: 'Session not found' }));
       return;
     }
-    const cwd = await getSessionCwd(session);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ cwd }));
+    // CWD lookup is now done by reading /proc - we need worker PID
+    try {
+      const pid = session.worker.pid;
+      if (pid) {
+        const { promises: fs } = await import('fs');
+        const cwd = await fs.readlink(`/proc/${pid}/cwd`).catch(() => process.env.HOME || '/');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ cwd }));
+      } else {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ cwd: process.env.HOME || '/' }));
+      }
+    } catch {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ cwd: process.env.HOME || '/' }));
+    }
     return;
   }
 
-  // DELETE /sessions/:id — kill and remove session
+  // DELETE /sessions/:id — kill session
   const deleteMatch = pathname.match(/^\/sessions\/([^/]+)$/);
   if (deleteMatch && req.method === 'DELETE') {
     const sid = decodeURIComponent(deleteMatch[1]!);
@@ -302,18 +299,18 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: 'Session not found' }));
       return;
     }
-    // Kill the PTY process — onExit handler will clean up clients & remove from map
-    try { session.pty.kill(); } catch {}
-    // In case onExit doesn't fire immediately, also clean up
+    // Send shutdown to worker
+    session.worker.send({ type: 'shutdown' });
+    // Force kill after timeout
     setTimeout(() => {
       if (sessions.has(sid)) {
+        session.worker.kill('SIGKILL');
         for (const client of session.clients) {
           try { client.close(); } catch {}
         }
-        try { session.headlessTerm.dispose(); } catch {}
         sessions.delete(sid);
       }
-    }, 500);
+    }, 1000);
     console.log(`[pty-service] Session deleted: ${sid}`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ success: true }));
@@ -332,7 +329,6 @@ const wss = new WebSocketServer({ noServer: true });
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url!, `http://${req.headers.host}`);
   const pathParts = url.pathname.split('/');
-  // /ws/:sessionId
   const sessionId = decodeURIComponent(pathParts[2] || 'default');
 
   const session = getSession(sessionId);
@@ -342,7 +338,7 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
-  // Verify owner if provided in query
+  // Verify owner if provided
   const ownerParam = url.searchParams.get('owner');
   if (ownerParam && session.owner !== ownerParam) {
     console.log(`[pty-service] Rejected WS: owner mismatch for ${sessionId}`);
@@ -356,33 +352,42 @@ wss.on('connection', (ws, req) => {
   // Send session info
   ws.send(JSON.stringify({ type: 'session_info', name: session.name }));
 
-  // Send scrollback + restore cursor visibility
-  try {
-    let serialized = session.serializeAddon.serialize({ scrollback: 500 });
-    if (serialized) {
-      if (session.cursorHidden) serialized += '\x1b[?25l';
-      ws.send(JSON.stringify({ type: 'scrollback', data: serialized }));
+  // Request scrollback from worker (with timeout to prevent callback accumulation)
+  const scrollbackCallback = (data: string) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'scrollback', data }));
     }
-  } catch (e) {
-    console.error('[pty-service] Serialize error:', e);
-  }
+  };
+  session.pendingScrollback.push(scrollbackCallback);
+  session.worker.send({ type: 'getScrollback' });
+
+  // Timeout: remove callback if worker doesn't respond in 5s
+  setTimeout(() => {
+    const idx = session.pendingScrollback.indexOf(scrollbackCallback);
+    if (idx !== -1) {
+      session.pendingScrollback.splice(idx, 1);
+    }
+  }, 5000);
 
   ws.on('message', (message) => {
+    // Check session still exists (may have been deleted if worker crashed)
+    if (!sessions.has(sessionId)) {
+      ws.close(4004, 'Session no longer exists');
+      return;
+    }
     try {
       const msg = JSON.parse(message.toString());
+      session.lastActivity = Date.now();
+
       if (msg.type === 'input') {
-        session.pty.write(msg.data);
+        session.worker.send({ type: 'input', data: msg.data });
       } else if (msg.type === 'resize') {
-        if (msg.cols > 0 && msg.rows > 0 &&
-            (msg.cols !== session.pty.cols || msg.rows !== session.pty.rows)) {
-          try {
-            session.pty.resize(msg.cols, msg.rows);
-            session.headlessTerm.resize(msg.cols, msg.rows);
-          } catch {}
+        if (msg.cols > 0 && msg.rows > 0) {
+          session.worker.send({ type: 'resize', cols: msg.cols, rows: msg.rows });
         }
       } else if (msg.type === 'asr') {
         console.log(`[pty-service] ASR input: "${msg.text}"`);
-        session.pty.write(msg.text + '\r');
+        session.worker.send({ type: 'input', data: msg.text + '\r' });
       }
     } catch (e) {
       console.error('[pty-service] Parse error:', e);
@@ -390,14 +395,16 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
-    session.clients.delete(ws);
-    console.log(`[pty-service] Client disconnected: ${sessionId} (${session.clients.size} clients)`);
+    // Check session still exists before cleanup
+    if (sessions.has(sessionId)) {
+      session.clients.delete(ws);
+      console.log(`[pty-service] Client disconnected: ${sessionId} (${session.clients.size} clients)`);
+    }
   });
 });
 
 // Handle WebSocket upgrade
 server.on('upgrade', (request, socket, head) => {
-  // Check internal token
   if (!checkToken(request)) {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
@@ -414,8 +421,10 @@ server.on('upgrade', (request, socket, head) => {
   }
 });
 
-// Start — bind to localhost only (internal service)
+// --- Start ---
+
 server.listen(PTY_SERVICE_PORT, '127.0.0.1', () => {
   console.log(`[pty-service] Listening on 127.0.0.1:${PTY_SERVICE_PORT}`);
+  console.log(`[pty-service] Worker isolation mode: each session runs in isolated process`);
   console.log(`[pty-service] Ready`);
 });

@@ -315,32 +315,52 @@ function parseAsrResponse(data: Buffer): { msgType: number; result?: any; error?
 
 interface AsrSession {
   volcanoWs: WebSocket | null;
-  ready: boolean;
-  pendingChunks: Buffer[];
-  allChunks: Buffer[];       // all audio chunks for retry
+  ready: boolean;            // Volcano connected and init sent, ready for audio
+  allChunks: Buffer[];       // all audio chunks (kept for retry)
+  pendingChunks: Buffer[];   // chunks buffered while Volcano is connecting
   ended: boolean;            // whether asr_end was received
   retryCount: number;
-  gotResult: boolean;        // whether we got a final ASR result
+  gotResult: boolean;
+  cancelled: boolean;
 }
 
-const ASR_MAX_RETRIES = 2;
+const ASR_MAX_RETRIES = 3;
+
+function cancelAsrSession(session: AsrSession): void {
+  session.cancelled = true;
+  if (session.volcanoWs) {
+    try { session.volcanoWs.removeAllListeners(); session.volcanoWs.close(); } catch {}
+    session.volcanoWs = null;
+  }
+}
 
 function connectVolcano(asrSession: AsrSession, clientWs: WebSocket): void {
+  if (asrSession.cancelled) return;
+
   asrSession.ready = false;
   asrSession.pendingChunks = [];
 
-  const headers = {
-    'X-Api-App-Key': VOLCANO_APP_ID,
-    'X-Api-Access-Key': VOLCANO_TOKEN,
-    'X-Api-Resource-Id': VOLCANO_ASR_RESOURCE_ID,
-    'X-Api-Connect-Id': randomUUID(),
-  };
+  // Close old connection (for retries)
+  if (asrSession.volcanoWs) {
+    try { asrSession.volcanoWs.removeAllListeners(); asrSession.volcanoWs.close(); } catch {}
+    asrSession.volcanoWs = null;
+  }
 
-  const volcanoWs = new WebSocket(VOLCANO_ASR_ENDPOINT, { headers });
+  const volcanoWs = new WebSocket(VOLCANO_ASR_ENDPOINT, {
+    headers: {
+      'X-Api-App-Key': VOLCANO_APP_ID,
+      'X-Api-Access-Key': VOLCANO_TOKEN,
+      'X-Api-Resource-Id': VOLCANO_ASR_RESOURCE_ID,
+      'X-Api-Connect-Id': randomUUID(),
+    },
+  });
   asrSession.volcanoWs = volcanoWs;
 
+  let retried = false;
   function retryIfNeeded() {
-    if (asrSession.gotResult) return; // already got a result, no need to retry
+    if (retried) return;
+    retried = true;
+    if (asrSession.cancelled || asrSession.gotResult) return;
     if (asrSession.retryCount >= ASR_MAX_RETRIES) {
       console.error(`ASR: max retries (${ASR_MAX_RETRIES}) reached, giving up`);
       if (clientWs.readyState === WebSocket.OPEN) {
@@ -349,44 +369,50 @@ function connectVolcano(asrSession: AsrSession, clientWs: WebSocket): void {
       return;
     }
     asrSession.retryCount++;
-    console.log(`ASR: retrying (attempt ${asrSession.retryCount}/${ASR_MAX_RETRIES}), replaying ${asrSession.allChunks.length} buffered chunks`);
-    setTimeout(() => connectVolcano(asrSession, clientWs), 500);
+    console.log(`ASR: retrying (attempt ${asrSession.retryCount}/${ASR_MAX_RETRIES}), replaying ${asrSession.allChunks.length} chunks`);
+    setTimeout(() => connectVolcano(asrSession, clientWs), 1000);
   }
 
   volcanoWs.on('open', () => {
-    const initPayload = {
+    if (asrSession.cancelled) { try { volcanoWs.close(); } catch {} return; }
+
+    // Send init
+    volcanoWs.send(buildFullClientRequest({
       user: { uid: randomUUID() },
       audio: { format: 'pcm', rate: 16000, bits: 16, channel: 1, codec: 'raw' },
       request: {
-        model_name: 'bigmodel',
-        language: 'zh',
-        enable_itn: true,
-        enable_punc: true,
-        result_type: 'full',
-        show_utterances: true,
+        model_name: 'bigmodel', language: 'zh',
+        enable_itn: true, enable_punc: true,
+        result_type: 'full', show_utterances: true,
       },
-    };
-    volcanoWs.send(buildFullClientRequest(initPayload));
+    }));
+
+    // Immediately replay any buffered chunks, then mark ready for real-time
+    for (const chunk of asrSession.allChunks) {
+      volcanoWs.send(buildAudioRequest(chunk, false));
+    }
+    // Also flush any pending chunks that arrived during connection
+    for (const chunk of asrSession.pendingChunks) {
+      asrSession.allChunks.push(chunk);
+      volcanoWs.send(buildAudioRequest(chunk, false));
+    }
+    asrSession.pendingChunks = [];
     asrSession.ready = true;
 
-    // Replay all buffered audio from previous attempts + current pending
-    const toSend = [...asrSession.allChunks, ...asrSession.pendingChunks];
-    asrSession.pendingChunks = [];
-    for (const chunk of toSend) {
-      if (!asrSession.allChunks.includes(chunk)) {
-        asrSession.allChunks.push(chunk);
-      }
-      const isLast = chunk.length === 0;
-      volcanoWs.send(buildAudioRequest(chunk, isLast));
-    }
     // If recording already ended, send final marker
-    if (asrSession.ended && !toSend.some(c => c.length === 0)) {
+    if (asrSession.ended) {
       volcanoWs.send(buildAudioRequest(Buffer.alloc(0), true));
     }
-    console.log(`ASR session connected to Volcano (sent ${toSend.length} chunks, retry=${asrSession.retryCount})`);
+
+    console.log(`ASR Volcano ready (sent ${asrSession.allChunks.length} chunks, retry=${asrSession.retryCount})`);
   });
 
+  // Debounce definite results (batch replay can produce many rapid definites)
+  let finalDebounce: ReturnType<typeof setTimeout> | null = null;
+  let latestFinalText = '';
+
   volcanoWs.on('message', (data: Buffer) => {
+    if (asrSession.cancelled || asrSession.volcanoWs !== volcanoWs) return;
     try {
       const parsed = parseAsrResponse(Buffer.from(data));
       if (parsed.msgType === 15) {
@@ -400,13 +426,19 @@ function connectVolcano(asrSession: AsrSession, clientWs: WebSocket): void {
         if (text && clientWs.readyState === WebSocket.OPEN) {
           const utterances = res.utterances || [];
           const definite = utterances.length > 0 && utterances[0].definite;
-          clientWs.send(JSON.stringify({
-            type: definite ? 'asr' : 'asr_partial',
-            text,
-          }));
           if (definite) {
-            asrSession.gotResult = true;
-            console.log(`ASR final: "${text}"`);
+            latestFinalText = text;
+            // Send as partial so UI updates immediately
+            clientWs.send(JSON.stringify({ type: 'asr_partial', text }));
+            if (finalDebounce) clearTimeout(finalDebounce);
+            finalDebounce = setTimeout(() => {
+              asrSession.gotResult = true;
+              clientWs.send(JSON.stringify({ type: 'asr', text: latestFinalText }));
+              console.log(`ASR final: "${latestFinalText}"`);
+              try { volcanoWs.close(); } catch {}
+            }, 300);
+          } else {
+            clientWs.send(JSON.stringify({ type: 'asr_partial', text }));
           }
         }
       }
@@ -421,9 +453,9 @@ function connectVolcano(asrSession: AsrSession, clientWs: WebSocket): void {
   });
 
   volcanoWs.on('close', () => {
+    if (asrSession.cancelled || asrSession.volcanoWs !== volcanoWs) return;
     asrSession.ready = false;
     console.log('ASR session closed');
-    // If closed before getting a result and recording is done, retry
     if (asrSession.ended && !asrSession.gotResult) {
       retryIfNeeded();
     }
@@ -434,6 +466,7 @@ function startAsrSession(clientWs: WebSocket): AsrSession {
   const asrSession: AsrSession = {
     volcanoWs: null, ready: false, pendingChunks: [],
     allChunks: [], ended: false, retryCount: 0, gotResult: false,
+    cancelled: false,
   };
   connectVolcano(asrSession, clientWs);
   return asrSession;
@@ -454,7 +487,7 @@ function getLoginHtml(): string {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="theme-color" content="#1a1a2e">
-  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Hopcode">
   <link rel="manifest" href="./manifest.json">
@@ -594,7 +627,7 @@ async function buildSessionsHtml(username?: string): Promise<string> {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="theme-color" content="#111827">
-  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Hopcode">
   <link rel="manifest" href="./manifest.json">
@@ -924,7 +957,7 @@ const indexHtml = `<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#1a1a2e">
-  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Hopcode">
   <link rel="manifest" href="./manifest.json">
@@ -946,6 +979,30 @@ const indexHtml = `<!DOCTYPE html>
       -webkit-tap-highlight-color: transparent;
     }
     #voice-bar.recording { background: #1a3a2e; border-top-color: #4ade80; }
+    #voice-bar.cancel-zone { background: #3a1a1a; border-top-color: #f87171; }
+    #voice-bar.cancel-zone #status { background: #f87171; color: #000; animation: none; }
+    #voice-popup {
+      position: fixed; left: 50%; bottom: 120px; transform: translateX(-50%);
+      background: rgba(22,33,62,0.95); border: 1px solid #0f3460; border-radius: 16px;
+      padding: 16px 20px; min-width: 200px; max-width: 80vw; z-index: 500;
+      font-family: system-ui; color: #e0e0e0; text-align: center;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.5); transition: opacity 0.15s, transform 0.15s;
+    }
+    #voice-popup.hidden { display: none; }
+    #voice-popup.cancel { background: rgba(58,26,26,0.95); border-color: #f87171; }
+    #voice-popup.cancel #vp-dot { background: #f87171; animation: none; }
+    #voice-popup.cancel #vp-hint { color: #f87171; font-weight: 600; }
+    #vp-indicator { margin-bottom: 8px; }
+    #vp-dot {
+      display: inline-block; width: 12px; height: 12px; border-radius: 50%;
+      background: #4ade80; animation: pulse 1s infinite;
+    }
+    #vp-text {
+      font-size: 16px; line-height: 1.5; color: #fff; min-height: 24px;
+      max-height: 30vh; overflow-y: auto; word-break: break-word;
+    }
+    #vp-hint { font-size: 12px; color: #666; margin-top: 8px; }
+    #vp-text.listening::after { content: 'Listening...'; color: #888; animation: pulse 1.2s infinite; }
     #status { padding: 6px 12px; background: #333; border-radius: 20px; font-size: 14px; white-space: nowrap; text-align: center; }
     #status.recording { background: #4ade80; color: #000; animation: pulse 1s infinite; }
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
@@ -1063,6 +1120,7 @@ const indexHtml = `<!DOCTYPE html>
     @supports (padding-top: env(safe-area-inset-top)) {
       #container { padding-top: env(safe-area-inset-top); }
       #voice-bar { padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+      body.mobile #voice-bar { padding-bottom: max(6px, env(safe-area-inset-bottom)); }
     }
     /* --- File Browser --- */
     #file-browser {
@@ -1171,6 +1229,11 @@ const indexHtml = `<!DOCTYPE html>
         <button id="return-btn" class="key-btn" title="Return" style="font-size:20px;">&#x23CE;</button>
       </div>
     </div>
+  </div>
+  <div id="voice-popup" class="hidden">
+    <div id="vp-indicator"><span id="vp-dot"></span></div>
+    <div id="vp-text"></div>
+    <div id="vp-hint">&#x2191; Swipe up to cancel</div>
   </div>
   <div id="floating-keys"><button id="bar-handle">&#x2328;</button></div>
   <div class="float-key-config" id="fk-config">
@@ -1362,16 +1425,12 @@ const indexHtml = `<!DOCTYPE html>
     }
 
     // Auto-scroll on new output
+    // autoScroll is only used by resize handler; writes use snapshot-based logic
     var autoScroll = true;
     term.onScroll(function() {
       var buf = term.buffer.active;
-      var viewportAtBottom = buf.viewportY >= buf.baseY;
-      autoScroll = viewportAtBottom;
+      autoScroll = buf.viewportY >= buf.baseY;
     });
-    function doAutoScroll() {
-      if (!autoScroll) return;
-      term.scrollToBottom();
-    }
 
     function changeFontSize(delta) {
       fontSize = Math.max(10, Math.min(40, fontSize + delta));
@@ -1413,7 +1472,20 @@ const indexHtml = `<!DOCTYPE html>
           location.href = '/terminal';
           return;
         } else if (msg.type === 'output') {
-          term.write(msg.data, doAutoScroll);
+          // Snapshot viewport position before write to prevent animation-triggered scroll
+          var buf = term.buffer.active;
+          var wasAtBottom = buf.viewportY >= buf.baseY;
+          var savedViewportY = buf.viewportY;
+          term.write(msg.data, function() {
+            if (wasAtBottom) {
+              term.scrollToBottom();
+            } else {
+              // Restore viewport — don't let cursor-following writes pull user out of scrollback
+              if (term.buffer.active.viewportY !== savedViewportY) {
+                term.scrollToLine(savedViewportY);
+              }
+            }
+          });
         }
       };
       termWs.onopen = () => {
@@ -1486,6 +1558,15 @@ const indexHtml = `<!DOCTYPE html>
       xtermTextarea.setAttribute('autocorrect', 'off');
       xtermTextarea.setAttribute('autocapitalize', 'off');
       xtermTextarea.setAttribute('spellcheck', 'false');
+
+      // Prevent iOS page jump when keyboard opens (focus triggers scroll-to-element)
+      if (isMobile) {
+        xtermTextarea.addEventListener('focus', function() {
+          resetPageScroll();
+          setTimeout(resetPageScroll, 50);
+          setTimeout(resetPageScroll, 150);
+        });
+      }
 
       // Intercept autocomplete BEFORE xterm processes it.
       // We compute the diff (new chars only) and send it ourselves,
@@ -1580,11 +1661,19 @@ const indexHtml = `<!DOCTYPE html>
     var lastVh = 0;
     var containerEl = document.getElementById('container');
     var _vhRafPending = false;
+    function resetPageScroll() {
+      if (window.scrollY || document.documentElement.scrollTop || document.body.scrollTop) {
+        window.scrollTo(0, 0);
+        document.documentElement.scrollTop = 0;
+        document.body.scrollTop = 0;
+      }
+    }
     function setVh() {
       var h = window.visualViewport ? window.visualViewport.height : window.innerHeight;
       if (lastVh && Math.abs(h - lastVh) < 50) return;
       lastVh = h;
       containerEl.style.height = h + 'px';
+      resetPageScroll();
     }
     function setVhThrottled() {
       if (_vhRafPending) return;
@@ -1593,7 +1682,14 @@ const indexHtml = `<!DOCTYPE html>
     }
     if (isMobile) {
       setVh();
-      if (window.visualViewport) window.visualViewport.addEventListener('resize', setVhThrottled);
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', setVhThrottled);
+        // iOS scrolls the page when keyboard opens to keep focused element visible;
+        // fight back by resetting scroll on every viewport scroll event
+        window.visualViewport.addEventListener('scroll', function() {
+          resetPageScroll();
+        });
+      }
     }
 
     // Debounced resize to avoid PTY redraw storms (e.g. mobile keyboard toggle)
@@ -1607,8 +1703,8 @@ const indexHtml = `<!DOCTYPE html>
         visibleRows = term.rows;
         cachedCellHeight = 0; // invalidate again after fit
         sendResize();
-        autoScroll = true;
-        scrollToCursor();
+        // Only scroll to bottom if we were already at the bottom (don't disrupt scrollback viewing)
+        if (autoScroll) scrollToCursor();
       }, 300);
     });
 
@@ -2023,11 +2119,37 @@ const indexHtml = `<!DOCTYPE html>
     var asrFlushed = false; // Prevent flushing more than once per recording
     var wantsToStop = false; // Track if stop was requested during async acquireMic
     var micReleaseTimer = null; // Delayed mic release
+    var cancelledRec = false; // Whether current recording was cancelled (swipe up / alt combo)
+    var releaseFlushTimer = null; // Timer waiting for final result after release
+    var touchStartY = 0; // touchstart Y for swipe detection
+    var swipedToCancel = false; // Whether user swiped up into cancel zone
 
     var defaultStatusText = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
 
+    var vpEl = document.getElementById('voice-popup');
+    var vpText = document.getElementById('vp-text');
+    var vpHint = document.getElementById('vp-hint');
+    function vpShow() {
+      vpText.textContent = '';
+      vpText.classList.add('listening');
+      vpHint.textContent = '\u2191 Swipe up to cancel';
+      vpEl.classList.remove('hidden', 'cancel');
+    }
+    function vpHide() { vpEl.classList.add('hidden'); vpEl.classList.remove('cancel'); }
+    function vpUpdate(txt) { vpText.textContent = txt; vpText.classList.remove('listening'); }
+    function vpSetCancel(on) {
+      if (on) {
+        vpEl.classList.add('cancel');
+        vpHint.textContent = '\u2191 Release to cancel';
+      } else {
+        vpEl.classList.remove('cancel');
+        vpHint.textContent = '\u2191 Swipe up to cancel';
+      }
+    }
+
     function flushAsrText() {
       if (asrFlushed) return;
+      vpHide();
       if (pendingAsrText && termWs && termWs.readyState === 1) {
         asrFlushed = true;
         text.textContent = pendingAsrText;
@@ -2049,30 +2171,40 @@ const indexHtml = `<!DOCTYPE html>
       voiceWs = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/terminal/ws-voice');
       voiceWs.onmessage = (e) => {
         const d = JSON.parse(e.data);
+        if (cancelledRec) return; // Recording was cancelled, ignore all results
         if (d.type === 'asr' && d.text) {
-          clearTimeout(processingTimeout);
+          clearTimeout(releaseFlushTimer);
           pendingAsrText = d.text;
           text.textContent = d.text;
-          // Don't send to terminal yet - wait for recording to fully end
-          // If recording already ended (Processing state), flush now
-          if (!isRecording && !stopRecTimer) {
-            flushAsrText();
-          }
+          vpUpdate(d.text);
+          flushAsrText();
         } else if (d.type === 'asr_partial' && d.text) {
           pendingAsrText = d.text;
           text.textContent = d.text;
+          vpUpdate(d.text);
         } else if (d.type === 'error') {
-          // ASR failed — reset immediately instead of waiting for timeout
-          clearTimeout(processingTimeout);
-          flushAsrText();
+          clearTimeout(releaseFlushTimer);
+          if (pendingAsrText) {
+            flushAsrText();
+          } else {
+            // No text at all — show error in popup then hide
+            vpUpdate('Voice recognition failed');
+            vpText.style.color = '#f87171';
+            status.textContent = defaultStatusText;
+            setTimeout(function() { vpHide(); vpText.style.color = ''; }, 2000);
+          }
         }
       };
       voiceWs.onclose = () => {
         // Reset all recording state
-        clearTimeout(stopRecTimer);
-        stopRecTimer = null;
+        clearTimeout(releaseFlushTimer);
+        clearTimeout(trailingTimer);
+        releaseFlushTimer = null;
         isRecording = false;
         wantsToStop = false;
+        cancelledRec = false;
+        swipedToCancel = false;
+        vpHide();
         scheduleMicRelease();
         status.classList.remove('recording');
         if (status.textContent === 'Processing...' || status.textContent === 'Finishing...' || status.textContent === 'Recording...') {
@@ -2129,7 +2261,11 @@ const indexHtml = `<!DOCTYPE html>
     async function startRec() {
       if (isRecording) return;
       clearTimeout(micReleaseTimer);
+      clearTimeout(releaseFlushTimer);
+      clearTimeout(trailingTimer);
       wantsToStop = false;
+      cancelledRec = false;
+      swipedToCancel = false;
       var ok = await acquireMic();
       if (!ok) return;
       // Check if user released finger while we were acquiring mic
@@ -2148,35 +2284,54 @@ const indexHtml = `<!DOCTYPE html>
       status.textContent = 'Recording...';
       status.classList.add('recording');
       text.textContent = '';
+      vpShow();
     }
 
-    var processingTimeout = null;
-    var stopRecTimer = null;
-    var stopRecRequestedAt = 0;
-    function stopRec() {
+    var trailingTimer = null;
+    function stopRec(cancel) {
       wantsToStop = true;
+      clearTimeout(trailingTimer);
       if (!isRecording) return;
-      // Keep recording for 1000ms to capture trailing sound, then finalize
-      if (!stopRecTimer) {
-        stopRecRequestedAt = Date.now();
-        status.textContent = 'Finishing...';
-        status.classList.remove('recording');
-        stopRecTimer = setTimeout(function() {
-          stopRecTimer = null;
-          if (!isRecording) return;
-          isRecording = false;
-          if (voiceWs?.readyState === 1) voiceWs.send(JSON.stringify({ type: 'asr_end' }));
-          scheduleMicRelease();
-          status.textContent = 'Processing...';
-          clearTimeout(processingTimeout);
-          processingTimeout = setTimeout(function() {
-            // Safety: if no final ASR result after 5s, flush whatever we have
-            if (status.textContent === 'Processing...') {
-              flushAsrText();
-            }
-          }, 5000);
-        }, 1000);
+      status.classList.remove('recording');
+
+      if (cancel) {
+        // Cancel: discard all text, don't flush
+        isRecording = false;
+        cancelledRec = true;
+        asrFlushed = true; // block any late flush
+        pendingAsrText = '';
+        text.textContent = '';
+        vpHide();
+        if (voiceWs?.readyState === 1) voiceWs.send(JSON.stringify({ type: 'asr_end' }));
+        status.textContent = defaultStatusText;
+        scheduleMicRelease();
+        return;
       }
+
+      // Normal release: keep capturing audio for 300ms to avoid cutting off trailing speech,
+      // then send asr_end. UI already shows "processing" state.
+      status.textContent = 'Processing...';
+      trailingTimer = setTimeout(function() {
+        isRecording = false;
+        if (voiceWs?.readyState === 1) voiceWs.send(JSON.stringify({ type: 'asr_end' }));
+        scheduleMicRelease();
+
+        // Already got final result during trailing capture?
+        if (asrFlushed) return;
+
+        clearTimeout(releaseFlushTimer);
+        if (pendingAsrText) {
+          // Have partial text — wait briefly for final, then flush partial
+          releaseFlushTimer = setTimeout(function() {
+            if (!asrFlushed) flushAsrText();
+          }, 300);
+        } else {
+          // No text yet — wait longer for result
+          releaseFlushTimer = setTimeout(function() {
+            if (!asrFlushed) flushAsrText();
+          }, 2000);
+        }
+      }, 300);
     }
 
     let altDown = false, altDownTime = 0, altCombined = false;
@@ -2191,10 +2346,7 @@ const indexHtml = `<!DOCTYPE html>
       } else if (altDown && e.key !== 'Alt') {
         // Option combined with another key - cancel recording
         altCombined = true;
-        if (isRecording) {
-          stopRec();
-          status.textContent = defaultStatusText;
-        }
+        if (isRecording) stopRec(true);
       }
     }, true);
     document.addEventListener('keyup', (e) => {
@@ -2202,13 +2354,10 @@ const indexHtml = `<!DOCTYPE html>
         altDown = false;
         const holdDuration = Date.now() - altDownTime;
         if (altCombined || holdDuration < 800) {
-          // Combined with other key or too short - discard
-          if (isRecording) {
-            stopRec();
-            status.textContent = defaultStatusText;
-          }
+          // Combined with other key or too short - cancel
+          if (isRecording) stopRec(true);
         } else {
-          stopRec();
+          stopRec(false);
         }
         e.preventDefault();
         e.stopPropagation();
@@ -2231,18 +2380,39 @@ const indexHtml = `<!DOCTYPE html>
     voiceBar.addEventListener('touchstart', (e) => {
       if (isExcluded(e.target)) return;
       e.preventDefault();
+      touchStartY = e.touches[0].clientY;
+      swipedToCancel = false;
       startRec();
       voiceBar.classList.add('recording');
     }, { passive: false });
+    voiceBar.addEventListener('touchmove', (e) => {
+      if (!isRecording) return;
+      var dy = touchStartY - e.touches[0].clientY;
+      if (dy > 50 && !swipedToCancel) {
+        swipedToCancel = true;
+        voiceBar.classList.add('cancel-zone');
+        voiceBar.classList.remove('recording');
+        status.textContent = '\u2191 Release to cancel';
+        status.classList.remove('recording');
+        vpSetCancel(true);
+      } else if (dy <= 30 && swipedToCancel) {
+        swipedToCancel = false;
+        voiceBar.classList.remove('cancel-zone');
+        voiceBar.classList.add('recording');
+        status.textContent = 'Recording...';
+        status.classList.add('recording');
+        vpSetCancel(false);
+      }
+    }, { passive: true });
     voiceBar.addEventListener('touchend', (e) => {
       if (isExcluded(e.target)) return;
       e.preventDefault();
-      stopRec();
-      voiceBar.classList.remove('recording');
+      voiceBar.classList.remove('recording', 'cancel-zone');
+      stopRec(swipedToCancel);
     }, { passive: false });
     voiceBar.addEventListener('touchcancel', () => {
-      stopRec();
-      voiceBar.classList.remove('recording');
+      voiceBar.classList.remove('recording', 'cancel-zone');
+      stopRec(true);
     });
 
     // Update status text for mobile
@@ -2763,6 +2933,25 @@ const indexHtml = `<!DOCTYPE html>
 </body>
 </html>`;
 
+// Pre-compress large HTML responses for faster delivery over slow networks
+const indexHtmlGz = zlib.gzipSync(indexHtml);
+const loginHtmlGz = new Map<string, Buffer>(); // cached per multi-user state
+
+function sendHtml(req: http.IncomingMessage, res: http.ServerResponse, html: string, precompressed?: Buffer): void {
+  const acceptGzip = (req.headers['accept-encoding'] || '').includes('gzip');
+  if (acceptGzip && precompressed) {
+    res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Encoding': 'gzip', 'Cache-Control': 'no-store', 'Vary': 'Accept-Encoding' });
+    res.end(precompressed);
+  } else if (acceptGzip) {
+    const gz = zlib.gzipSync(html);
+    res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Encoding': 'gzip', 'Cache-Control': 'no-store', 'Vary': 'Accept-Encoding' });
+    res.end(gz);
+  } else {
+    res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
+    res.end(html);
+  }
+}
+
 // Helper: parse cookies
 function parseCookies(cookieHeader: string | undefined): Record<string, string> {
   const cookies: Record<string, string> = {};
@@ -2789,16 +2978,34 @@ const server = http.createServer(async (req, res) => {
   // Security headers
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:; manifest-src 'self';");
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' ws: wss: https://cdn.jsdelivr.net; img-src 'self' data:; manifest-src 'self';");
 
   // Only log non-routine requests
-  if (req.url !== '/health' && !req.url?.startsWith('/terminal?session=')) {
+  if (req.url !== '/health' && !req.url?.startsWith('/health/diagnose') && !req.url?.startsWith('/terminal?session=')) {
     console.log(`HTTP ${req.method} ${req.url}`);
   }
 
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok' }));
+    return;
+  }
+
+  if (req.url === '/health/diagnose' && req.method === 'GET') {
+    if (!isAuthenticated(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return;
+    }
+    try {
+      const { runDiagnose } = await import('./diagnose.js');
+      const report = await runDiagnose();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(report));
+    } catch (err: any) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Diagnose failed', detail: err.message }));
+    }
     return;
   }
 
@@ -2993,8 +3200,7 @@ const server = http.createServer(async (req, res) => {
   // Check authentication
   const auth = getAuthInfo(req);
   if (!auth.authenticated) {
-    res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(getLoginHtml());
+    sendHtml(req, res, getLoginHtml());
     return;
   }
 
@@ -3300,14 +3506,12 @@ const server = http.createServer(async (req, res) => {
 
   // Terminal page: /terminal?session=xxx
   if (sessionId) {
-    res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
-    res.end(indexHtml);
+    sendHtml(req, res, indexHtml, indexHtmlGz);
     return;
   }
 
   // Session chooser (default for /terminal with no params, or any other path)
-  res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
-  res.end(await buildSessionsHtml(auth.username));
+  sendHtml(req, res, await buildSessionsHtml(auth.username));
 });
 
 // Terminal WebSocket server — proxies to PTY service
@@ -3399,23 +3603,20 @@ voiceWss.on('connection', (ws) => {
       if (isJson) {
         const msg = JSON.parse(message.toString());
         if (msg.type === 'asr_start') {
-          // Start a new streaming ASR session
-          if (asrSession?.volcanoWs) {
-            try { asrSession.volcanoWs.close(); } catch {}
-          }
+          // Start a new streaming ASR session; cancel any previous one
+          if (asrSession) cancelAsrSession(asrSession);
           asrSession = startAsrSession(ws);
           console.log(`ASR streaming started for ${id}`);
         } else if (msg.type === 'asr_end') {
-          // Send empty final chunk to signal end of audio
+          // Send final marker to Volcano
           if (asrSession) {
             asrSession.ended = true;
             if (asrSession.ready && asrSession.volcanoWs?.readyState === WebSocket.OPEN) {
               asrSession.volcanoWs.send(buildAudioRequest(Buffer.alloc(0), true));
-              console.log(`ASR streaming ended for ${id}`);
+              console.log(`ASR streaming ended for ${id} (${asrSession.allChunks.length} chunks)`);
             } else {
-              // Volcano not ready yet - mark pending end so it's sent after flush
-              asrSession.pendingChunks.push(Buffer.alloc(0)); // sentinel for final
-              console.log(`ASR end queued (Volcano not ready yet) for ${id}`);
+              // connectVolcano's open handler will send final marker when it sees ended=true
+              console.log(`ASR end received, Volcano not ready yet for ${id}`);
             }
           }
         }
@@ -3425,9 +3626,10 @@ voiceWss.on('connection', (ws) => {
           const chunk = Buffer.from(message);
           asrSession.allChunks.push(chunk);
           if (asrSession.ready && asrSession.volcanoWs?.readyState === WebSocket.OPEN) {
+            // Real-time: forward directly
             asrSession.volcanoWs.send(buildAudioRequest(chunk, false));
           } else {
-            // Buffer chunks while Volcano WebSocket is still connecting
+            // Buffer while Volcano is connecting
             asrSession.pendingChunks.push(chunk);
           }
         }
@@ -3439,9 +3641,7 @@ voiceWss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    if (asrSession?.volcanoWs) {
-      try { asrSession.volcanoWs.close(); } catch {}
-    }
+    if (asrSession) cancelAsrSession(asrSession);
     voiceClients.delete(id);
     console.log(`Voice client disconnected: ${id}`);
   });
