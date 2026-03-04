@@ -1031,6 +1031,20 @@ const indexHtml = `<!DOCTYPE html>
       font-size:13px;cursor:pointer;font-family:system-ui;
     }
     .app-menu-btn:active { background:#4ade80;color:#000; }
+    .menu-sess-list { max-height:200px;overflow-y:auto;padding:2px 0; }
+    .menu-sess-item {
+      display:flex;align-items:center;gap:8px;padding:8px 16px;color:#e0e0e0;font-size:13px;
+      font-family:system-ui;cursor:pointer;text-decoration:none;overflow:hidden;
+    }
+    .menu-sess-item:hover,.menu-sess-item:active { background:rgba(255,255,255,0.06); }
+    .menu-sess-item.current { background:rgba(74,222,128,0.12);color:#4ade80; }
+    .menu-sess-name { overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1; }
+    .menu-sess-dot { width:6px;height:6px;border-radius:50%;flex-shrink:0; }
+    .menu-sess-dot.active { background:#4ade80; }
+    .menu-sess-dot.idle { background:#555; }
+    body.light-mode .menu-sess-item { color:#333; }
+    body.light-mode .menu-sess-item.current { background:rgba(34,197,94,0.12);color:#16a34a; }
+    body.light-mode .menu-sess-dot.idle { background:#bbb; }
     .app-menu-fk-chip {
       display:flex;align-items:center;gap:4px;padding:4px 8px;background:#0f3460;border-radius:6px;
       font-size:13px;color:#e0e0e0;cursor:pointer;
@@ -1298,7 +1312,12 @@ const indexHtml = `<!DOCTYPE html>
   <div id="app-menu" style="display:none;">
     <div class="app-menu-backdrop"></div>
     <div class="app-menu-panel">
-      <a class="app-menu-item" href="/terminal">&#x2630; Sessions</a>
+      <div class="app-menu-section">Sessions</div>
+      <div id="menu-sessions" class="menu-sess-list"><div style="padding:8px 16px;color:#888;font-size:13px;">Loading...</div></div>
+      <div style="padding:4px 16px 6px;">
+        <button class="app-menu-btn" id="menu-new-session" style="width:100%">+ New Session</button>
+      </div>
+      <div class="app-menu-sep"></div>
       <div class="app-menu-item" id="menu-files">&#x1F4C1; Files</div>
       <div class="app-menu-sep"></div>
       <div class="app-menu-section">Font Size</div>
@@ -1833,10 +1852,52 @@ const indexHtml = `<!DOCTYPE html>
 
     // App menu (... button)
     var appMenu = document.getElementById('app-menu');
+    function menuLoadSessions() {
+      var container = document.getElementById('menu-sessions');
+      fetch('/terminal/api/sessions', { credentials: 'include' })
+        .then(function(r) { return r.json(); })
+        .then(function(sessions) {
+          if (!sessions.length) {
+            container.innerHTML = '<div style="padding:8px 16px;color:#888;font-size:13px;">No sessions</div>';
+            return;
+          }
+          container.innerHTML = '';
+          sessions.forEach(function(s) {
+            var a = document.createElement('a');
+            a.className = 'menu-sess-item' + (s.id === sessionId ? ' current' : '');
+            a.href = '/terminal?session=' + encodeURIComponent(s.id);
+            var dot = document.createElement('span');
+            dot.className = 'menu-sess-dot ' + (s.clients > 0 ? 'active' : 'idle');
+            var name = document.createElement('span');
+            name.className = 'menu-sess-name';
+            name.textContent = s.name || s.id;
+            a.appendChild(dot);
+            a.appendChild(name);
+            container.appendChild(a);
+          });
+        })
+        .catch(function() {
+          container.innerHTML = '<div style="padding:8px 16px;color:#f87171;font-size:13px;">Failed to load</div>';
+        });
+    }
+    document.getElementById('menu-new-session').addEventListener('click', function(e) {
+      e.stopPropagation();
+      var btn = e.currentTarget;
+      btn.disabled = true;
+      btn.textContent = 'Creating...';
+      fetch('/terminal/api/sessions', { method: 'POST', credentials: 'include' })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.id) location.href = '/terminal?session=' + encodeURIComponent(data.id);
+          else { btn.disabled = false; btn.textContent = '+ New Session'; }
+        })
+        .catch(function() { btn.disabled = false; btn.textContent = '+ New Session'; });
+    });
     function menuShow() {
       appMenu.style.display = 'block';
       document.getElementById('menu-font-val').textContent = fontSize + 'px';
       menuRenderFk();
+      menuLoadSessions();
     }
     function menuHide() { appMenu.style.display = 'none'; term.focus(); }
     document.getElementById('menu-btn').addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); menuShow(); });
@@ -3075,6 +3136,59 @@ const server = http.createServer(async (req, res) => {
       'Set-Cookie': `auth=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly;${securePart}`,
     });
     res.end();
+    return;
+  }
+
+  // GET /terminal/api/sessions — list sessions as JSON
+  if ((req.url || '').match(/^(?:\/terminal)?\/api\/sessions(\?.*)?$/) && req.method === 'GET') {
+    if (!isAuthenticated(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return;
+    }
+    const auth = getAuthInfo(req);
+    try {
+      const ownerParam = auth.username === 'root' ? '' : `?owner=${encodeURIComponent(auth.username)}`;
+      const resp = await ptyFetch(`/sessions${ownerParam}`);
+      const sessions = await resp.json();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(sessions));
+    } catch {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Internal error' }));
+    }
+    return;
+  }
+
+  // POST /terminal/api/sessions — create new session, return JSON
+  if ((req.url || '').match(/^(?:\/terminal)?\/api\/sessions$/) && req.method === 'POST') {
+    if (!isAuthenticated(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return;
+    }
+    const auth = getAuthInfo(req);
+    const id = 'sess_' + randomBytes(12).toString('hex');
+    try {
+      const sessionBody: Record<string, string> = { id, owner: auth.username };
+      if (auth.linuxUser) sessionBody.linuxUser = auth.linuxUser;
+      const resp = await ptyFetch('/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sessionBody),
+      });
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => '');
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Failed to create session', detail: body }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ id }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Internal error' }));
+    }
     return;
   }
 
