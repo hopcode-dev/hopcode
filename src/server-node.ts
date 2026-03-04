@@ -1318,14 +1318,13 @@ const indexHtml = `<!DOCTYPE html>
         <button class="app-menu-btn" id="menu-new-session" style="width:100%">+ New Session</button>
       </div>
       <div class="app-menu-sep"></div>
-      <div class="app-menu-item" id="menu-files">&#x1F4C1; Files</div>
-      <a class="app-menu-item" href="/terminal" style="text-decoration:none;">&#x1F3E0; Home</a>
-      <div class="app-menu-sep"></div>
-      <div class="app-menu-section">Font Size</div>
+      <div class="app-menu-section">Terminal</div>
       <div class="app-menu-row" style="padding:6px 16px;gap:10px;">
         <button class="app-menu-btn" id="menu-font-down">A&#x2212;</button>
         <span id="menu-font-val" style="font-size:14px;min-width:40px;text-align:center;color:#fff;font-weight:600;"></span>
         <button class="app-menu-btn" id="menu-font-up">A+</button>
+        <span style="flex:1;"></span>
+        <button class="app-menu-btn" id="theme-toggle">&#x263E;</button>
       </div>
       <div class="app-menu-sep"></div>
       <div class="app-menu-section">Floating Keys</div>
@@ -1336,7 +1335,8 @@ const indexHtml = `<!DOCTYPE html>
         <button class="app-menu-btn" id="menu-fk-reset" style="background:#333;color:#f87171;">Reset</button>
       </div>
       <div class="app-menu-sep"></div>
-      <div class="app-menu-item" id="theme-toggle">&#x263E; Dark mode</div>
+      <div class="app-menu-item" id="menu-files">&#x1F4C1; Files</div>
+      <a class="app-menu-item" href="/terminal" style="text-decoration:none;">&#x1F3E0; Home</a>
     </div>
   </div>
 
@@ -2089,14 +2089,15 @@ const indexHtml = `<!DOCTYPE html>
       document.body.classList.toggle('light-mode', isLight);
       // Keep dark theme colors; CSS filter handles light mode inversion
       term.options.theme = { background: '#000', foreground: '#e0e0e0', cursor: isLight ? '#333' : '#4ade80' };
-      themeToggle.innerHTML = isLight ? '&#x2600; Light mode' : '&#x263E; Dark mode';
+      themeToggle.innerHTML = isLight ? '&#x2600;' : '&#x263E;';
+      themeToggle.title = isLight ? 'Switch to dark mode' : 'Switch to light mode';
     }
     applyTheme();
-    themeToggle.addEventListener('click', function() {
+    themeToggle.addEventListener('click', function(e) {
+      e.stopPropagation();
       isLight = !isLight;
       localStorage.setItem('hopcode-theme', isLight ? 'light' : 'dark');
       applyTheme();
-      menuHide();
     });
 
     // Bar collapse toggle (called from floating key or hide btn)
