@@ -3148,7 +3148,7 @@ const server = http.createServer(async (req, res) => {
     }
     const auth = getAuthInfo(req);
     try {
-      const ownerParam = auth.username === 'root' ? '' : `?owner=${encodeURIComponent(auth.username)}`;
+      const ownerParam = isMultiUser && auth.username && auth.username !== 'root' ? `?owner=${encodeURIComponent(auth.username)}` : '';
       const resp = await ptyFetch(`/sessions${ownerParam}`);
       const sessions = await resp.json();
       res.writeHead(200, { 'Content-Type': 'application/json' });
