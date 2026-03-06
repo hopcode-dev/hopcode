@@ -224,6 +224,7 @@ const VOLCANO_ASR_ENDPOINT = 'wss://openspeech.bytedance.com/api/v3/sauc/bigmode
 // --- PTY service client ---
 const PTY_INTERNAL_TOKEN = getPtyInternalToken();
 const PTY_BASE_URL = `http://127.0.0.1:${PTY_SERVICE_PORT}`;
+const RECORDINGS_DIR = path.join(__dirname, '..', 'data', 'recordings');
 
 async function ptyFetch(urlPath: string, options?: RequestInit): Promise<Response> {
   const url = PTY_BASE_URL + urlPath;
@@ -435,7 +436,14 @@ function connectVolcano(asrSession: AsrSession, clientWs: WebSocket): void {
               asrSession.gotResult = true;
               clientWs.send(JSON.stringify({ type: 'asr', text: latestFinalText }));
               console.log(`ASR final: "${latestFinalText}"`);
-              try { volcanoWs.close(); } catch {}
+              // Only close Volcano WS if user already stopped recording
+              if (asrSession.ended) {
+                try { volcanoWs.close(); } catch {}
+              } else {
+                // Reset for next utterance while user keeps talking
+                asrSession.gotResult = false;
+                latestFinalText = '';
+              }
             }, 300);
           } else {
             clientWs.send(JSON.stringify({ type: 'asr_partial', text }));
@@ -982,7 +990,7 @@ const indexHtml = `<!DOCTYPE html>
     #voice-bar.cancel-zone { background: #3a1a1a; border-top-color: #f87171; }
     #voice-bar.cancel-zone #status { background: #f87171; color: #000; animation: none; }
     #voice-popup {
-      position: fixed; left: 50%; bottom: 120px; transform: translateX(-50%);
+      position: fixed; left: 50%; top: 40%; transform: translate(-50%, -50%);
       background: rgba(22,33,62,0.95); border: 1px solid #0f3460; border-radius: 16px;
       padding: 16px 20px; min-width: 200px; max-width: 80vw; z-index: 500;
       font-family: system-ui; color: #e0e0e0; text-align: center;
@@ -992,6 +1000,9 @@ const indexHtml = `<!DOCTYPE html>
     #voice-popup.cancel { background: rgba(58,26,26,0.95); border-color: #f87171; }
     #voice-popup.cancel #vp-dot { background: #f87171; animation: none; }
     #voice-popup.cancel #vp-hint { color: #f87171; font-weight: 600; }
+    #voice-popup.send-ready { background: rgba(26,58,46,0.95); border-color: #4ade80; }
+    #voice-popup.send-ready #vp-dot { background: #4ade80; }
+    #voice-popup.send-ready #vp-hint { color: #4ade80; font-weight: 600; }
     #vp-indicator { margin-bottom: 8px; }
     #vp-dot {
       display: inline-block; width: 12px; height: 12px; border-radius: 50%;
@@ -1000,8 +1011,18 @@ const indexHtml = `<!DOCTYPE html>
     #vp-text {
       font-size: 16px; line-height: 1.5; color: #fff; min-height: 24px;
       max-height: 30vh; overflow-y: auto; word-break: break-word;
+      outline: none; border-radius: 6px; padding: 4px;
+    }
+    #vp-text[contenteditable="true"] {
+      border: 1px solid #4ade80; background: rgba(0,0,0,0.3);
     }
     #vp-hint { font-size: 12px; color: #666; margin-top: 8px; }
+    #vp-actions { display: none; justify-content: center; gap: 12px; margin-top: 12px; }
+    #vp-actions button { border: none; border-radius: 8px; padding: 8px 20px; font-size: 15px; font-weight: 600; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+    #vp-send { background: #4ade80; color: #000; }
+    #vp-send:active { background: #22c55e; }
+    #vp-cancel { background: #555; color: #fff; }
+    #vp-cancel:active { background: #444; }
     #vp-text.listening::after { content: 'Listening...'; color: #888; animation: pulse 1.2s infinite; }
     #status { padding: 6px 12px; background: #333; border-radius: 20px; font-size: 14px; white-space: nowrap; text-align: center; }
     #status.recording { background: #4ade80; color: #000; animation: pulse 1s infinite; }
@@ -1245,7 +1266,7 @@ const indexHtml = `<!DOCTYPE html>
     <textarea id="copy-overlay" readonly></textarea>
     <div id="voice-bar">
       <div id="bar-row1">
-        <button id="menu-btn" class="key-btn" style="min-width:32px;padding:2px 6px;"><svg viewBox="0 0 512 512" fill="none" style="width:26px;height:26px;vertical-align:middle;"><circle cx="185" cy="175" r="42" fill="#4ade80"/><circle cx="327" cy="175" r="42" fill="#4ade80"/><circle cx="185" cy="175" r="16" fill="#1a1a2e"/><circle cx="327" cy="175" r="16" fill="#1a1a2e"/><rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/><path d="M205 218L230 240L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M242 240L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/><rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/><rect x="165" y="340" width="50" height="20" rx="10" fill="#22c55e"/><rect x="297" y="340" width="50" height="20" rx="10" fill="#22c55e"/></svg></button>
+        <button id="menu-btn" class="key-btn" style="min-width:32px;padding:2px 6px;"><svg viewBox="0 0 512 512" fill="none" style="width:34px;height:34px;vertical-align:middle;"><circle cx="185" cy="175" r="42" fill="#4ade80"/><circle cx="327" cy="175" r="42" fill="#4ade80"/><circle cx="185" cy="175" r="16" fill="#1a1a2e"/><circle cx="327" cy="175" r="16" fill="#1a1a2e"/><rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/><path d="M205 218L230 240L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M242 240L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/><rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/><rect x="165" y="340" width="50" height="20" rx="10" fill="#22c55e"/><rect x="297" y="340" width="50" height="20" rx="10" fill="#22c55e"/></svg></button>
         <div id="special-keys">
           <button class="key-btn" id="bar-hide-btn" style="font-size:14px;">&#x276F;</button>
           <button class="key-btn" data-key="esc">Esc</button>
@@ -1262,7 +1283,7 @@ const indexHtml = `<!DOCTYPE html>
         </div>
       </div>
       <div id="bar-row2">
-        <button id="menu-btn-mobile" class="key-btn mobile-only" style="min-width:32px;padding:2px 6px;"><svg viewBox="0 0 512 512" fill="none" style="width:26px;height:26px;vertical-align:middle;"><circle cx="185" cy="175" r="42" fill="#4ade80"/><circle cx="327" cy="175" r="42" fill="#4ade80"/><circle cx="185" cy="175" r="16" fill="#1a1a2e"/><circle cx="327" cy="175" r="16" fill="#1a1a2e"/><rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/><path d="M205 218L230 240L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M242 240L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/><rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/><rect x="165" y="340" width="50" height="20" rx="10" fill="#22c55e"/><rect x="297" y="340" width="50" height="20" rx="10" fill="#22c55e"/></svg></button>
+        <button id="menu-btn-mobile" class="key-btn mobile-only" style="min-width:32px;padding:2px 6px;"><svg viewBox="0 0 512 512" fill="none" style="width:34px;height:34px;vertical-align:middle;"><circle cx="185" cy="175" r="42" fill="#4ade80"/><circle cx="327" cy="175" r="42" fill="#4ade80"/><circle cx="185" cy="175" r="16" fill="#1a1a2e"/><circle cx="327" cy="175" r="16" fill="#1a1a2e"/><rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/><path d="M205 218L230 240L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M242 240L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/><rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/><rect x="165" y="340" width="50" height="20" rx="10" fill="#22c55e"/><rect x="297" y="340" width="50" height="20" rx="10" fill="#22c55e"/></svg></button>
         <div id="status">Hold Option to speak</div>
         <div id="text"></div>
         <button id="return-btn" class="key-btn" title="Return" style="font-size:20px;">&#x23CE;</button>
@@ -1273,6 +1294,10 @@ const indexHtml = `<!DOCTYPE html>
     <div id="vp-indicator"><span id="vp-dot"></span></div>
     <div id="vp-text"></div>
     <div id="vp-hint">&#x2191; Swipe up to cancel</div>
+    <div id="vp-actions">
+      <button id="vp-cancel">Cancel</button>
+      <button id="vp-send">Send &#x23CE;</button>
+    </div>
   </div>
   <div id="floating-keys"><button id="bar-handle">&#x2328;</button></div>
   <div class="float-key-config" id="fk-config">
@@ -1577,8 +1602,8 @@ const indexHtml = `<!DOCTYPE html>
       };
       termWs.onclose = (e) => {
         if (termWs.sessionExited) return;
-        document.getElementById('status').textContent = 'Disconnected - reconnecting...';
-        document.getElementById('status').style.background = '#f97316';
+        document.getElementById('status').textContent = 'Reconnecting...';
+        document.getElementById('status').style.background = '#6b7280';
         isReconnect = true;
         setTimeout(connectTerminal, 2000);
       };
@@ -2317,44 +2342,123 @@ const indexHtml = `<!DOCTYPE html>
     var cancelledRec = false; // Whether current recording was cancelled (swipe up / alt combo)
     var releaseFlushTimer = null; // Timer waiting for final result after release
     var touchStartY = 0; // touchstart Y for swipe detection
+    var touchStartX = 0; // touchstart X for swipe detection
     var swipedToCancel = false; // Whether user swiped up into cancel zone
+    var swipedToSend = false; // Whether user swiped right to send directly
 
     var defaultStatusText = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
 
     var vpEl = document.getElementById('voice-popup');
     var vpText = document.getElementById('vp-text');
     var vpHint = document.getElementById('vp-hint');
+    var vpActions = document.getElementById('vp-actions');
     function vpShow() {
       vpText.textContent = '';
       vpText.classList.add('listening');
-      vpHint.textContent = '\u2191 Swipe up to cancel';
-      vpEl.classList.remove('hidden', 'cancel');
+      vpHint.textContent = '\u2191 Swipe up to cancel  \u2192 Swipe right to send';
+      vpHint.style.display = '';
+      vpActions.style.display = 'none';
+      vpEl.classList.remove('hidden', 'cancel', 'send-ready');
     }
-    function vpHide() { vpEl.classList.add('hidden'); vpEl.classList.remove('cancel'); }
+    function vpHide() { vpEl.classList.add('hidden'); vpEl.classList.remove('cancel', 'send-ready'); vpActions.style.display = 'none'; }
     function vpUpdate(txt) { vpText.textContent = txt; vpText.classList.remove('listening'); }
     function vpSetCancel(on) {
       if (on) {
         vpEl.classList.add('cancel');
+        vpEl.classList.remove('send-ready');
         vpHint.textContent = '\u2191 Release to cancel';
       } else {
         vpEl.classList.remove('cancel');
-        vpHint.textContent = '\u2191 Swipe up to cancel';
+        vpHint.textContent = '\u2191 Swipe up to cancel  \u2192 Swipe right to send';
+      }
+    }
+    function vpSetSendReady(on) {
+      if (on) {
+        vpEl.classList.add('send-ready');
+        vpEl.classList.remove('cancel');
+        vpHint.textContent = '\u2192 Release to send';
+      } else {
+        vpEl.classList.remove('send-ready');
+        vpHint.textContent = '\u2191 Swipe up to cancel  \u2192 Swipe right to send';
       }
     }
 
-    function flushAsrText() {
-      if (asrFlushed) return;
-      vpHide();
-      if (pendingAsrText && termWs && termWs.readyState === 1) {
-        asrFlushed = true;
-        text.textContent = pendingAsrText;
-        status.textContent = 'Sending to terminal...';
-        termWs.send(JSON.stringify({ type: 'asr', text: pendingAsrText }));
-        setTimeout(function() { status.textContent = defaultStatusText; }, 2000);
+    function vpShowConfirm() {
+      vpActions.style.display = 'flex';
+      vpEl.classList.remove('cancel', 'send-ready');
+      vpConfirmVisible = true;
+      vpText.contentEditable = 'true';
+      vpText.focus();
+      // Place cursor at end of text
+      var range = document.createRange();
+      range.selectNodeContents(vpText);
+      range.collapse(false);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      if (isMobile) {
+        vpHint.style.display = 'none';
       } else {
-        status.textContent = defaultStatusText;
+        vpHint.style.display = '';
+        vpHint.textContent = 'Option: send | Control: cancel';
+      }
+    }
+
+    function vpSend() {
+      vpConfirmVisible = false;
+      vpText.contentEditable = 'false';
+      // Read edited text from popup
+      var finalText = vpText.textContent.trim();
+      if (finalText && termWs && termWs.readyState === 1) {
+        asrFlushed = true;
+        pendingAsrText = finalText;
+        status.textContent = 'Sending to terminal...';
+        // Send text as raw input + separate Enter, same as physical keyboard
+        sendInput(pendingAsrText);
+        setTimeout(function() { sendInput(String.fromCharCode(13)); }, 50);
+        setTimeout(function() { status.textContent = defaultStatusText; }, 2000);
       }
       pendingAsrText = '';
+      vpHide();
+    }
+
+    function vpDismiss() {
+      vpConfirmVisible = false;
+      vpText.contentEditable = 'false';
+      pendingAsrText = '';
+      asrFlushed = true;
+      status.textContent = defaultStatusText;
+      vpHide();
+    }
+
+    document.getElementById('vp-send').onclick = vpSend;
+    document.getElementById('vp-cancel').onclick = vpDismiss;
+
+    var vpConfirmVisible = false;
+
+    // Keyboard shortcuts for confirm popup
+    document.addEventListener('keydown', function(e) {
+      if (!vpConfirmVisible) return;
+      if (e.key === 'Control') {
+        e.preventDefault();
+        e.stopPropagation();
+        vpDismiss();
+      } else if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        vpSend();
+      }
+    }, true);
+
+    function flushAsrText() {
+      if (asrFlushed) return;
+      if (isRecording || altDown) return; // Still recording, wait for release
+      if (pendingAsrText) {
+        vpShowConfirm();
+      } else {
+        vpHide();
+        status.textContent = defaultStatusText;
+      }
     }
 
     function scheduleMicRelease() {
@@ -2369,18 +2473,22 @@ const indexHtml = `<!DOCTYPE html>
         if (cancelledRec) return; // Recording was cancelled, ignore all results
         if (d.type === 'asr' && d.text) {
           clearTimeout(releaseFlushTimer);
-          pendingAsrText = d.text;
-          text.textContent = d.text;
-          vpUpdate(d.text);
-          flushAsrText();
+          if (!vpConfirmVisible && d.text !== pendingAsrText) {
+            pendingAsrText = d.text;
+            vpUpdate(d.text);
+          } else if (vpConfirmVisible) {
+            pendingAsrText = d.text;
+          }
+          if (!asrFlushed) { directSendMode ? vpSend() : flushAsrText(); }
         } else if (d.type === 'asr_partial' && d.text) {
-          pendingAsrText = d.text;
-          text.textContent = d.text;
-          vpUpdate(d.text);
+          if (!asrFlushed && !vpConfirmVisible) {
+            pendingAsrText = d.text;
+            vpUpdate(d.text);
+          }
         } else if (d.type === 'error') {
           clearTimeout(releaseFlushTimer);
-          if (pendingAsrText) {
-            flushAsrText();
+          if (pendingAsrText && !asrFlushed) {
+            directSendMode ? vpSend() : flushAsrText();
           } else {
             // No text at all — show error in popup then hide
             vpUpdate('Voice recognition failed');
@@ -2483,11 +2591,13 @@ const indexHtml = `<!DOCTYPE html>
     }
 
     var trailingTimer = null;
-    function stopRec(cancel) {
+    var directSendMode = false; // Whether to skip confirm and send directly
+    function stopRec(cancel, directSend) {
       wantsToStop = true;
       clearTimeout(trailingTimer);
       if (!isRecording) return;
       status.classList.remove('recording');
+      directSendMode = !!directSend;
 
       if (cancel) {
         // Cancel: discard all text, don't flush
@@ -2516,15 +2626,16 @@ const indexHtml = `<!DOCTYPE html>
 
         clearTimeout(releaseFlushTimer);
         if (pendingAsrText) {
-          // Have partial text — wait briefly for final, then flush partial
+          // Have partial text -- wait for final result before flushing
+          // Direct send needs longer wait since user won't see confirm UI
           releaseFlushTimer = setTimeout(function() {
-            if (!asrFlushed) flushAsrText();
-          }, 300);
+            if (!asrFlushed) { directSendMode ? vpSend() : flushAsrText(); }
+          }, directSendMode ? 2000 : 300);
         } else {
-          // No text yet — wait longer for result
+          // No text yet -- wait longer for result
           releaseFlushTimer = setTimeout(function() {
-            if (!asrFlushed) flushAsrText();
-          }, 2000);
+            if (!asrFlushed) { directSendMode ? vpSend() : flushAsrText(); }
+          }, 3000);
         }
       }, 300);
     }
@@ -2535,27 +2646,42 @@ const indexHtml = `<!DOCTYPE html>
         altDown = true;
         altDownTime = Date.now();
         altCombined = false;
+
+        if (vpConfirmVisible) {
+          // Option pressed while confirm is showing
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+
         startRec();
         e.preventDefault();
         e.stopPropagation();
       } else if (altDown && e.key !== 'Alt') {
         // Option combined with another key - cancel recording
         altCombined = true;
-        if (isRecording) stopRec(true);
+        if (isRecording) stopRec(true, false);
       }
     }, true);
     document.addEventListener('keyup', (e) => {
       if (e.key === 'Alt' && altDown) {
         altDown = false;
-        const holdDuration = Date.now() - altDownTime;
-        if (altCombined || holdDuration < 800) {
-          // Combined with other key or too short - cancel
-          if (isRecording) stopRec(true);
-        } else {
-          stopRec(false);
-        }
+        var holdDuration = Date.now() - altDownTime;
         e.preventDefault();
         e.stopPropagation();
+
+        if (vpConfirmVisible) {
+          // Tap Option = send
+          vpSend();
+          return;
+        }
+
+        if (altCombined || holdDuration < 800) {
+          // Combined with other key or too short - cancel
+          if (isRecording) stopRec(true, false);
+        } else {
+          stopRec(false, false);
+        }
       }
     }, true);
 
@@ -2576,38 +2702,52 @@ const indexHtml = `<!DOCTYPE html>
       if (isExcluded(e.target)) return;
       e.preventDefault();
       touchStartY = e.touches[0].clientY;
+      touchStartX = e.touches[0].clientX;
       swipedToCancel = false;
+      swipedToSend = false;
       startRec();
       voiceBar.classList.add('recording');
     }, { passive: false });
     voiceBar.addEventListener('touchmove', (e) => {
       if (!isRecording) return;
       var dy = touchStartY - e.touches[0].clientY;
+      var dx = e.touches[0].clientX - touchStartX;
       if (dy > 50 && !swipedToCancel) {
         swipedToCancel = true;
+        swipedToSend = false;
         voiceBar.classList.add('cancel-zone');
         voiceBar.classList.remove('recording');
         status.textContent = '\u2191 Release to cancel';
         status.classList.remove('recording');
         vpSetCancel(true);
-      } else if (dy <= 30 && swipedToCancel) {
+      } else if (dx > 60 && !swipedToSend && dy < 30) {
+        swipedToSend = true;
         swipedToCancel = false;
+        voiceBar.classList.remove('cancel-zone');
+        voiceBar.classList.add('recording');
+        status.textContent = '\u2192 Release to send';
+        status.classList.add('recording');
+        vpSetSendReady(true);
+      } else if (dy <= 30 && dx <= 40 && (swipedToCancel || swipedToSend)) {
+        swipedToCancel = false;
+        swipedToSend = false;
         voiceBar.classList.remove('cancel-zone');
         voiceBar.classList.add('recording');
         status.textContent = 'Recording...';
         status.classList.add('recording');
         vpSetCancel(false);
+        vpSetSendReady(false);
       }
     }, { passive: true });
     voiceBar.addEventListener('touchend', (e) => {
       if (isExcluded(e.target)) return;
       e.preventDefault();
       voiceBar.classList.remove('recording', 'cancel-zone');
-      stopRec(swipedToCancel);
+      stopRec(swipedToCancel, swipedToSend);
     }, { passive: false });
     voiceBar.addEventListener('touchcancel', () => {
       voiceBar.classList.remove('recording', 'cancel-zone');
-      stopRec(true);
+      stopRec(true, false);
     });
 
     // Update status text for mobile
@@ -3128,6 +3268,245 @@ const indexHtml = `<!DOCTYPE html>
 </body>
 </html>`;
 
+// --- Recordings playback page ---
+
+function getRecordingsHtml(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terminal Recordings</title>
+<link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/asciinema-player@3.9.0/dist/bundle/asciinema-player.css">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 16px; }
+  h1 { font-size: 1.3em; margin-bottom: 12px; color: #4ecca3; }
+  .back { display: inline-block; margin-bottom: 12px; color: #4ecca3; text-decoration: none; font-size: 0.9em; }
+  .back:hover { text-decoration: underline; }
+  .list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+  .item { background: #16213e; border-radius: 8px; padding: 12px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+  .item:hover { background: #1a2744; }
+  .item.active { border: 1px solid #4ecca3; }
+  .item-info { flex: 1; }
+  .item-title { font-weight: 600; font-size: 0.95em; }
+  .item-meta { font-size: 0.8em; color: #888; margin-top: 2px; }
+  .item-actions { display: flex; gap: 8px; }
+  .btn-del { background: none; border: 1px solid #e74c3c; color: #e74c3c; border-radius: 4px; padding: 4px 8px; cursor: pointer; font-size: 0.8em; }
+  .btn-del:hover { background: #e74c3c; color: #fff; }
+  #player-wrap { display: none; margin-bottom: 16px; background: #0f0f23; border-radius: 8px; padding: 8px; }
+  #player-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 6px; }
+  #player-title { font-size: 0.9em; color: #4ecca3; }
+  #wall-clock { font-size: 0.85em; color: #f0c040; font-variant-numeric: tabular-nums; }
+  #time-seek { display: flex; align-items: center; gap: 6px; margin: 8px 0; flex-wrap: wrap; }
+  #time-seek label { font-size: 0.8em; color: #aaa; }
+  #time-seek input[type=range] { flex: 1; min-width: 120px; accent-color: #4ecca3; }
+  #time-seek .ts-display { font-size: 0.8em; color: #ccc; font-variant-numeric: tabular-nums; min-width: 90px; }
+  .seek-btns { display: flex; gap: 4px; flex-wrap: wrap; }
+  .seek-btns button { background: #16213e; border: 1px solid #4ecca3; color: #4ecca3; border-radius: 4px; padding: 3px 8px; cursor: pointer; font-size: 0.75em; }
+  .seek-btns button:hover { background: #4ecca3; color: #0f0f23; }
+  .empty { color: #666; font-style: italic; padding: 20px; text-align: center; }
+  .loading { color: #888; padding: 20px; text-align: center; }
+</style>
+</head>
+<body>
+<a class="back" href="/terminal">&larr; Back to Portal</a>
+<h1>Terminal Recordings</h1>
+<div id="player-wrap">
+  <div id="player-header">
+    <div id="player-title"></div>
+    <div id="wall-clock"></div>
+  </div>
+  <div id="player"></div>
+  <div id="time-seek">
+    <label>Timeline:</label>
+    <span class="ts-display" id="seek-time-start"></span>
+    <input type="range" id="seek-slider" min="0" max="1000" value="0" step="1">
+    <span class="ts-display" id="seek-time-end"></span>
+  </div>
+  <div class="seek-btns" id="seek-btns">
+    <button data-delta="-60">&laquo; 1m</button>
+    <button data-delta="-10">&lsaquo; 10s</button>
+    <button data-delta="10">10s &rsaquo;</button>
+    <button data-delta="60">1m &raquo;</button>
+    <button data-delta="300">5m &raquo;&raquo;</button>
+  </div>
+</div>
+<div id="list" class="list"><div class="loading">Loading...</div></div>
+<script src="https://cdn.jsdelivr.net/npm/asciinema-player@3.9.0/dist/bundle/asciinema-player.min.js"></script>
+<script>
+(function() {
+  const listEl = document.getElementById('list');
+  const playerWrap = document.getElementById('player-wrap');
+  const playerEl = document.getElementById('player');
+  const playerTitle = document.getElementById('player-title');
+  const wallClock = document.getElementById('wall-clock');
+  const seekSlider = document.getElementById('seek-slider');
+  const seekTimeStart = document.getElementById('seek-time-start');
+  const seekTimeEnd = document.getElementById('seek-time-end');
+  const seekBtns = document.getElementById('seek-btns');
+  let currentPlayer = null;
+  let currentRecTimestamp = 0;
+  let rafId = null;
+  let sliderDragging = false;
+
+  function fmtSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+    return (bytes/(1024*1024)).toFixed(1) + ' MB';
+  }
+
+  function fmtDuration(sec) {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = Math.floor(sec % 60);
+    if (h > 0) return h + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+    return m + ':' + String(s).padStart(2, '0');
+  }
+
+  function fmtDate(ts) {
+    return new Date(ts * 1000).toLocaleString();
+  }
+
+  function fmtWallTime(ts) {
+    const d = new Date(ts * 1000);
+    return d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
+  }
+
+  async function loadList() {
+    try {
+      const resp = await fetch('/terminal/api/recordings', { credentials: 'include' });
+      const recordings = await resp.json();
+      if (!recordings.length) {
+        listEl.innerHTML = '<div class="empty">No recordings yet</div>';
+        return;
+      }
+      listEl.innerHTML = '';
+      for (const rec of recordings) {
+        const item = document.createElement('div');
+        item.className = 'item';
+        item.dataset.id = rec.id;
+        item.innerHTML =
+          '<div class="item-info">' +
+            '<div class="item-title">' + esc(rec.title) + '</div>' +
+            '<div class="item-meta">' + fmtDate(rec.timestamp) + ' &middot; ' + fmtDuration(rec.duration) + ' &middot; ' + fmtSize(rec.size) + '</div>' +
+          '</div>' +
+          '<div class="item-actions">' +
+            '<button class="btn-del" data-id="' + esc(rec.id) + '">Delete</button>' +
+          '</div>';
+        item.querySelector('.item-info').addEventListener('click', () => play(rec));
+        item.querySelector('.btn-del').addEventListener('click', async (e) => {
+          e.stopPropagation();
+          if (!confirm('Delete this recording?')) return;
+          await fetch('/terminal/api/recordings/' + encodeURIComponent(rec.id), { method: 'DELETE', credentials: 'include' });
+          loadList();
+        });
+        listEl.appendChild(item);
+      }
+    } catch (e) {
+      listEl.innerHTML = '<div class="empty">Failed to load recordings</div>';
+    }
+  }
+
+  function stopTimeUpdate() {
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+  }
+
+  function startTimeUpdate() {
+    stopTimeUpdate();
+    function tick() {
+      if (!currentPlayer) return;
+      try {
+        const cur = currentPlayer.getCurrentTime() || 0;
+        const dur = currentPlayer.getDuration() || 0;
+        // Wall clock: recording start + elapsed
+        wallClock.textContent = fmtWallTime(currentRecTimestamp + cur);
+        // Slider
+        if (!sliderDragging && dur > 0) {
+          seekSlider.value = Math.round((cur / dur) * 1000);
+        }
+        // Time displays
+        seekTimeStart.textContent = fmtDuration(cur);
+        seekTimeEnd.textContent = fmtDuration(dur);
+      } catch(e) {}
+      rafId = requestAnimationFrame(tick);
+    }
+    rafId = requestAnimationFrame(tick);
+  }
+
+  function play(rec) {
+    stopTimeUpdate();
+    if (currentPlayer) { currentPlayer.dispose(); currentPlayer = null; }
+    playerEl.innerHTML = '';
+    playerWrap.style.display = 'block';
+    playerTitle.textContent = rec.title + ' — ' + fmtDate(rec.timestamp);
+    currentRecTimestamp = rec.timestamp;
+    wallClock.textContent = fmtWallTime(rec.timestamp);
+    seekSlider.value = 0;
+    seekTimeStart.textContent = '0:00';
+    seekTimeEnd.textContent = fmtDuration(rec.duration);
+    // Highlight active item
+    document.querySelectorAll('.item').forEach(el => el.classList.toggle('active', el.dataset.id === rec.id));
+    currentPlayer = AsciinemaPlayer.create(
+      '/terminal/api/recordings/' + encodeURIComponent(rec.id) + '.cast',
+      playerEl,
+      { fit: 'width', theme: 'monokai', idleTimeLimit: 3 }
+    );
+    currentPlayer.addEventListener('playing', startTimeUpdate);
+    currentPlayer.addEventListener('pause', stopTimeUpdate);
+    currentPlayer.addEventListener('ended', stopTimeUpdate);
+    // Start updating immediately in case autoplay
+    startTimeUpdate();
+  }
+
+  // Slider seek
+  seekSlider.addEventListener('mousedown', () => { sliderDragging = true; });
+  seekSlider.addEventListener('touchstart', () => { sliderDragging = true; }, {passive: true});
+  seekSlider.addEventListener('input', () => {
+    if (!currentPlayer) return;
+    const dur = currentPlayer.getDuration() || 0;
+    if (dur > 0) {
+      const t = (seekSlider.value / 1000) * dur;
+      seekTimeStart.textContent = fmtDuration(t);
+      wallClock.textContent = fmtWallTime(currentRecTimestamp + t);
+    }
+  });
+  function sliderSeek() {
+    sliderDragging = false;
+    if (!currentPlayer) return;
+    const dur = currentPlayer.getDuration() || 0;
+    if (dur > 0) {
+      const t = (seekSlider.value / 1000) * dur;
+      currentPlayer.seek(t);
+    }
+  }
+  seekSlider.addEventListener('mouseup', sliderSeek);
+  seekSlider.addEventListener('touchend', sliderSeek);
+
+  // Button seek
+  seekBtns.addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (!btn || !currentPlayer) return;
+    const delta = parseInt(btn.dataset.delta);
+    const cur = currentPlayer.getCurrentTime() || 0;
+    const dur = currentPlayer.getDuration() || 1;
+    const target = Math.max(0, Math.min(dur, cur + delta));
+    currentPlayer.seek(target);
+  });
+
+  function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  loadList();
+})();
+</script>
+</body>
+</html>`;
+}
+
 // Pre-compress large HTML responses for faster delivery over slow networks
 const indexHtmlGz = zlib.gzipSync(indexHtml);
 const loginHtmlGz = new Map<string, Buffer>(); // cached per multi-user state
@@ -3173,7 +3552,7 @@ const server = http.createServer(async (req, res) => {
   // Security headers
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' ws: wss: https://cdn.jsdelivr.net; img-src 'self' data:; manifest-src 'self';");
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' ws: wss: https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net data:; img-src 'self' data:; worker-src 'self' blob:; manifest-src 'self';");
 
   // Only log non-routine requests
   if (req.url !== '/health' && !req.url?.startsWith('/health/diagnose') && !req.url?.startsWith('/terminal?session=')) {
@@ -3387,6 +3766,136 @@ const server = http.createServer(async (req, res) => {
     } catch {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, error: 'Internal error' }));
+    }
+    return;
+  }
+
+  // --- Recordings API (root/admin only) ---
+
+  // GET /terminal/api/recordings — list recordings
+  if ((req.url || '').match(/^(?:\/terminal)?\/api\/recordings(\?.*)?$/) && req.method === 'GET') {
+    if (!isAuthenticated(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return;
+    }
+    const recAuth = getAuthInfo(req);
+    if (recAuth.username !== 'root' && recAuth.username !== 'admin') {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Forbidden: admin access required' }));
+      return;
+    }
+    try {
+      const files = await fs.promises.readdir(RECORDINGS_DIR).catch(() => [] as string[]);
+      const recordings: { id: string; title: string; timestamp: number; size: number; duration: number }[] = [];
+      for (const file of files) {
+        if (!file.endsWith('.cast')) continue;
+        const filePath = path.join(RECORDINGS_DIR, file);
+        try {
+          const stat = await fs.promises.stat(filePath);
+          // Read first line to get header
+          const fd = await fs.promises.open(filePath, 'r');
+          const buf = Buffer.alloc(1024);
+          const { bytesRead } = await fd.read(buf, 0, 1024, 0);
+          await fd.close();
+          const firstLine = buf.subarray(0, bytesRead).toString().split('\n')[0];
+          const header = JSON.parse(firstLine!);
+          // Estimate duration from last line
+          let duration = 0;
+          try {
+            const content = await fs.promises.readFile(filePath, 'utf-8');
+            const lines = content.trimEnd().split('\n');
+            if (lines.length > 1) {
+              const lastEvent = JSON.parse(lines[lines.length - 1]!);
+              duration = lastEvent[0] || 0;
+            }
+          } catch {}
+          recordings.push({
+            id: file.replace('.cast', ''),
+            title: header.title || file.replace('.cast', ''),
+            timestamp: header.timestamp || Math.floor(stat.mtimeMs / 1000),
+            size: stat.size,
+            duration,
+          });
+        } catch {}
+      }
+      // Sort by timestamp descending
+      recordings.sort((a, b) => b.timestamp - a.timestamp);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(recordings));
+    } catch {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Internal error' }));
+    }
+    return;
+  }
+
+  // GET /terminal/api/recordings/:id.cast — stream .cast file
+  const castMatch = (req.url || '').match(/^(?:\/terminal)?\/api\/recordings\/([^/]+)\.cast$/);
+  if (castMatch && req.method === 'GET') {
+    if (!isAuthenticated(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return;
+    }
+    const castAuth = getAuthInfo(req);
+    if (castAuth.username !== 'root' && castAuth.username !== 'admin') {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Forbidden: admin access required' }));
+      return;
+    }
+    const id = decodeURIComponent(castMatch[1]!);
+    // Sanitize: only allow alphanumeric, underscore, dash
+    if (!/^[\w-]+$/.test(id)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid id' }));
+      return;
+    }
+    const filePath = path.join(RECORDINGS_DIR, `${id}.cast`);
+    try {
+      const stat = await fs.promises.stat(filePath);
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Content-Length': stat.size,
+        'Cache-Control': 'no-store',
+      });
+      const stream = fs.createReadStream(filePath);
+      stream.pipe(res);
+    } catch {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Recording not found' }));
+    }
+    return;
+  }
+
+  // DELETE /terminal/api/recordings/:id — delete recording
+  const deleteRecMatch = (req.url || '').match(/^(?:\/terminal)?\/api\/recordings\/([^/]+)$/);
+  if (deleteRecMatch && req.method === 'DELETE') {
+    if (!isAuthenticated(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return;
+    }
+    const delRecAuth = getAuthInfo(req);
+    if (delRecAuth.username !== 'root' && delRecAuth.username !== 'admin') {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Forbidden: admin access required' }));
+      return;
+    }
+    const id = decodeURIComponent(deleteRecMatch[1]!);
+    if (!/^[\w-]+$/.test(id)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid id' }));
+      return;
+    }
+    const filePath = path.join(RECORDINGS_DIR, `${id}.cast`);
+    try {
+      await fs.promises.unlink(filePath);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true }));
+    } catch {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Recording not found' }));
     }
     return;
   }
@@ -3721,6 +4230,17 @@ const server = http.createServer(async (req, res) => {
       }
     });
     req.resume();
+    return;
+  }
+
+  // Recordings page: /terminal/recordings (root/admin only)
+  if (pathname === '/terminal/recordings' || pathname === '/recordings') {
+    if (auth.username !== 'root' && auth.username !== 'admin') {
+      res.writeHead(403, { 'Content-Type': 'text/plain' });
+      res.end('Forbidden: admin access required');
+      return;
+    }
+    sendHtml(req, res, getRecordingsHtml());
     return;
   }
 
