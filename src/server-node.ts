@@ -1388,6 +1388,13 @@ const indexHtml = `<!DOCTYPE html>
       <button id="fb-cwd-btn" class="key-btn" title="Go to PTY working directory">CWD</button>
     </div>
     <div id="fb-breadcrumb"></div>
+    <div id="fb-pending-drop" style="display:none;padding:8px 12px;background:#1a2a1a;border-bottom:1px solid #0f3460;display:none;flex-direction:column;gap:6px;">
+      <div style="color:#e0e0e0;font-size:12px;font-family:system-ui;" id="fb-pending-label">Drop files pending</div>
+      <div style="display:flex;gap:6px;">
+        <button id="fb-pending-upload" style="flex:1;padding:6px;background:#4ade80;color:#000;border:none;border-radius:4px;font-size:13px;font-weight:bold;cursor:pointer;">Upload Here</button>
+        <button id="fb-pending-cancel" style="padding:6px 12px;background:#333;color:#e0e0e0;border:none;border-radius:4px;font-size:13px;cursor:pointer;">Cancel</button>
+      </div>
+    </div>
     <div id="fb-error"></div>
     <div id="fb-list"></div>
     <div id="fb-text-preview">
@@ -1886,6 +1893,85 @@ const indexHtml = `<!DOCTYPE html>
       + '<button id="paste-send" style="padding:8px 16px;background:#4ade80;color:#000;border:none;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer;">Send</button>'
       + '</div></div>';
     document.body.appendChild(pasteOverlay);
+
+    // Upload chooser popup — shown when files are dropped outside file browser
+    var uploadChooser = document.createElement('div');
+    uploadChooser.id = 'upload-chooser';
+    uploadChooser.style.cssText = 'display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:500;background:rgba(0,0,0,0.8);flex-direction:column;align-items:center;justify-content:center;padding:20px;';
+    uploadChooser.innerHTML = '<div style="width:100%;max-width:400px;background:#16213e;border:2px solid #0f3460;border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:12px;">'
+      + '<div style="color:#e0e0e0;font-size:14px;font-family:system-ui;font-weight:bold;">Where do you want to drop the file(s)?</div>'
+      + '<div id="uc-file-list" style="color:#aaa;font-size:12px;font-family:monospace;max-height:80px;overflow-y:auto;padding:8px;background:#1a1a2e;border-radius:6px;border:1px solid #333;"></div>'
+      + '<div style="display:flex;flex-direction:column;gap:8px;">'
+      + '<button id="uc-terminal" style="padding:10px 16px;background:#0f3460;color:#e0e0e0;border:none;border-radius:6px;font-size:14px;cursor:pointer;text-align:left;">&#x1F4CB; Paste to Terminal<span style="display:block;font-size:11px;color:#888;margin-top:2px;">Upload to ~/.hopcode/uploads/, paste path into terminal</span></button>'
+      + '<button id="uc-files" style="padding:10px 16px;background:#0f3460;color:#e0e0e0;border:none;border-radius:6px;font-size:14px;cursor:pointer;text-align:left;">&#x1F4C1; Save to Files<span style="display:block;font-size:11px;color:#888;margin-top:2px;">Browse and choose a folder in the file browser</span></button>'
+      + '</div>'
+      + '<div style="display:flex;justify-content:flex-end;">'
+      + '<button id="uc-cancel" style="padding:8px 16px;background:#333;color:#e0e0e0;border:none;border-radius:6px;font-size:14px;cursor:pointer;">Cancel</button>'
+      + '</div></div>';
+    document.body.appendChild(uploadChooser);
+
+    var ucPendingFiles = null;
+    var ucPendingEntries = null;
+
+    function uploadChooserShow(files, entries) {
+      ucPendingFiles = files;
+      ucPendingEntries = entries;
+      var listEl = document.getElementById('uc-file-list');
+      var names = [];
+      if (files && files.length > 0) {
+        for (var i = 0; i < files.length; i++) names.push(files[i].name);
+      } else if (entries) {
+        for (var i = 0; i < entries.length; i++) names.push(entries[i].name + (entries[i].isDirectory ? '/' : ''));
+      }
+      listEl.textContent = names.join('\\n');
+      uploadChooser.style.display = 'flex';
+    }
+
+    function uploadChooserHide() {
+      uploadChooser.style.display = 'none';
+      ucPendingFiles = null;
+      ucPendingEntries = null;
+      term.focus();
+    }
+
+    function isJunkFile(name) {
+      return name === '.DS_Store' || name === 'Thumbs.db' || name === 'desktop.ini' || name === '._.DS_Store' || name.charAt(0) === '.' && name.indexOf('.swp') !== -1;
+    }
+
+    document.getElementById('uc-terminal').addEventListener('click', function() {
+      var files = ucPendingFiles;
+      var entries = ucPendingEntries;
+      uploadChooserHide();
+      if (entries && entries.length > 0) {
+        // Collect actual files from entries (handles folders)
+        fbCollectEntries(entries, function(collected) {
+          for (var i = 0; i < collected.length; i++) {
+            if (collected[i].file && !isJunkFile(collected[i].file.name)) pasteUploadFile(collected[i].file);
+          }
+        });
+      } else if (files) {
+        for (var i = 0; i < files.length; i++) {
+          if (!isJunkFile(files[i].name)) pasteUploadFile(files[i]);
+        }
+      }
+    });
+
+    // Pending drop-upload state for file browser
+    var fbPendingDropFiles = null;
+    var fbPendingDropEntries = null;
+
+    document.getElementById('uc-files').addEventListener('click', function() {
+      fbPendingDropFiles = ucPendingFiles;
+      fbPendingDropEntries = ucPendingEntries;
+      uploadChooserHide();
+      if (!fbPanel.classList.contains('open')) fbOpen();
+      fbShowPendingBanner();
+    });
+
+    document.getElementById('uc-cancel').addEventListener('click', uploadChooserHide);
+    uploadChooser.addEventListener('click', function(e) {
+      if (e.target === uploadChooser) uploadChooserHide();
+    });
 
     var pasteFileInput = document.getElementById('paste-file-input');
     var pasteFilePreview = document.getElementById('paste-file-preview');
@@ -2967,7 +3053,53 @@ const indexHtml = `<!DOCTYPE html>
       try { savedPath = localStorage.getItem('hopcode_fb_path_' + sessionId) || ''; } catch {}
       fbLoadDir(savedPath);
     }
-    function fbClose() { fbPanel.classList.remove('open'); }
+    function fbClose() {
+      fbPanel.classList.remove('open');
+      fbClearPendingDrop();
+    }
+
+    var fbPendingDropEl = document.getElementById('fb-pending-drop');
+    var fbPendingLabel = document.getElementById('fb-pending-label');
+
+    function fbShowPendingBanner() {
+      if (!fbPendingDropFiles && !fbPendingDropEntries) return;
+      var count = 0;
+      if (fbPendingDropFiles && fbPendingDropFiles.length > 0) count = fbPendingDropFiles.length;
+      else if (fbPendingDropEntries) count = fbPendingDropEntries.length;
+      fbPendingLabel.textContent = count + ' file' + (count !== 1 ? 's' : '') + ' ready to upload \u2014 navigate to target folder';
+      fbPendingDropEl.style.display = 'flex';
+    }
+
+    function fbClearPendingDrop() {
+      fbPendingDropFiles = null;
+      fbPendingDropEntries = null;
+      fbPendingDropEl.style.display = 'none';
+    }
+
+    document.getElementById('fb-pending-upload').addEventListener('click', function() {
+      var files = fbPendingDropFiles;
+      var entries = fbPendingDropEntries;
+      fbClearPendingDrop();
+      if (entries && entries.length > 0) {
+        var hasDir = false;
+        for (var i = 0; i < entries.length; i++) {
+          if (entries[i].isDirectory) { hasDir = true; break; }
+        }
+        if (hasDir) {
+          fbCollectEntries(entries, function(collected) {
+            if (collected.length > 0) fbUploadFilesWithPaths(collected);
+          });
+        } else if (files && files.length > 0) {
+          fbUploadFiles(files);
+        }
+      } else if (files && files.length > 0) {
+        fbUploadFiles(files);
+      }
+    });
+
+    document.getElementById('fb-pending-cancel').addEventListener('click', function() {
+      fbClearPendingDrop();
+    });
 
     var fbBackIcon = '<svg width="20" height="20" viewBox="0 0 24 24" fill="#888"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>';
 
@@ -3264,15 +3396,35 @@ const indexHtml = `<!DOCTYPE html>
       fbHandleDrop(e);
     });
 
-    // Also handle drop on the document body when file-browser is open
-    // (in case the user drops slightly outside the panel)
+    // Handle drop anywhere on the document
+    // If file browser is open, drop goes directly to file browser
+    // Otherwise, show chooser popup
     document.addEventListener('dragover', function(e) {
-      if (fbPanel.classList.contains('open')) e.preventDefault();
+      if (e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.indexOf('Files') !== -1) {
+        e.preventDefault();
+      }
     });
     document.addEventListener('drop', function(e) {
+      if (!e.dataTransfer) return;
+      // Always preventDefault first to stop browser from opening files in new tab
+      e.preventDefault();
+      var files = e.dataTransfer.files;
+      var items = e.dataTransfer.items;
+      // Extract entries before checking files (folders may have entries but no files)
+      var entries = [];
+      if (items) {
+        for (var i = 0; i < items.length; i++) {
+          var entry = items[i].webkitGetAsEntry && items[i].webkitGetAsEntry();
+          if (entry) entries.push(entry);
+        }
+      }
+      if ((!files || files.length === 0) && entries.length === 0) return;
       if (fbPanel.classList.contains('open')) {
-        e.preventDefault();
+        // File browser is open — direct upload (existing behavior)
         fbHandleDrop(e);
+      } else {
+        // File browser closed — show chooser
+        uploadChooserShow(files, entries.length > 0 ? entries : null);
       }
     });
 
@@ -3314,6 +3466,7 @@ const indexHtml = `<!DOCTYPE html>
       if (pending === 0) { callback(result); return; }
       function processEntry(entry, basePath) {
         if (entry.isFile) {
+          if (isJunkFile(entry.name)) { pending--; if (pending === 0) callback(result); return; }
           entry.file(function(file) {
             result.push({ file: file, relativePath: basePath + file.name });
             pending--;
