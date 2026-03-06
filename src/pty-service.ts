@@ -16,6 +16,7 @@ process.on('unhandledRejection', (err: any) => {
 
 import 'dotenv/config';
 import * as http from 'http';
+import * as fs from 'fs';
 import { WebSocketServer, WebSocket } from 'ws';
 import { fork, ChildProcess } from 'child_process';
 import * as path from 'path';
@@ -420,6 +421,39 @@ server.on('upgrade', (request, socket, head) => {
     socket.destroy();
   }
 });
+
+// --- Recording cleanup ---
+
+const RECORDING_RETENTION_DAYS = parseInt(process.env.RECORDING_RETENTION_DAYS || '30');
+const RECORDINGS_DIR = path.join(process.cwd(), 'data', 'recordings');
+
+async function cleanOldRecordings() {
+  try {
+    const files = await fs.promises.readdir(RECORDINGS_DIR);
+    const now = Date.now();
+    const maxAge = RECORDING_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    let deleted = 0;
+    for (const file of files) {
+      if (!file.endsWith('.cast')) continue;
+      const filePath = path.join(RECORDINGS_DIR, file);
+      try {
+        const stat = await fs.promises.stat(filePath);
+        if (now - stat.mtimeMs > maxAge) {
+          await fs.promises.unlink(filePath);
+          deleted++;
+        }
+      } catch {}
+    }
+    if (deleted > 0) {
+      console.log(`[pty-service] Cleaned ${deleted} old recording(s)`);
+    }
+  } catch {}
+}
+
+// Run cleanup every 6 hours
+setInterval(cleanOldRecordings, 6 * 60 * 60 * 1000);
+// Run once at startup
+cleanOldRecordings();
 
 // --- Start ---
 

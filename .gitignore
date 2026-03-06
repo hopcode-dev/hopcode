@@ -41,3 +41,4 @@ allowlist.json
 package-lock.json
 users.json
 .cursor/
+data/recordings/

@@ -13,6 +13,7 @@ process.on('uncaughtException', (err) => {
 
 import * as pty from 'node-pty';
 import * as fs from 'fs';
+import * as path from 'path';
 import xtermHeadless from '@xterm/headless';
 const HeadlessTerminal = xtermHeadless.Terminal;
 import { SerializeAddon } from '@xterm/addon-serialize';
@@ -56,6 +57,48 @@ let serializeAddon: InstanceType<typeof SerializeAddon> | null = null;
 let cursorHidden = false;
 let sessionId = '';
 let sessionName = '';
+
+// --- Recording (asciicast v2) ---
+
+const RECORDINGS_DIR = path.join(process.cwd(), 'data', 'recordings');
+let recordingStream: fs.WriteStream | null = null;
+let recordingStart = 0;
+
+function initRecording(cols: number, rows: number, title: string) {
+  try {
+    fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
+    const castPath = path.join(RECORDINGS_DIR, `${sessionId}.cast`);
+    recordingStream = fs.createWriteStream(castPath, { flags: 'w' });
+    recordingStart = Date.now();
+    const header = JSON.stringify({
+      version: 2,
+      width: cols,
+      height: rows,
+      timestamp: Math.floor(recordingStart / 1000),
+      title,
+    });
+    recordingStream.write(header + '\n');
+    console.log(`[pty-worker] Recording started: ${castPath}`);
+  } catch (e: any) {
+    console.error(`[pty-worker] Failed to init recording: ${e.message}`);
+    recordingStream = null;
+  }
+}
+
+function recordEvent(type: 'o' | 'i' | 'r', data: string) {
+  if (!recordingStream) return;
+  const elapsed = (Date.now() - recordingStart) / 1000;
+  const line = JSON.stringify([elapsed, type, data]);
+  recordingStream.write(line + '\n');
+}
+
+function closeRecording() {
+  if (recordingStream) {
+    try { recordingStream.end(); } catch {}
+    recordingStream = null;
+    console.log(`[pty-worker] Recording closed: ${sessionId}`);
+  }
+}
 
 // --- Send message to parent ---
 
@@ -126,6 +169,9 @@ function initPty(msg: InitMessage) {
   serializeAddon = new SerializeAddon();
   headlessTerm.loadAddon(serializeAddon);
 
+  // Start recording
+  initRecording(120, 30, `${sessionName} (${msg.owner})`);
+
   // Forward PTY output to parent
   ptyProcess.onData((data) => {
     // Track cursor visibility
@@ -133,11 +179,13 @@ function initPty(msg: InitMessage) {
     if (data.includes('\x1b[?25h')) cursorHidden = false;
     headlessTerm!.write(data);
     send({ type: 'output', data });
+    recordEvent('o', data);
   });
 
   // Notify parent when PTY exits
   ptyProcess.onExit(({ exitCode }) => {
     console.log(`[pty-worker] PTY exited: ${sessionId} (code ${exitCode})`);
+    closeRecording();
     send({ type: 'exit', code: exitCode });
     // Clean up and exit worker process
     if (headlessTerm) headlessTerm.dispose();
@@ -159,6 +207,7 @@ process.on('message', async (msg: IncomingMessage) => {
     case 'input':
       if (ptyProcess) {
         ptyProcess.write(msg.data);
+        recordEvent('i', msg.data);
       }
       break;
 
@@ -168,6 +217,7 @@ process.on('message', async (msg: IncomingMessage) => {
           try {
             ptyProcess.resize(msg.cols, msg.rows);
             headlessTerm?.resize(msg.cols, msg.rows);
+            recordEvent('r', `${msg.cols}x${msg.rows}`);
           } catch {}
         }
       }
@@ -187,6 +237,7 @@ process.on('message', async (msg: IncomingMessage) => {
 
     case 'shutdown':
       console.log(`[pty-worker] Shutdown requested: ${sessionId}`);
+      closeRecording();
       if (ptyProcess) {
         try { ptyProcess.kill(); } catch {}
       }
@@ -198,6 +249,7 @@ process.on('message', async (msg: IncomingMessage) => {
 // Handle parent disconnect
 process.on('disconnect', () => {
   console.log(`[pty-worker] Parent disconnected, exiting: ${sessionId}`);
+  closeRecording();
   if (ptyProcess) {
     try { ptyProcess.kill(); } catch {}
   }
