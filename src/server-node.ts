@@ -240,8 +240,21 @@ async function ptyFetch(urlPath: string, options?: RequestInit): Promise<Respons
 
 // --- File browser helpers ---
 
-function resolveSafePath(requestedPath: string): string {
-  return path.resolve('/', requestedPath);
+function getUserHome(linuxUser?: string): string {
+  if (!linuxUser) return process.env.HOME || '/';
+  return linuxUser === 'root' ? '/root' : `/home/${linuxUser}`;
+}
+
+function resolveSafePath(requestedPath: string, linuxUser?: string): string {
+  const resolved = path.resolve('/', requestedPath);
+  // Non-root users are sandboxed to their home directory
+  if (linuxUser && linuxUser !== 'root') {
+    const home = getUserHome(linuxUser);
+    if (!resolved.startsWith(home + '/') && resolved !== home) {
+      return home;
+    }
+  }
+  return resolved;
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -1618,37 +1631,17 @@ const indexHtml = `<!DOCTYPE html>
       scrollToCursor();
     }
 
-    // Mobile autocomplete fix — three layers:
-    // 1. beforeinput: intercept insertReplacementText (autocomplete), compute
-    //    diff ourselves, send only the new chars, block onData for 100ms
-    //    so xterm's accumulated textarea junk doesn't reach the terminal.
-    // 2. onData prefix check: fallback for keyboards that don't fire
-    //    insertReplacementText. Tracks current word in typingBuffer.
-    // 3. Clear textarea on control chars (Enter, Ctrl+C) to prevent
-    //    cross-command accumulation in the keyboard's backspace buffer.
+    // Mobile autocomplete fix — onData diff approach.
+    // On mobile, keyboard autocomplete replaces text in xterm's textarea.
+    // xterm sees the full replacement as new input and fires onData with the
+    // entire line. We track what we've already sent (sentLine) and diff
+    // incoming multi-char data against it to send only the net change.
+    // KEY: we NEVER clear textarea.value — avoids desync with keyboard buffer.
     var isComposing = false;
     var compositionJustEnded = false;
-    var typingBuffer = '';
-    var typingBufferTimer = null;
+    var sentLine = '';
     var DEL = String.fromCharCode(127);
-    var blockOnDataUntil = 0;
 
-    function resetTypingBuffer() {
-      typingBuffer = '';
-      if (typingBufferTimer) { clearTimeout(typingBufferTimer); typingBufferTimer = null; }
-    }
-    function appendToTypingBuffer(ch) {
-      if (ch === ' ') {
-        typingBuffer = '';
-      } else {
-        typingBuffer += ch;
-      }
-      if (typingBufferTimer) clearTimeout(typingBufferTimer);
-      typingBufferTimer = setTimeout(resetTypingBuffer, 5000);
-    }
-    function isPrintableChar(d) {
-      return d.length === 1 && d.charCodeAt(0) >= 32 && d.charCodeAt(0) !== 127;
-    }
     function commonPrefixLen(a, b) {
       var len = Math.min(a.length, b.length);
       for (var i = 0; i < len; i++) { if (a[i] !== b[i]) return i; }
@@ -1662,7 +1655,6 @@ const indexHtml = `<!DOCTYPE html>
       xtermTextarea.setAttribute('autocapitalize', 'off');
       xtermTextarea.setAttribute('spellcheck', 'false');
 
-      // Prevent iOS page jump when keyboard opens (focus triggers scroll-to-element)
       if (isMobile) {
         xtermTextarea.addEventListener('focus', function() {
           resetPageScroll();
@@ -1671,76 +1663,104 @@ const indexHtml = `<!DOCTYPE html>
         });
       }
 
-      // Intercept autocomplete BEFORE xterm processes it.
-      // We compute the diff (new chars only) and send it ourselves,
-      // then block onData so xterm's version (which may include accumulated
-      // textarea content) doesn't reach the terminal.
-      xtermTextarea.addEventListener('beforeinput', function(e) {
-        if (e.inputType === 'insertReplacementText' && typingBuffer) {
-          var replacement = e.data;
-          if (!replacement && e.dataTransfer) {
-            replacement = e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('text');
-          }
-          if (replacement) {
-            var cpLen = commonPrefixLen(typingBuffer, replacement);
-            var extraBufferChars = typingBuffer.length - cpLen;
-            var bs = '';
-            for (var i = 0; i < extraBufferChars; i++) bs += DEL;
-            var newPart = replacement.slice(cpLen);
-            resetTypingBuffer();
-            if (bs || newPart) sendInput(bs + newPart);
-            blockOnDataUntil = Date.now() + 150;
-          }
-        }
-      });
-
       xtermTextarea.addEventListener('compositionstart', function() {
         isComposing = true;
-        resetTypingBuffer();
       });
       xtermTextarea.addEventListener('compositionend', function(e) {
         isComposing = false;
         compositionJustEnded = true;
-        if (e.data) sendInput(e.data);
+        if (e.data) {
+          sendInput(e.data);
+          sentLine += e.data;
+        }
         setTimeout(function() { compositionJustEnded = false; }, 200);
       });
     }
 
     term.onData(function(data) {
-      // Block when beforeinput already handled autocomplete
-      if (Date.now() < blockOnDataUntil) return;
       if (compositionJustEnded) return;
       if (isComposing) return;
 
-      // Single printable char — normal keystroke, track in buffer and send
-      if (isPrintableChar(data)) {
-        appendToTypingBuffer(data);
+      // Single printable char — normal keystroke
+      if (data.length === 1 && data.charCodeAt(0) >= 32 && data.charCodeAt(0) !== 127) {
+        sentLine += data;
         sendInput(data);
         return;
       }
 
-      // Multi-char data with active typing buffer — fallback autocomplete check
-      if (data.length > 1 && typingBuffer) {
-        var cpLen = commonPrefixLen(typingBuffer, data);
-        if (cpLen >= 2) {
-          var extraBufferChars = typingBuffer.length - cpLen;
-          var bs = '';
-          for (var i = 0; i < extraBufferChars; i++) bs += DEL;
-          var newPart = data.slice(cpLen);
-          resetTypingBuffer();
-          if (bs || newPart) sendInput(bs + newPart);
-          return;
-        }
+      // DEL/backspace
+      if (data.length === 1 && data.charCodeAt(0) === 127) {
+        if (sentLine.length > 0) sentLine = sentLine.slice(0, -1);
+        sendInput(data);
+        return;
       }
 
-      // Non-printable, paste, escape sequences, or no buffer match
-      resetTypingBuffer();
-      if (data) sendInput(data);
-      // Clear textarea on control chars (Enter, Ctrl+C, Tab, etc.) to prevent
-      // cross-command accumulation. Skip DEL/backspace so within-word editing works.
-      if (xtermTextarea && !isComposing && data.length === 1 && data.charCodeAt(0) < 32) {
-        setTimeout(function() { xtermTextarea.value = ''; }, 0);
+      // Control char (Enter, Ctrl+C, etc.) — resets line
+      if (data.length === 1 && data.charCodeAt(0) < 32) {
+        sentLine = '';
+        sendInput(data);
+        return;
       }
+
+      // Escape sequences — pass through
+      if (data.charCodeAt(0) === 27) {
+        sendInput(data);
+        return;
+      }
+
+      // Multi-char data — autocomplete, paste, or xterm's computed diff
+      if (data.length > 1) {
+        // DEL-prefixed: xterm's own diff (backspace + insert). Trust it.
+        var delCount = 0;
+        while (delCount < data.length && data.charCodeAt(delCount) === 127) delCount++;
+        if (delCount > 0) {
+          sentLine = sentLine.slice(0, Math.max(0, sentLine.length - delCount));
+          sentLine += data.slice(delCount);
+          sendInput(data);
+          return;
+        }
+
+        // On mobile: diff against sentLine to avoid re-sending typed text
+        if (isMobile && sentLine.length > 0) {
+          // Strategy 1: line-level diff (data matches beginning of sentLine)
+          var cpLen = commonPrefixLen(sentLine, data);
+          if (cpLen >= 2) {
+            var toDelete = sentLine.length - cpLen;
+            var toInsert = data.slice(cpLen);
+            var bs = '';
+            for (var i = 0; i < toDelete; i++) bs += DEL;
+            if (toDelete > 0 || toInsert.length > 0) {
+              sendInput(bs + toInsert);
+            }
+            sentLine = sentLine.slice(0, cpLen) + toInsert;
+            return;
+          }
+
+          // Strategy 2: word-level diff (data matches last word being corrected)
+          var spIdx = sentLine.lastIndexOf(' ');
+          var lastWord = spIdx >= 0 ? sentLine.slice(spIdx + 1) : sentLine;
+          if (lastWord.length >= 2) {
+            var wpLen = commonPrefixLen(lastWord, data);
+            if (wpLen >= 1) {
+              var bs = '';
+              for (var i = 0; i < lastWord.length; i++) bs += DEL;
+              sendInput(bs + data);
+              sentLine = sentLine.slice(0, sentLine.length - lastWord.length) + data;
+              return;
+            }
+          }
+        }
+
+        // No diff match — paste or fresh input, send as-is
+        for (var i = 0; i < data.length; i++) {
+          var c = data.charCodeAt(i);
+          if (c >= 32 && c !== 127) sentLine += data[i];
+        }
+        sendInput(data);
+        return;
+      }
+
+      sendInput(data);
     });
 
     // Clipboard image paste → upload to server → insert path into terminal
@@ -1816,7 +1836,6 @@ const indexHtml = `<!DOCTYPE html>
     document.querySelectorAll('.key-btn').forEach(function(btn) {
       btn.addEventListener('click', function(e) {
         e.preventDefault();
-        resetTypingBuffer();
         var seq = keyMap[btn.getAttribute('data-key')];
         if (seq) sendInput(seq);
         if (isMobile && xtermTextarea) xtermTextarea.blur();
@@ -2296,7 +2315,6 @@ const indexHtml = `<!DOCTYPE html>
     // Return button in row2
     document.getElementById('return-btn').addEventListener('click', function(e) {
       e.preventDefault();
-      resetTypingBuffer();
       sendInput(String.fromCharCode(13));
       if (isMobile && xtermTextarea) xtermTextarea.blur();
       else term.focus();
@@ -2825,7 +2843,6 @@ const indexHtml = `<!DOCTYPE html>
 
     function fkSend(k) {
       if (k.action === 'togglebar') { toggleBar(); return; }
-      resetTypingBuffer();
       var fn = fkActionMap[k.action];
       if (fn) sendInput(fn(k.chars));
       if (isMobile && xtermTextarea) xtermTextarea.blur();
@@ -3967,7 +3984,7 @@ const server = http.createServer(async (req, res) => {
 
   if ((pathname === '/terminal/file-upload' || pathname === '/file-upload') && req.method === 'POST') {
     try {
-      const targetDir = resolveSafePath(parsedUrl.searchParams.get('path') || '/');
+      const targetDir = resolveSafePath(parsedUrl.searchParams.get('path') || '/', auth.linuxUser);
       const rawFilename = req.headers['x-filename'] as string;
       let filename: string;
       try { filename = decodeURIComponent(rawFilename); } catch { filename = rawFilename; }
@@ -4021,9 +4038,7 @@ const server = http.createServer(async (req, res) => {
       if (!sid) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Session not found' })); return; }
 
       // Determine user's home directory for fallback
-      const userHome = auth.linuxUser
-        ? (auth.linuxUser === 'root' ? '/root' : `/home/${auth.linuxUser}`)
-        : (process.env.HOME || '/');
+      const userHome = getUserHome(auth.linuxUser);
 
       let requestedPath = parsedUrl.searchParams.get('path') || '';
       let dirPath: string;
@@ -4033,7 +4048,8 @@ const server = http.createServer(async (req, res) => {
           const cwdResp = await ptyFetch(`/sessions/${encodeURIComponent(sid)}/cwd`);
           if (cwdResp.ok) {
             const cwdData = await cwdResp.json() as { cwd: string };
-            dirPath = cwdData.cwd;
+            // Sandbox CWD to user's home for non-root users
+            dirPath = resolveSafePath(cwdData.cwd, auth.linuxUser);
           } else {
             dirPath = userHome;
           }
@@ -4041,7 +4057,7 @@ const server = http.createServer(async (req, res) => {
           dirPath = userHome;
         }
       } else {
-        dirPath = resolveSafePath(requestedPath);
+        dirPath = resolveSafePath(requestedPath, auth.linuxUser);
       }
 
       // Get CWD for response (may differ from dirPath)
@@ -4105,7 +4121,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const requestedPath = parsedUrl.searchParams.get('path') || '';
       if (!requestedPath) { res.writeHead(400); res.end('Path required'); return; }
-      const filePath = resolveSafePath(requestedPath);
+      const filePath = resolveSafePath(requestedPath, auth.linuxUser);
 
       const stat = await fs.promises.stat(filePath);
       if (stat.isDirectory()) { res.writeHead(400); res.end('Cannot download directory'); return; }
@@ -4135,7 +4151,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const requestedPath = parsedUrl.searchParams.get('path') || '';
       if (!requestedPath) { res.writeHead(400); res.end('Path required'); return; }
-      const filePath = resolveSafePath(requestedPath);
+      const filePath = resolveSafePath(requestedPath, auth.linuxUser);
 
       const stat = await fs.promises.stat(filePath);
       if (stat.isDirectory()) { res.writeHead(400); res.end('Cannot preview directory'); return; }
