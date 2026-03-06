@@ -4298,9 +4298,21 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // Read raw body
+      // Read raw body (100MB limit)
+      const MAX_UPLOAD = 100 * 1024 * 1024;
       const chunks: Buffer[] = [];
-      for await (const chunk of req) chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+      let totalSize = 0;
+      for await (const chunk of req) {
+        const buf = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+        totalSize += buf.length;
+        if (totalSize > MAX_UPLOAD) {
+          req.destroy();
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'File too large (max 100MB)' }));
+          return;
+        }
+        chunks.push(buf);
+      }
       const body = Buffer.concat(chunks);
 
       const actualName = await autoRename(targetDir, filename, false);
@@ -4521,9 +4533,23 @@ const server = http.createServer(async (req, res) => {
     }
     const filePath = path.join(userDir, fileName);
 
+    const MAX_UPLOAD = 100 * 1024 * 1024;
     const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    let totalSize = 0;
+    let aborted = false;
+    req.on('data', (chunk: Buffer) => {
+      totalSize += chunk.length;
+      if (totalSize > MAX_UPLOAD && !aborted) {
+        aborted = true;
+        req.destroy();
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'File too large (max 100MB)' }));
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on('end', async () => {
+      if (aborted) return;
       try {
         await fs.promises.mkdir(userDir, { recursive: true, mode: 0o700 });
         await fs.promises.writeFile(filePath, Buffer.concat(chunks));
