@@ -245,6 +245,41 @@ function getUserHome(linuxUser?: string): string {
   return linuxUser === 'root' ? '/root' : `/home/${linuxUser}`;
 }
 
+/** Find a unique name by appending (1), (2), ... if the path already exists. */
+async function autoRename(dir: string, baseName: string, isDir: boolean): Promise<string> {
+  const candidate = path.join(dir, baseName);
+  try {
+    await fs.promises.access(candidate);
+  } catch {
+    return baseName; // doesn't exist, use as-is
+  }
+  // Split name and extension (for files only)
+  let stem: string, ext: string;
+  if (isDir) {
+    stem = baseName;
+    ext = '';
+  } else {
+    const dotIdx = baseName.lastIndexOf('.');
+    if (dotIdx > 0) {
+      stem = baseName.slice(0, dotIdx);
+      ext = baseName.slice(dotIdx);
+    } else {
+      stem = baseName;
+      ext = '';
+    }
+  }
+  for (let i = 1; i <= 999; i++) {
+    const newName = `${stem} (${i})${ext}`;
+    try {
+      await fs.promises.access(path.join(dir, newName));
+    } catch {
+      return newName;
+    }
+  }
+  // Fallback: timestamp
+  return `${stem} (${Date.now()})${ext}`;
+}
+
 function resolveSafePath(requestedPath: string, linuxUser?: string): string {
   const resolved = path.resolve('/', requestedPath);
   // Non-root users are sandboxed to their home directory
@@ -1348,6 +1383,7 @@ const indexHtml = `<!DOCTYPE html>
       <span id="fb-title">Files</span>
       <button id="fb-upload-btn" class="key-btn" title="Upload files" style="font-size:14px;">&#x2191;</button>
       <input type="file" id="fb-upload-input" multiple style="display:none;">
+      <button id="fb-mkdir-btn" class="key-btn" title="New folder" style="font-size:12px;">+&#x1F4C1;</button>
       <button id="fb-hidden-btn" class="key-btn" title="Toggle hidden files" style="font-size:10px;opacity:0.5">.*</button>
       <button id="fb-cwd-btn" class="key-btn" title="Go to PTY working directory">CWD</button>
     </div>
@@ -1631,16 +1667,17 @@ const indexHtml = `<!DOCTYPE html>
       scrollToCursor();
     }
 
-    // Mobile autocomplete fix — onData diff approach.
-    // On mobile, keyboard autocomplete replaces text in xterm's textarea.
-    // xterm sees the full replacement as new input and fires onData with the
-    // entire line. We track what we've already sent (sentLine) and diff
-    // incoming multi-char data against it to send only the net change.
-    // KEY: we NEVER clear textarea.value — avoids desync with keyboard buffer.
+    // Mobile autocomplete fix — capture-phase input interception.
+    // When Gboard/iOS autocomplete replaces text in xterm's textarea, we
+    // intercept the input event BEFORE xterm reads it (capture phase on
+    // parent element runs before target-phase on textarea). We compute
+    // the diff, send the correction ourselves, then clear textarea so
+    // xterm sees no change and fires no onData. No residuals, no blocking.
     var isComposing = false;
     var compositionJustEnded = false;
     var sentLine = '';
     var DEL = String.fromCharCode(127);
+    var acHandled = false; // flag: we handled this input event, skip onData
 
     function commonPrefixLen(a, b) {
       var len = Math.min(a.length, b.length);
@@ -1675,89 +1712,79 @@ const indexHtml = `<!DOCTYPE html>
         }
         setTimeout(function() { compositionJustEnded = false; }, 200);
       });
+
+      // Capture-phase input handler on the xterm CONTAINER (parent of textarea).
+      // Capture on parent runs BEFORE target-phase handlers on the textarea,
+      // so we get to inspect and modify textarea.value before xterm reads it.
+      if (isMobile) {
+        var xtermContainer = xtermTextarea.closest('.xterm');
+        if (xtermContainer) {
+          xtermContainer.addEventListener('input', function(e) {
+            if (isComposing || compositionJustEnded) return;
+            if (e.target !== xtermTextarea) return;
+
+            var newVal = xtermTextarea.value;
+            // Single char or empty — normal typing, let xterm handle
+            if (newVal.length <= 1) return;
+
+            // Multi-char in textarea = autocomplete replacement.
+            // Compute diff against sentLine, send correction, clear textarea.
+            if (sentLine.length > 0) {
+              // Line-level diff
+              var cpLen = commonPrefixLen(sentLine, newVal);
+              if (cpLen >= 1) {
+                var toDelete = sentLine.length - cpLen;
+                var toInsert = newVal.slice(cpLen);
+                var bs = '';
+                for (var i = 0; i < toDelete; i++) bs += DEL;
+                if (toDelete > 0 || toInsert.length > 0) {
+                  sendInput(bs + toInsert);
+                }
+                sentLine = sentLine.slice(0, cpLen) + toInsert;
+                xtermTextarea.value = '';
+                acHandled = true;
+                setTimeout(function() { acHandled = false; }, 50);
+                e.stopImmediatePropagation();
+                return;
+              }
+
+              // Word-level diff
+              var spIdx = sentLine.lastIndexOf(' ');
+              var lastWord = spIdx >= 0 ? sentLine.slice(spIdx + 1) : sentLine;
+              if (lastWord.length >= 1) {
+                var wpLen = commonPrefixLen(lastWord, newVal);
+                if (wpLen >= 1) {
+                  var bs = '';
+                  for (var i = 0; i < lastWord.length; i++) bs += DEL;
+                  sendInput(bs + newVal);
+                  sentLine = sentLine.slice(0, sentLine.length - lastWord.length) + newVal;
+                  xtermTextarea.value = '';
+                  acHandled = true;
+                  setTimeout(function() { acHandled = false; }, 50);
+                  e.stopImmediatePropagation();
+                  return;
+                }
+              }
+            }
+
+            // No sentLine match — could be paste or first input. Let xterm handle.
+          }, true); // capture phase
+        }
+      }
     }
 
     term.onData(function(data) {
       if (compositionJustEnded) return;
       if (isComposing) return;
+      if (acHandled) return; // skip residual onData from same event cycle
 
-      // Single printable char — normal keystroke
+      // Track sentLine for single printable chars
       if (data.length === 1 && data.charCodeAt(0) >= 32 && data.charCodeAt(0) !== 127) {
         sentLine += data;
-        sendInput(data);
-        return;
-      }
-
-      // DEL/backspace
-      if (data.length === 1 && data.charCodeAt(0) === 127) {
+      } else if (data.length === 1 && data.charCodeAt(0) === 127) {
         if (sentLine.length > 0) sentLine = sentLine.slice(0, -1);
-        sendInput(data);
-        return;
-      }
-
-      // Control char (Enter, Ctrl+C, etc.) — resets line
-      if (data.length === 1 && data.charCodeAt(0) < 32) {
+      } else if (data.length === 1 && data.charCodeAt(0) < 32) {
         sentLine = '';
-        sendInput(data);
-        return;
-      }
-
-      // Escape sequences — pass through
-      if (data.charCodeAt(0) === 27) {
-        sendInput(data);
-        return;
-      }
-
-      // Multi-char data — autocomplete, paste, or xterm's computed diff
-      if (data.length > 1) {
-        // DEL-prefixed: xterm's own diff (backspace + insert). Trust it.
-        var delCount = 0;
-        while (delCount < data.length && data.charCodeAt(delCount) === 127) delCount++;
-        if (delCount > 0) {
-          sentLine = sentLine.slice(0, Math.max(0, sentLine.length - delCount));
-          sentLine += data.slice(delCount);
-          sendInput(data);
-          return;
-        }
-
-        // On mobile: diff against sentLine to avoid re-sending typed text
-        if (isMobile && sentLine.length > 0) {
-          // Strategy 1: line-level diff (data matches beginning of sentLine)
-          var cpLen = commonPrefixLen(sentLine, data);
-          if (cpLen >= 2) {
-            var toDelete = sentLine.length - cpLen;
-            var toInsert = data.slice(cpLen);
-            var bs = '';
-            for (var i = 0; i < toDelete; i++) bs += DEL;
-            if (toDelete > 0 || toInsert.length > 0) {
-              sendInput(bs + toInsert);
-            }
-            sentLine = sentLine.slice(0, cpLen) + toInsert;
-            return;
-          }
-
-          // Strategy 2: word-level diff (data matches last word being corrected)
-          var spIdx = sentLine.lastIndexOf(' ');
-          var lastWord = spIdx >= 0 ? sentLine.slice(spIdx + 1) : sentLine;
-          if (lastWord.length >= 2) {
-            var wpLen = commonPrefixLen(lastWord, data);
-            if (wpLen >= 1) {
-              var bs = '';
-              for (var i = 0; i < lastWord.length; i++) bs += DEL;
-              sendInput(bs + data);
-              sentLine = sentLine.slice(0, sentLine.length - lastWord.length) + data;
-              return;
-            }
-          }
-        }
-
-        // No diff match — paste or fresh input, send as-is
-        for (var i = 0; i < data.length; i++) {
-          var c = data.charCodeAt(i);
-          if (c >= 32 && c !== 127) sentLine += data[i];
-        }
-        sendInput(data);
-        return;
       }
 
       sendInput(data);
@@ -3121,6 +3148,32 @@ const indexHtml = `<!DOCTYPE html>
         fbUploadInput.value = '';
       }
     });
+    document.getElementById('fb-mkdir-btn').addEventListener('click', function() {
+      var name = prompt('New folder name:');
+      if (!name || !name.trim()) return;
+      name = name.trim();
+      fetch('/terminal/mkdir?path=' + encodeURIComponent(fbCurrentPath) + '&name=' + encodeURIComponent(name) + '&exists=error', {
+        method: 'POST',
+        credentials: 'include',
+      })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.error) {
+          fbError.textContent = data.error;
+          fbError.style.display = 'block';
+          fbError.style.color = '#f87171';
+          fbError.style.background = '#2a1a1a';
+        } else {
+          fbLoadDir(fbCurrentPath);
+        }
+      })
+      .catch(function(err) {
+        fbError.textContent = err.message;
+        fbError.style.display = 'block';
+        fbError.style.color = '#f87171';
+        fbError.style.background = '#2a1a1a';
+      });
+    });
     fbHiddenBtn.addEventListener('click', function() {
       fbShowHidden = !fbShowHidden;
       fbHiddenBtn.style.opacity = fbShowHidden ? '1' : '0.5';
@@ -3208,9 +3261,7 @@ const indexHtml = `<!DOCTYPE html>
       e.stopPropagation();
       fbDragCounter = 0;
       fbDropOverlay.classList.remove('visible');
-      var files = e.dataTransfer && e.dataTransfer.files;
-      if (!files || files.length === 0) return;
-      fbUploadFiles(files);
+      fbHandleDrop(e);
     });
 
     // Also handle drop on the document body when file-browser is open
@@ -3221,10 +3272,192 @@ const indexHtml = `<!DOCTYPE html>
     document.addEventListener('drop', function(e) {
       if (fbPanel.classList.contains('open')) {
         e.preventDefault();
-        var files = e.dataTransfer && e.dataTransfer.files;
-        if (files && files.length > 0) fbUploadFiles(files);
+        fbHandleDrop(e);
       }
     });
+
+    function fbHandleDrop(e) {
+      var items = e.dataTransfer && e.dataTransfer.items;
+      if (!items || items.length === 0) return;
+      var entries = [];
+      for (var i = 0; i < items.length; i++) {
+        var entry = items[i].webkitGetAsEntry && items[i].webkitGetAsEntry();
+        if (entry) entries.push(entry);
+      }
+      if (entries.length === 0) {
+        // Fallback for browsers without webkitGetAsEntry
+        var files = e.dataTransfer && e.dataTransfer.files;
+        if (files && files.length > 0) fbUploadFiles(files);
+        return;
+      }
+      // Check if any entry is a directory
+      var hasDir = false;
+      for (var i = 0; i < entries.length; i++) {
+        if (entries[i].isDirectory) { hasDir = true; break; }
+      }
+      if (!hasDir) {
+        // Plain files only — use simple upload
+        var files = e.dataTransfer && e.dataTransfer.files;
+        if (files && files.length > 0) fbUploadFiles(files);
+        return;
+      }
+      // Collect all files with relative paths from directory entries
+      fbCollectEntries(entries, function(collected) {
+        if (collected.length === 0) return;
+        fbUploadFilesWithPaths(collected);
+      });
+    }
+
+    function fbCollectEntries(entries, callback) {
+      var result = [];
+      var pending = entries.length;
+      if (pending === 0) { callback(result); return; }
+      function processEntry(entry, basePath) {
+        if (entry.isFile) {
+          entry.file(function(file) {
+            result.push({ file: file, relativePath: basePath + file.name });
+            pending--;
+            if (pending === 0) callback(result);
+          }, function() {
+            pending--;
+            if (pending === 0) callback(result);
+          });
+        } else if (entry.isDirectory) {
+          var reader = entry.createReader();
+          var allEntries = [];
+          (function readAll() {
+            reader.readEntries(function(batch) {
+              if (batch.length === 0) {
+                // Directory itself counts as needing mkdir; add marker
+                result.push({ dir: true, relativePath: basePath + entry.name + '/' });
+                pending--; // for original entry
+                pending += allEntries.length;
+                if (allEntries.length === 0 && pending === 0) { callback(result); return; }
+                for (var i = 0; i < allEntries.length; i++) {
+                  processEntry(allEntries[i], basePath + entry.name + '/');
+                }
+                if (pending === 0) callback(result);
+              } else {
+                for (var i = 0; i < batch.length; i++) allEntries.push(batch[i]);
+                readAll();
+              }
+            }, function() {
+              pending--;
+              if (pending === 0) callback(result);
+            });
+          })();
+        } else {
+          pending--;
+          if (pending === 0) callback(result);
+        }
+      }
+      for (var i = 0; i < entries.length; i++) {
+        processEntry(entries[i], '');
+      }
+    }
+
+    function fbUploadFilesWithPaths(collected) {
+      // Separate dirs and files
+      var dirs = [];
+      var files = [];
+      for (var i = 0; i < collected.length; i++) {
+        if (collected[i].dir) dirs.push(collected[i].relativePath);
+        else files.push(collected[i]);
+      }
+      // Sort dirs by depth so parents are created first
+      dirs.sort(function(a, b) { return a.split('/').length - b.split('/').length; });
+
+      var total = files.length;
+      fbError.textContent = 'Creating folders & uploading ' + total + ' file' + (total !== 1 ? 's' : '') + '...';
+      fbError.style.display = 'block';
+      fbError.style.color = '#4ade80';
+      fbError.style.background = '#1a2a1a';
+
+      // Create directories sequentially, track renames, then upload files
+      var dirIdx = 0;
+      var renameMap = {}; // original dir path -> actual dir path
+      function remapPath(p) {
+        // Apply rename map: check longest matching prefix first
+        var keys = Object.keys(renameMap).sort(function(a, b) { return b.length - a.length; });
+        for (var k = 0; k < keys.length; k++) {
+          var orig = keys[k];
+          if (p === orig) return renameMap[orig];
+          if (p.indexOf(orig + '/') === 0) return renameMap[orig] + p.slice(orig.length);
+        }
+        return p;
+      }
+      function createNextDir() {
+        if (dirIdx >= dirs.length) {
+          uploadFilesParallel();
+          return;
+        }
+        var dirRel = dirs[dirIdx];
+        // dirRel ends with '/', strip it to get parent+name
+        var stripped = dirRel.replace(/\\/$/, '');
+        var parts = stripped.split('/');
+        var folderName = parts.pop();
+        var parentRel = parts.length > 0 ? parts.join('/') : '';
+        // Remap parent in case a parent dir was renamed
+        var remappedParentRel = parentRel ? remapPath(parentRel) : '';
+        var parentPath = fbCurrentPath;
+        if (remappedParentRel) parentPath = parentPath.replace(/\\/$/, '') + '/' + remappedParentRel;
+        fetch('/terminal/mkdir?path=' + encodeURIComponent(parentPath) + '&name=' + encodeURIComponent(folderName), {
+          method: 'POST', credentials: 'include'
+        }).then(function(r) { return r.json(); }).then(function(data) {
+          if (data && data.name && data.name !== folderName) {
+            // Server renamed this dir — track it
+            var actualRel = (remappedParentRel ? remappedParentRel + '/' : '') + data.name;
+            renameMap[stripped] = actualRel;
+          }
+          dirIdx++;
+          createNextDir();
+        }).catch(function() {
+          dirIdx++;
+          createNextDir();
+        });
+      }
+
+      function uploadFilesParallel() {
+        if (files.length === 0) {
+          fbUploadDone(0, []);
+          return;
+        }
+        var done = 0;
+        var errors = [];
+        for (var i = 0; i < files.length; i++) {
+          (function(entry) {
+            // Determine upload directory from relativePath, applying renames
+            var parts = entry.relativePath.split('/');
+            parts.pop(); // remove filename
+            var subDir = parts.length > 0 ? parts.join('/') : '';
+            if (subDir) subDir = remapPath(subDir);
+            var uploadPath = fbCurrentPath;
+            if (subDir) uploadPath = uploadPath.replace(/\\/$/, '') + '/' + subDir;
+            fetch('/terminal/file-upload?path=' + encodeURIComponent(uploadPath), {
+              method: 'POST',
+              credentials: 'include',
+              headers: { 'X-Filename': encodeURIComponent(entry.file.name) },
+              body: entry.file,
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+              if (data.error) errors.push(entry.relativePath + ': ' + data.error);
+              done++;
+              fbError.textContent = 'Uploading... (' + done + '/' + total + ')';
+              if (done === total) fbUploadDone(total, errors);
+            })
+            .catch(function(err) {
+              errors.push(entry.relativePath + ': ' + err.message);
+              done++;
+              fbError.textContent = 'Uploading... (' + done + '/' + total + ')';
+              if (done === total) fbUploadDone(total, errors);
+            });
+          })(files[i]);
+        }
+      }
+
+      createNextDir();
+    }
 
     function fbUploadFiles(files) {
       var total = files.length;
@@ -3974,6 +4207,9 @@ const server = http.createServer(async (req, res) => {
   // Check authentication
   const auth = getAuthInfo(req);
   if (!auth.authenticated) {
+    if (pathname !== '/' && pathname !== '/terminal' && pathname !== '/terminal/') {
+      console.log(`[auth-fail] ${req.method} ${pathname} — no valid cookie`);
+    }
     sendHtml(req, res, getLoginHtml());
     return;
   }
@@ -3981,6 +4217,58 @@ const server = http.createServer(async (req, res) => {
   // --- Authenticated routes below ---
 
   // --- File browser API ---
+
+  if ((pathname === '/terminal/mkdir' || pathname === '/mkdir') && req.method === 'POST') {
+    // Drain any request body
+    req.resume();
+    try {
+      const parentDir = resolveSafePath(parsedUrl.searchParams.get('path') || '/', auth.linuxUser);
+      const folderName = (parsedUrl.searchParams.get('name') || '').trim();
+      if (!folderName || folderName.includes('/') || folderName.includes('\\')) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid folder name' }));
+        return;
+      }
+      const dirStat = await fs.promises.stat(parentDir);
+      if (!dirStat.isDirectory()) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Parent path is not a directory' }));
+        return;
+      }
+      const posixUser = auth.linuxUser ? getUserPosixInfo(auth.linuxUser) : null;
+      if (posixUser && !checkPosixAccess(dirStat, posixUser, 'write')) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Permission denied' }));
+        return;
+      }
+      const existsMode = parsedUrl.searchParams.get('exists') || 'rename'; // 'error' | 'rename'
+      const target = path.join(parentDir, folderName);
+      let actualName = folderName;
+      let newDir = target;
+      let alreadyExists = false;
+      try { await fs.promises.access(target); alreadyExists = true; } catch {}
+      if (alreadyExists) {
+        if (existsMode === 'error') {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Folder already exists' }));
+          return;
+        }
+        // rename mode: auto-rename
+        actualName = await autoRename(parentDir, folderName, true);
+        newDir = path.join(parentDir, actualName);
+      }
+      await fs.promises.mkdir(newDir, { recursive: false });
+      if (posixUser) {
+        try { fs.chownSync(newDir, posixUser.uid, posixUser.gid); } catch {}
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, path: newDir, name: actualName }));
+    } catch (e: any) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message || 'Failed to create folder' }));
+    }
+    return;
+  }
 
   if ((pathname === '/terminal/file-upload' || pathname === '/file-upload') && req.method === 'POST') {
     try {
@@ -4015,7 +4303,8 @@ const server = http.createServer(async (req, res) => {
       for await (const chunk of req) chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
       const body = Buffer.concat(chunks);
 
-      const filePath = path.join(targetDir, filename);
+      const actualName = await autoRename(targetDir, filename, false);
+      const filePath = path.join(targetDir, actualName);
       await fs.promises.writeFile(filePath, body);
 
       // Multi-user: chown file to user's uid/gid
@@ -4024,7 +4313,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, path: filePath }));
+      res.end(JSON.stringify({ ok: true, path: filePath, name: actualName }));
     } catch (e: any) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message || 'Upload failed' }));
