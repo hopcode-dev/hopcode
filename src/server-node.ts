@@ -1448,6 +1448,18 @@ const indexHtml = `<!DOCTYPE html>
       <div class="app-menu-sep"></div>
       <div class="app-menu-item" id="menu-files">&#x1F4C1; Files</div>
       <a class="app-menu-item" href="/terminal" style="text-decoration:none;">&#x1F3E0; Home</a>
+      <div style="padding:8px 16px;text-align:right;">
+        <span id="menu-devtools-link" style="font-size:11px;color:#555;cursor:pointer;">DevTools</span>
+      </div>
+      <div id="menu-devtools-panel" style="display:none;padding:6px 16px 10px;">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span style="font-size:12px;color:#888;flex:1;">Input Log</span>
+          <button id="menu-dbg-view" class="app-menu-btn" style="font-size:11px;padding:4px 10px;display:none;">View</button>
+          <div id="menu-dbg-toggle" style="width:36px;height:20px;border-radius:10px;background:#333;position:relative;cursor:pointer;transition:background 0.2s;flex-shrink:0;">
+            <div id="menu-dbg-knob" style="width:16px;height:16px;border-radius:8px;background:#888;position:absolute;top:2px;left:2px;transition:left 0.2s,background 0.2s;"></div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1686,10 +1698,109 @@ const indexHtml = `<!DOCTYPE html>
     var DEL = String.fromCharCode(127);
     var acHandled = false; // flag: we handled this input event, skip onData
 
+    // Debug log system (DevTools)
+    var dbgLines = [];
+    var dbgEnabled = false;
+
+    // Log overlay (shown when Log floating button is tapped)
+    var dbgEl = document.createElement('div');
+    dbgEl.id = 'ac-debug';
+    dbgEl.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:600;background:rgba(0,0,0,0.95);display:none;flex-direction:column;';
+    dbgEl.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid #333;">'
+      + '<span style="color:#0f0;font:12px monospace;">Input Debug Log</span>'
+      + '<div style="display:flex;gap:8px;">'
+      + '<button id="dbg-copy" style="padding:4px 10px;background:#0f3460;color:#e0e0e0;border:none;border-radius:4px;font-size:12px;cursor:pointer;">Copy</button>'
+      + '<button id="dbg-clear" style="padding:4px 10px;background:#333;color:#e0e0e0;border:none;border-radius:4px;font-size:12px;cursor:pointer;">Clear</button>'
+      + '<button id="dbg-close" style="padding:4px 10px;background:#333;color:#e0e0e0;border:none;border-radius:4px;font-size:12px;cursor:pointer;">Close</button>'
+      + '</div></div>'
+      + '<pre id="dbg-content" style="flex:1;overflow:auto;margin:0;padding:8px;color:#0f0;font:10px monospace;white-space:pre-wrap;"></pre>';
+    document.body.appendChild(dbgEl);
+
+    var dbgContent = document.getElementById('dbg-content');
+
+    function dbg(msg) {
+      if (!dbgEnabled) return;
+      dbgLines.push(Date.now() % 100000 + ' ' + msg);
+      if (dbgLines.length > 200) dbgLines.shift();
+    }
+
+    function dbgShowOverlay() {
+      dbgContent.textContent = dbgLines.join('\\n');
+      dbgEl.style.display = 'flex';
+      dbgContent.scrollTop = dbgContent.scrollHeight;
+    }
+
+    document.getElementById('dbg-close').addEventListener('click', function() {
+      dbgEl.style.display = 'none';
+      term.focus();
+    });
+    document.getElementById('dbg-clear').addEventListener('click', function() {
+      dbgLines = [];
+      dbgContent.textContent = '';
+    });
+    document.getElementById('dbg-copy').addEventListener('click', function() {
+      var text = dbgLines.join('\\n');
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(text).then(function() {
+          document.getElementById('dbg-copy').textContent = 'Copied!';
+          setTimeout(function() { document.getElementById('dbg-copy').textContent = 'Copy'; }, 1500);
+        });
+      }
+    });
+
+    // DevTools section in menu
+    document.getElementById('menu-devtools-link').addEventListener('click', function() {
+      var panel = document.getElementById('menu-devtools-panel');
+      panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+    });
+
+    var dbgToggleEl = document.getElementById('menu-dbg-toggle');
+    var dbgKnobEl = document.getElementById('menu-dbg-knob');
+    var dbgViewBtn = document.getElementById('menu-dbg-view');
+
+    function dbgSetEnabled(on) {
+      dbgEnabled = on;
+      dbgToggleEl.style.background = on ? '#4ade80' : '#333';
+      dbgKnobEl.style.left = on ? '18px' : '2px';
+      dbgKnobEl.style.background = on ? '#fff' : '#888';
+      dbgViewBtn.style.display = on ? 'inline-block' : 'none';
+    }
+
+    dbgToggleEl.addEventListener('click', function() { dbgSetEnabled(!dbgEnabled); });
+    dbgViewBtn.addEventListener('click', function() { dbgShowOverlay(); });
+
     function commonPrefixLen(a, b) {
       var len = Math.min(a.length, b.length);
       for (var i = 0; i < len; i++) { if (a[i] !== b[i]) return i; }
       return len;
+    }
+
+    // Read current line text before cursor from xterm buffer (ground truth)
+    function getBufferLine() {
+      try {
+        var buf = term.buffer.active;
+        var line = buf.getLine(buf.cursorY);
+        if (!line) return '';
+        return line.translateToString(true, 0, buf.cursorX);
+      } catch(e) { return ''; }
+    }
+
+    // Extract last word from a string (handles trailing spaces)
+    function extractLastWord(str) {
+      var trimmed = str.replace(/ +$/, '');
+      var spIdx = trimmed.lastIndexOf(' ');
+      return spIdx >= 0 ? trimmed.slice(spIdx + 1) : trimmed;
+    }
+
+    var prevTaVal = ''; // track previous textarea value to detect incremental vs autocomplete
+
+    // Suppress helper: clear textarea, set acHandled, stop propagation
+    function acSuppress(e) {
+      xtermTextarea.value = '';
+      prevTaVal = '';
+      acHandled = true;
+      setTimeout(function() { acHandled = false; }, 50);
+      e.stopImmediatePropagation();
     }
 
     var xtermTextarea = document.querySelector('.xterm-helper-textarea');
@@ -1707,16 +1818,22 @@ const indexHtml = `<!DOCTYPE html>
         });
       }
 
+      var lastCompositionData = '';
+
       xtermTextarea.addEventListener('compositionstart', function() {
         isComposing = true;
+        dbg('COMP_START');
       });
       xtermTextarea.addEventListener('compositionend', function(e) {
         isComposing = false;
         compositionJustEnded = true;
+        lastCompositionData = e.data || '';
+        dbg('COMP_END data="' + (e.data||'') + '" sentLine="' + sentLine + '"');
         if (e.data) {
           sendInput(e.data);
           sentLine += e.data;
         }
+        dbg('  -> sentLine="' + sentLine + '"');
         setTimeout(function() { compositionJustEnded = false; }, 200);
       });
 
@@ -1727,67 +1844,129 @@ const indexHtml = `<!DOCTYPE html>
         var xtermContainer = xtermTextarea.closest('.xterm');
         if (xtermContainer) {
           xtermContainer.addEventListener('input', function(e) {
-            if (isComposing || compositionJustEnded) return;
+            var newVal = xtermTextarea.value;
+            dbg('INPUT val="' + newVal + '" prev="' + prevTaVal + '" compJE=' + compositionJustEnded + ' sent="' + sentLine + '"');
+
+            if (isComposing) { dbg('  -> skip(composing)'); return; }
             if (e.target !== xtermTextarea) return;
 
-            var newVal = xtermTextarea.value;
-            // Single char or empty — normal typing, let xterm handle
-            if (newVal.length <= 1) return;
-
-            // Multi-char in textarea = autocomplete replacement.
-            // Compute diff against sentLine, send correction, clear textarea.
-            if (sentLine.length > 0) {
-              // Line-level diff
-              var cpLen = commonPrefixLen(sentLine, newVal);
-              if (cpLen >= 1) {
-                var toDelete = sentLine.length - cpLen;
-                var toInsert = newVal.slice(cpLen);
-                var bs = '';
-                for (var i = 0; i < toDelete; i++) bs += DEL;
-                if (toDelete > 0 || toInsert.length > 0) {
-                  sendInput(bs + toInsert);
-                }
-                sentLine = sentLine.slice(0, cpLen) + toInsert;
-                xtermTextarea.value = '';
-                acHandled = true;
-                setTimeout(function() { acHandled = false; }, 50);
-                e.stopImmediatePropagation();
-                return;
-              }
-
-              // Word-level diff
-              var spIdx = sentLine.lastIndexOf(' ');
-              var lastWord = spIdx >= 0 ? sentLine.slice(spIdx + 1) : sentLine;
-              if (lastWord.length >= 1) {
-                var wpLen = commonPrefixLen(lastWord, newVal);
-                if (wpLen >= 1) {
+            // During compositionJustEnded window: Gboard may echo the composed
+            // word in textarea. Suppress to prevent xterm double-send.
+            // Forward extra content (trailing space) or handle autocorrect.
+            if (compositionJustEnded) {
+              if (newVal.length > 1) {
+                var composed = lastCompositionData;
+                dbg('  -> compJE: composed="' + composed + '" newVal="' + newVal + '"');
+                if (composed && newVal.indexOf(composed) === 0) {
+                  var extra = newVal.slice(composed.length);
+                  if (extra) { sendInput(extra); sentLine += extra; }
+                } else if (composed && newVal.replace(/ +$/, '') !== composed) {
                   var bs = '';
-                  for (var i = 0; i < lastWord.length; i++) bs += DEL;
+                  for (var i = 0; i < composed.length; i++) bs += DEL;
                   sendInput(bs + newVal);
-                  sentLine = sentLine.slice(0, sentLine.length - lastWord.length) + newVal;
-                  xtermTextarea.value = '';
-                  acHandled = true;
-                  setTimeout(function() { acHandled = false; }, 50);
-                  e.stopImmediatePropagation();
-                  return;
+                  sentLine = sentLine.slice(0, sentLine.length - composed.length) + newVal;
                 }
+                acSuppress(e);
+              } else {
+                prevTaVal = newVal;
+              }
+              return;
+            }
+
+            // Single char or empty — normal typing, let xterm handle
+            if (newVal.length <= 1) {
+              prevTaVal = newVal;
+              return;
+            }
+
+            // Incremental typing: Gboard appends 1 char to previous textarea value.
+            // This is normal keystroke, NOT autocomplete. Let xterm handle.
+            if (newVal.length === prevTaVal.length + 1 &&
+                newVal.slice(0, prevTaVal.length) === prevTaVal) {
+              dbg('  -> incremental +1, let xterm');
+              prevTaVal = newVal;
+              return;
+            }
+
+            // Incremental deletion (single backspace): let xterm handle
+            // Only allow exactly 1 char deletion. Multi-char deletion is
+            // autocorrect step 1 (e.g. "baad"->"ba") and must go through
+            // non-incremental handler so the follow-up replace works correctly.
+            if (newVal.length === prevTaVal.length - 1 &&
+                prevTaVal.slice(0, newVal.length) === newVal) {
+              dbg('  -> incremental del -1, let xterm');
+              prevTaVal = newVal;
+              return;
+            }
+
+            dbg('  -> NON-INCR prev="' + prevTaVal + '" new="' + newVal + '"');
+
+            // Non-incremental change — autocomplete, autocorrect, or echo.
+            // Use prevTaVal (actual previous textarea value) for diffing, not sentLine.
+            // After acSuppress clears textarea, Gboard rebuilds shorter context that
+            // diverges from sentLine, making sentLine-based diffs fail.
+
+            // Echo detection: newVal is a suffix of sentLine (Gboard echoing confirmed word)
+            var newTrimmed = newVal.replace(/ +$/, '');
+            var sentTrimmed = sentLine.replace(/ +$/, '');
+            if (newTrimmed.length > 0 && sentTrimmed.length >= newTrimmed.length &&
+                sentTrimmed.slice(-newTrimmed.length) === newTrimmed) {
+              var matchPos = sentTrimmed.length - newTrimmed.length;
+              if (matchPos === 0 || sentTrimmed[matchPos - 1] === ' ') {
+                dbg('  -> echo detected');
+                var trailingNew = newVal.slice(newTrimmed.length);
+                var trailingSent = sentLine.slice(sentTrimmed.length);
+                if (trailingNew.length > trailingSent.length) {
+                  var extra = trailingNew.slice(trailingSent.length);
+                  sendInput(extra);
+                  sentLine += extra;
+                }
+                acSuppress(e);
+                return;
               }
             }
 
-            // No sentLine match — could be paste or first input. Let xterm handle.
+            // prevTaVal-based diff: always accurate since prevTaVal tracks actual textarea
+            var pvCpLen = commonPrefixLen(prevTaVal, newVal);
+            var pvToDelete = prevTaVal.length - pvCpLen;
+            var pvToInsert = newVal.slice(pvCpLen);
+            if (pvToDelete > 0 || pvToInsert.length > 0) {
+              var bs = '';
+              for (var i = 0; i < pvToDelete; i++) bs += DEL;
+              dbg('  -> pv-diff del=' + pvToDelete + ' ins="' + pvToInsert + '"');
+              sendInput(bs + pvToInsert);
+              sentLine = sentLine.slice(0, Math.max(0, sentLine.length - pvToDelete)) + pvToInsert;
+              acSuppress(e);
+              return;
+            }
+
+            dbg('  -> fallthrough, let xterm');
+            prevTaVal = newVal;
+            // No match — could be paste or first input. Let xterm handle.
           }, true); // capture phase
         }
       }
     }
 
     term.onData(function(data) {
-      if (compositionJustEnded) return;
-      if (isComposing) return;
-      if (acHandled) return; // skip residual onData from same event cycle
+      var repr = data.length === 1 && data.charCodeAt(0) < 32 ? 'ctrl-' + data.charCodeAt(0) : data.length === 1 && data.charCodeAt(0) === 127 ? 'DEL' : data;
+      dbg('ONDATA "' + repr + '" compJE=' + compositionJustEnded + ' composing=' + isComposing + ' acH=' + acHandled);
+      if (compositionJustEnded) { dbg('  -> skip(compJE)'); return; }
+      if (isComposing) { dbg('  -> skip(composing)'); return; }
+      if (acHandled) { dbg('  -> skip(acHandled)'); return; }
 
-      // Track sentLine for single printable chars
+      // Track sentLine for all printable data
       if (data.length === 1 && data.charCodeAt(0) >= 32 && data.charCodeAt(0) !== 127) {
         sentLine += data;
+      } else if (data.length > 1) {
+        // Multi-char data (e.g. paste) — track it too
+        var allPrintable = true;
+        for (var i = 0; i < data.length; i++) {
+          var c = data.charCodeAt(i);
+          if (c < 32 || c === 127) { allPrintable = false; break; }
+        }
+        if (allPrintable) sentLine += data;
+        else sentLine = '';
       } else if (data.length === 1 && data.charCodeAt(0) === 127) {
         if (sentLine.length > 0) sentLine = sentLine.slice(0, -1);
       } else if (data.length === 1 && data.charCodeAt(0) < 32) {
