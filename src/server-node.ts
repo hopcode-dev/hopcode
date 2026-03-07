@@ -1205,7 +1205,7 @@ const indexHtml = `<!DOCTYPE html>
     body.mobile #bar-row1 { display: flex; align-items: center; gap: 4px; width: 100%; }
     body.mobile #bar-row2 { display: flex; align-items: center; gap: 4px; width: 100%; margin-top: 5px; }
     body.mobile #special-keys { display: flex; }
-    body.mobile #status { font-size: 13px; padding: 8px; flex: 3; text-align: center; border-radius: 8px; }
+    body.mobile #status { font-size: 15px; padding: 14px 8px; flex: 3; text-align: center; border-radius: 8px; }
     body.mobile #text { display: none; }
     body.mobile #font-controls { display: none; }
     body.mobile .key-btn { min-width: 0; flex: 1; padding: 0 4px; height: 34px; font-size: 14px; }
