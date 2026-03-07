@@ -2778,6 +2778,12 @@ const indexHtml = `<!DOCTYPE html>
 
     function connectVoice() {
       voiceWs = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/terminal/ws-voice');
+      voiceWs.onopen = () => {
+        // If recording started before WS was ready, send asr_start now
+        if (isRecording && !cancelledRec) {
+          voiceWs.send(JSON.stringify({ type: 'asr_start' }));
+        }
+      };
       voiceWs.onmessage = (e) => {
         const d = JSON.parse(e.data);
         if (cancelledRec) return; // Recording was cancelled, ignore all results
@@ -2877,23 +2883,21 @@ const indexHtml = `<!DOCTYPE html>
       clearTimeout(releaseFlushTimer);
       clearTimeout(trailingTimer);
       wantsToStop = false;
-      cancelledRec = false;
       swipedToCancel = false;
       var ok = await acquireMic();
       if (!ok) return;
-      // Check if user released finger while we were acquiring mic
-      if (wantsToStop) {
-        wantsToStop = false;
-        scheduleMicRelease();
-        status.textContent = defaultStatusText;
-        status.classList.remove('recording');
-        return;
-      }
       if (audioContext.state === 'suspended') audioContext.resume();
       isRecording = true;
       asrFlushed = false;
       pendingAsrText = '';
       if (voiceWs?.readyState === 1) voiceWs.send(JSON.stringify({ type: 'asr_start' }));
+      cancelledRec = false; // Reset after asr_start so late results from cancelled session are ignored
+      // If user released finger while we were acquiring mic, stop immediately
+      // but don't return early — mic is now ready for next press
+      if (wantsToStop) {
+        stopRec(true, false);
+        return;
+      }
       status.textContent = 'Recording...';
       status.classList.add('recording');
       text.textContent = '';
