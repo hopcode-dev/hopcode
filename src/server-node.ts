@@ -4883,8 +4883,15 @@ const server = http.createServer(async (req, res) => {
     req.on('end', async () => {
       if (aborted) return;
       try {
-        await fs.promises.mkdir(userDir, { recursive: true, mode: 0o700 });
+        await fs.promises.mkdir(userDir, { recursive: true, mode: 0o755 });
         await fs.promises.writeFile(filePath, Buffer.concat(chunks));
+        // Multi-user: chown directory and file to user's uid/gid
+        const posixUser = auth.linuxUser ? getUserPosixInfo(auth.linuxUser) : null;
+        if (posixUser) {
+          try { fs.chownSync(userDir, posixUser.uid, posixUser.gid); } catch {}
+          try { fs.chownSync(path.join(userHome, '.hopcode'), posixUser.uid, posixUser.gid); } catch {}
+          try { fs.chownSync(filePath, posixUser.uid, posixUser.gid); } catch {}
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ path: filePath }));
       } catch (e: any) {
