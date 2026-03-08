@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
-  <!-- Background circle -->
-  <circle cx="256" cy="256" r="240" fill="#1a1a2e"/>
+  <!-- Full black background -->
+  <rect width="512" height="512" fill="#000000"/>
 
   <!-- Frog silhouette - geometric, minimal -->
   <!-- Two eye circles at top (the iconic frog feature) -->
@@ -8,15 +8,15 @@
   <circle cx="327" cy="175" r="42" fill="#4ade80"/>
 
   <!-- Eye pupils -->
-  <circle cx="185" cy="175" r="16" fill="#1a1a2e"/>
-  <circle cx="327" cy="175" r="16" fill="#1a1a2e"/>
+  <circle cx="185" cy="175" r="16" fill="#000000"/>
+  <circle cx="327" cy="175" r="16" fill="#000000"/>
 
   <!-- Head: rounded rectangle connecting the eyes -->
   <rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/>
 
   <!-- Terminal prompt >_ — chevron tip aligns with underscore -->
-  <path d="M205 218 L230 240 L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  <path d="M242 240 L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/>
+  <path d="M205 218 L230 240 L205 262" stroke="#000000" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <path d="M242 240 L282 240" stroke="#000000" stroke-width="8" stroke-linecap="round"/>
 
   <!-- Body: simple rounded bar below -->
   <rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/>
