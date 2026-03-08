@@ -1060,6 +1060,7 @@ const indexHtml = `<!DOCTYPE html>
       font-size: 16px; line-height: 1.5; color: #fff; min-height: 24px;
       max-height: 30vh; overflow-y: auto; word-break: break-word;
       outline: none; border-radius: 6px; padding: 4px;
+      -webkit-overflow-scrolling: touch; touch-action: pan-y; overscroll-behavior: contain;
     }
     #vp-text[contenteditable="true"] {
       border: 1px solid #4ade80; background: rgba(0,0,0,0.3);
@@ -1322,6 +1323,7 @@ const indexHtml = `<!DOCTYPE html>
           <button class="key-btn" data-key="up">&#x25B2;</button>
           <button class="key-btn" data-key="down">&#x25BC;</button>
           <button class="key-btn" id="paste-btn" title="Paste" style="font-size:16px;">&#x2398;</button>
+          <button class="key-btn" id="copy-btn" title="Select/Copy text">Sel</button>
           <button class="key-btn" id="scroll-bottom" title="Scroll to bottom" style="font-size:20px;">&#x21E9;</button>
         </div>
         <div id="font-controls">
@@ -1496,26 +1498,8 @@ const indexHtml = `<!DOCTYPE html>
     fitAddon.fit();
 
     // --- Performance self-check: monitor write latency, auto-trim if degraded ---
-    var writeTimes = [];
-    var perfTrimCount = 0;
     function perfWrite(data, cb) {
-      var t0 = performance.now();
-      term.write(data, function() {
-        var elapsed = performance.now() - t0;
-        writeTimes.push(elapsed);
-        if (writeTimes.length > 10) writeTimes.shift();
-        // Check if avg of last 10 writes exceeds 150ms
-        if (writeTimes.length >= 10) {
-          var avg = writeTimes.reduce(function(a,b){return a+b;},0) / writeTimes.length;
-          if (avg > 150) {
-            term.clear();
-            writeTimes.length = 0;
-            perfTrimCount++;
-            console.warn('[perf] Auto-trimmed scrollback (avg write: ' + Math.round(avg) + 'ms, count: ' + perfTrimCount + ')');
-          }
-        }
-        if (cb) cb();
-      });
+      term.write(data, cb);
     }
     var visibleRows = term.rows;
     var lastCols = term.cols, lastRows = 0;
@@ -2039,7 +2023,6 @@ const indexHtml = `<!DOCTYPE html>
         visibleRows = term.rows;
         cachedCellHeight = 0; // invalidate again after fit
         sendResize();
-        // Only scroll to bottom if we were already at the bottom (don't disrupt scrollback viewing)
         if (autoScroll) scrollToCursor();
       }, 300);
     });
@@ -2671,7 +2654,7 @@ const indexHtml = `<!DOCTYPE html>
       vpEl.classList.remove('hidden', 'cancel', 'send-ready');
     }
     function vpHide() { vpEl.classList.add('hidden'); vpEl.classList.remove('cancel', 'send-ready'); vpActions.style.display = 'none'; }
-    function vpUpdate(txt) { vpText.textContent = txt; vpText.classList.remove('listening'); }
+    function vpUpdate(txt) { vpText.textContent = txt; vpText.classList.remove('listening'); requestAnimationFrame(function() { vpText.scrollTop = vpText.scrollHeight; }); }
     function vpSetCancel(on) {
       if (on) {
         vpEl.classList.add('cancel');
