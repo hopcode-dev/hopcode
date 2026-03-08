@@ -1172,8 +1172,9 @@ const indexHtml = `<!DOCTYPE html>
     #special-keys { display: none; align-items: center; gap: 4px; flex: 1; }
     #bar-row1 { display: contents; }
     #bar-row2 { display: contents; }
-    #copy-overlay { display: none; position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 100; background: #1a1a2e; color: #e0e0e0; font-family: Menlo, Monaco, "Courier New", monospace; font-size: 12px; padding: 8px; border: none; resize: none; white-space: pre; overflow: auto; -webkit-user-select: text; user-select: text; }
-    #copy-overlay.active { display: block; }
+    #copy-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 500; background: rgba(0,0,0,0.95); flex-direction: column; }
+    #copy-overlay.active { display: flex; }
+    #copy-overlay pre { flex: 1; overflow: auto; margin: 0; padding: 8px; color: #e0e0e0; font: 12px Menlo, Monaco, "Courier New", monospace; white-space: pre; -webkit-user-select: text; user-select: text; -webkit-overflow-scrolling: touch; }
     #floating-keys {
       position: fixed; right: 12px; top: 50%; transform: translateY(-50%);
       display: flex; flex-direction: column; gap: 10px; z-index: 50;
@@ -1312,7 +1313,16 @@ const indexHtml = `<!DOCTYPE html>
 <body>
   <div id="container">
     <div id="terminal"></div>
-    <textarea id="copy-overlay" readonly></textarea>
+    <div id="copy-overlay">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid #333;">
+        <span style="color:#e0e0e0;font:13px system-ui;">Select &amp; Copy</span>
+        <div style="display:flex;gap:8px;">
+          <button id="copy-all-btn" style="padding:4px 10px;background:#0f3460;color:#e0e0e0;border:none;border-radius:4px;font-size:12px;cursor:pointer;">Copy All</button>
+          <button id="copy-close-btn" style="padding:4px 10px;background:#333;color:#e0e0e0;border:none;border-radius:4px;font-size:12px;cursor:pointer;">Close</button>
+        </div>
+      </div>
+      <pre id="copy-content"></pre>
+    </div>
     <div id="voice-bar">
       <div id="bar-row1">
         <button id="menu-btn" class="key-btn" style="min-width:32px;padding:2px 6px;"><svg viewBox="0 0 512 512" fill="none" style="width:34px;height:34px;vertical-align:middle;"><circle cx="185" cy="175" r="42" fill="#4ade80"/><circle cx="327" cy="175" r="42" fill="#4ade80"/><circle cx="185" cy="175" r="16" fill="#1a1a2e"/><circle cx="327" cy="175" r="16" fill="#1a1a2e"/><rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/><path d="M205 218L230 240L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M242 240L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/><rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/><rect x="165" y="340" width="50" height="20" rx="10" fill="#22c55e"/><rect x="297" y="340" width="50" height="20" rx="10" fill="#22c55e"/></svg></button>
@@ -2597,31 +2607,37 @@ const indexHtml = `<!DOCTYPE html>
 
     // Select/Copy mode: show terminal text in a selectable overlay
     var copyOverlay = document.getElementById('copy-overlay');
+    var copyContent = document.getElementById('copy-content');
     var copyBtn = document.getElementById('copy-btn');
-    if (copyBtn) {
-      copyBtn.addEventListener('click', function(e) {
-        e.preventDefault();
-        if (copyOverlay.classList.contains('active')) {
-          copyOverlay.classList.remove('active');
-          copyBtn.textContent = 'Sel';
-          copyBtn.style.background = '';
-          if (!isMobile) term.focus();
-        } else {
-          var buf = term.buffer.active;
-          var lines = [];
-          for (var i = 0; i < buf.length; i++) {
-            var line = buf.getLine(i);
-            if (line) lines.push(line.translateToString(true));
-          }
-          copyOverlay.value = lines.join(String.fromCharCode(10));
-          copyOverlay.classList.add('active');
-          copyOverlay.scrollTop = copyOverlay.scrollHeight;
-          copyBtn.textContent = 'Back';
-          copyBtn.style.background = '#4ade80';
-          copyBtn.style.color = '#000';
-        }
-      });
+    function copyOverlayShow() {
+      var buf = term.buffer.active;
+      var lines = [];
+      for (var i = 0; i < buf.length; i++) {
+        var line = buf.getLine(i);
+        if (line) lines.push(line.translateToString(true));
+      }
+      copyContent.textContent = lines.join(String.fromCharCode(10));
+      copyOverlay.classList.add('active');
+      copyContent.scrollTop = copyContent.scrollHeight;
     }
+    function copyOverlayHide() {
+      copyOverlay.classList.remove('active');
+      term.focus();
+    }
+    if (copyBtn) {
+      copyBtn.addEventListener('click', function(e) { e.preventDefault(); copyOverlayShow(); });
+    }
+    document.getElementById('copy-close-btn').addEventListener('click', copyOverlayHide);
+    document.getElementById('copy-all-btn').addEventListener('click', function() {
+      var text = copyContent.textContent;
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(text).then(function() {
+          var btn = document.getElementById('copy-all-btn');
+          btn.textContent = 'Copied!';
+          setTimeout(function() { btn.textContent = 'Copy All'; }, 1500);
+        });
+      }
+    });
 
     // Voice setup - streaming ASR (sends PCM in real-time)
     const status = document.getElementById('status');
