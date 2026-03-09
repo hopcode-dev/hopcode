@@ -1203,6 +1203,59 @@ const indexHtml = `<!DOCTYPE html>
     .float-key-config button { flex: 1; padding: 8px; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; font-weight: 600; }
     .float-key-config .cfg-save { background: #4ade80; color: #000; }
     .float-key-config .cfg-cancel { background: #333; color: #e0e0e0; }
+    /* --- Chat Mode --- */
+    #chat-bar {
+      display: none; background: #16213e; padding: 6px 6px;
+      border-top: 2px solid #0f3460; flex-shrink: 0; z-index: 60;
+      font-family: system-ui; -webkit-tap-highlight-color: transparent;
+    }
+    #chat-bar.active { display: flex; flex-direction: column; gap: 4px; }
+    #chat-bar .chat-input-row {
+      display: flex; align-items: center; gap: 4px; width: 100%;
+    }
+    #chat-input {
+      flex: 1; background: #111827; color: #e0e0e0; border: 1px solid #333;
+      border-radius: 8px; padding: 7px 12px; font-size: 15px; font-family: system-ui;
+      outline: none; resize: none; min-height: 34px; max-height: 120px;
+      line-height: 1.3; overflow-y: auto;
+    }
+    #chat-input:focus { border-color: #4ade80; }
+    #chat-input::placeholder { color: #555; }
+    #chat-send-btn {
+      width: 34px; height: 34px; border-radius: 6px; border: none;
+      background: #4ade80; color: #000; font-size: 16px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #chat-send-btn:active { background: #22c55e; }
+    #chat-send-btn:disabled { background: #333; color: #666; }
+    #chat-mic-btn {
+      width: 34px; height: 34px; border-radius: 6px; border: 1px solid #4ade80;
+      background: transparent; color: #4ade80; font-size: 16px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #chat-mic-btn:active, #chat-mic-btn.recording { background: #4ade80; color: #000; }
+    #chat-quick-actions {
+      display: none; flex-wrap: wrap; gap: 6px; padding: 0 4px;
+    }
+    #chat-quick-actions.visible { display: flex; }
+    .chat-quick-btn {
+      padding: 6px 16px; border-radius: 16px; border: 1px solid #333;
+      background: #1e293b; color: #e0e0e0; font-size: 14px; cursor: pointer;
+      font-family: system-ui; -webkit-tap-highlight-color: transparent;
+    }
+    .chat-quick-btn:active { background: #334155; }
+    .chat-quick-btn.primary { background: #4ade80; color: #000; border-color: #4ade80; font-weight: 600; }
+    .chat-quick-btn.danger { border-color: #f87171; color: #f87171; }
+    #menu-chat-toggle { cursor: pointer; }
+    body.light-mode #chat-bar { background:rgba(240,240,240,0.95);border-top-color:#ccc; }
+    body.light-mode #chat-input { background:#fff; color:#333; border-color:#ccc; }
+    body.light-mode #chat-input::placeholder { color:#999; }
+    body.light-mode .chat-quick-btn { background:#f0f0f0; color:#333; border-color:#ccc; }
+    @supports (padding-top: env(safe-area-inset-top)) {
+      #chat-bar { padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+    }
     body.mobile #voice-bar { padding: 6px 6px; gap: 0; flex-direction: column; }
     body.mobile #bar-row1 { display: flex; align-items: center; gap: 4px; width: 100%; }
     body.mobile #bar-row2 { display: flex; align-items: center; gap: 4px; width: 100%; margin-top: 5px; }
@@ -1349,6 +1402,16 @@ const indexHtml = `<!DOCTYPE html>
         <button id="return-btn" class="key-btn" title="Return" style="font-size:20px;">&#x23CE;</button>
       </div>
     </div>
+    <div id="chat-bar">
+      <div id="chat-quick-actions"></div>
+      <div class="chat-input-row">
+        <button id="chat-menu-btn" class="key-btn" style="min-width:32px;padding:2px 6px;flex-shrink:0;"><svg viewBox="0 0 512 512" fill="none" style="width:34px;height:34px;vertical-align:middle;"><circle cx="185" cy="175" r="42" fill="#4ade80"/><circle cx="327" cy="175" r="42" fill="#4ade80"/><circle cx="185" cy="175" r="16" fill="#1a1a2e"/><circle cx="327" cy="175" r="16" fill="#1a1a2e"/><rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/><path d="M205 218L230 240L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M242 240L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/><rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/><rect x="165" y="340" width="50" height="20" rx="10" fill="#22c55e"/><rect x="297" y="340" width="50" height="20" rx="10" fill="#22c55e"/></svg></button>
+        <label for="chat-input" style="position:absolute;left:-9999px">Chat input</label>
+        <textarea id="chat-input" name="chat-input" rows="1" placeholder="Tell Claude what to do..." autocomplete="off"></textarea>
+        <button id="chat-mic-btn" title="Hold to speak">&#x1F3A4;</button>
+        <button id="chat-send-btn" title="Send">&#x25B6;</button>
+      </div>
+    </div>
   </div>
   <div id="voice-popup" class="hidden">
     <div id="vp-indicator"><span id="vp-dot"></span></div>
@@ -1460,7 +1523,8 @@ const indexHtml = `<!DOCTYPE html>
       <div class="app-menu-sep"></div>
       <div class="app-menu-item" id="menu-files">&#x1F4C1; Files</div>
       <a class="app-menu-item" href="/terminal" style="text-decoration:none;">&#x1F3E0; Home</a>
-      <div style="padding:8px 16px;text-align:right;">
+      <div style="padding:8px 16px;display:flex;align-items:center;justify-content:space-between;">
+        <span id="menu-chat-toggle" style="font-size:11px;color:#4ade80;cursor:pointer;">&#x1F4AC; Chat Mode</span>
         <span id="menu-devtools-link" style="font-size:11px;color:#555;cursor:pointer;">DevTools</span>
       </div>
       <div id="menu-devtools-panel" style="display:none;padding:6px 16px 10px;">
@@ -1510,6 +1574,10 @@ const indexHtml = `<!DOCTYPE html>
     // --- Performance self-check: monitor write latency, auto-trim if degraded ---
     function perfWrite(data, cb) {
       term.write(data, cb);
+      // Chat mode: detect permission prompts
+      if (typeof chatDetectPrompts === 'function') {
+        try { chatDetectPrompts(data); } catch(e) {}
+      }
     }
     var visibleRows = term.rows;
     var lastCols = term.cols, lastRows = 0;
@@ -1806,6 +1874,9 @@ const indexHtml = `<!DOCTYPE html>
 
       if (isMobile) {
         xtermTextarea.addEventListener('focus', function() {
+          // Sync prevTaVal with actual textarea state on focus.
+          // xterm may have modified textarea.value during output while we weren't tracking.
+          prevTaVal = xtermTextarea.value;
           resetPageScroll();
           setTimeout(resetPageScroll, 50);
           setTimeout(resetPageScroll, 150);
@@ -1816,7 +1887,10 @@ const indexHtml = `<!DOCTYPE html>
 
       xtermTextarea.addEventListener('compositionstart', function() {
         isComposing = true;
-        dbg('COMP_START');
+        // Sync prevTaVal before composition — xterm may have changed textarea
+        // value (e.g. for IME context) without our input handler running.
+        prevTaVal = xtermTextarea.value;
+        dbg('COMP_START prevTaVal="' + prevTaVal + '"');
       });
       xtermTextarea.addEventListener('compositionend', function(e) {
         isComposing = false;
@@ -1966,6 +2040,8 @@ const indexHtml = `<!DOCTYPE html>
       } else if (data.length === 1 && data.charCodeAt(0) < 32) {
         sentLine = '';
       }
+      // Cap sentLine to prevent stale echo detection against old input
+      if (sentLine.length > 200) sentLine = sentLine.slice(-100);
 
       sendInput(data);
     });
@@ -2763,6 +2839,18 @@ const indexHtml = `<!DOCTYPE html>
       if (asrFlushed) return;
       if (isRecording || altDown) return; // Still recording, wait for release
       if (pendingAsrText) {
+        // Chat mode: put voice result in chat input instead of voice popup
+        if (chatModeEnabled && chatMicDown === false) {
+          asrFlushed = true;
+          chatInput.value = pendingAsrText;
+          chatInput.style.height = 'auto';
+          chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
+          chatInput.focus();
+          pendingAsrText = '';
+          vpHide();
+          status.textContent = defaultStatusText;
+          return;
+        }
         vpShowConfirm();
       } else {
         vpHide();
@@ -3210,6 +3298,157 @@ const indexHtml = `<!DOCTYPE html>
       window.visualViewport.addEventListener('resize', repositionFloatKeys);
       window.visualViewport.addEventListener('scroll', repositionFloatKeys);
     }
+
+    // --- Chat Mode ---
+    var chatBar = document.getElementById('chat-bar');
+    var chatInput = document.getElementById('chat-input');
+    var chatSendBtn = document.getElementById('chat-send-btn');
+    var chatMicBtn = document.getElementById('chat-mic-btn');
+    var chatQuickActions = document.getElementById('chat-quick-actions');
+    var chatMenuToggle = document.getElementById('menu-chat-toggle');
+    var chatMenuBtn = document.getElementById('chat-menu-btn');
+    var chatModeEnabled = false;
+
+    // Auto-grow textarea
+    chatInput.addEventListener('input', function() {
+      this.style.height = 'auto';
+      this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+    });
+
+    // Send chat message to terminal
+    function chatSend() {
+      var text = chatInput.value.trim();
+      if (!text) return;
+      sendInput(text);
+      setTimeout(function() { sendInput(String.fromCharCode(13)); }, 50);
+      chatInput.value = '';
+      chatInput.style.height = 'auto';
+      autoScroll = true;
+      scrollToCursor();
+    }
+
+    chatSendBtn.addEventListener('click', chatSend);
+    chatInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        chatSend();
+      }
+    });
+
+    // Chat mic: reuse Hold to speak
+    var chatMicDown = false;
+    function chatMicStart(e) {
+      e.preventDefault();
+      chatMicDown = true;
+      chatMicBtn.classList.add('recording');
+      startRec();
+    }
+    function chatMicEnd(e) {
+      if (!chatMicDown) return;
+      chatMicDown = false;
+      chatMicBtn.classList.remove('recording');
+      stopRec(false, false);
+    }
+    chatMicBtn.addEventListener('mousedown', chatMicStart);
+    chatMicBtn.addEventListener('mouseup', chatMicEnd);
+    chatMicBtn.addEventListener('mouseleave', chatMicEnd);
+    chatMicBtn.addEventListener('touchstart', chatMicStart, { passive: false });
+    chatMicBtn.addEventListener('touchend', chatMicEnd);
+
+    // When in chat mode, voice result goes to chat input instead of terminal
+    var chatModeVoiceIntercept = false;
+
+    // Toggle chat mode
+    function setChatMode(on) {
+      chatModeEnabled = on;
+      chatModeVoiceIntercept = on;
+      if (on) {
+        chatBar.classList.add('active');
+        voiceBar.style.display = 'none';
+        if (chatMenuToggle) chatMenuToggle.textContent = '\\u{1F4AC} Classic Mode';
+      } else {
+        chatBar.classList.remove('active');
+        voiceBar.style.display = '';
+        if (chatMenuToggle) chatMenuToggle.textContent = '\\u{1F4AC} Chat Mode';
+      }
+      localStorage.setItem('hopcode-chat-mode', on ? '1' : '0');
+    }
+
+    if (chatMenuToggle) chatMenuToggle.addEventListener('click', function() {
+      setChatMode(!chatModeEnabled);
+    });
+    // Chat bar menu button opens the app menu (menuShow is hoisted)
+    if (chatMenuBtn) chatMenuBtn.addEventListener('click', function(e) {
+      e.preventDefault(); e.stopPropagation(); menuShow();
+    });
+
+    // Quick action buttons for y/n prompts
+    function chatShowQuickActions(actions) {
+      chatQuickActions.innerHTML = '';
+      actions.forEach(function(a) {
+        var btn = document.createElement('button');
+        btn.className = 'chat-quick-btn' + (a.cls ? ' ' + a.cls : '');
+        btn.textContent = a.label;
+        btn.addEventListener('click', function() {
+          sendInput(a.value);
+          if (a.enter !== false) setTimeout(function() { sendInput(String.fromCharCode(13)); }, 50);
+          chatQuickActions.classList.remove('visible');
+        });
+        chatQuickActions.appendChild(btn);
+      });
+      chatQuickActions.classList.add('visible');
+    }
+
+    // Detect permission prompts from terminal output
+    var lastTermOutput = '';
+    var origTermWrite = null;
+    function chatDetectPrompts(data) {
+      if (!chatModeEnabled) return;
+      // Accumulate recent output (keep last 500 chars)
+      lastTermOutput += (typeof data === 'string' ? data : '');
+      if (lastTermOutput.length > 500) lastTermOutput = lastTermOutput.slice(-500);
+
+      // Strip ANSI escape codes for matching
+      var esc = String.fromCharCode(27);
+      var ansiRe = new RegExp(esc + '[[[][0-9;]*[a-zA-Z]', 'g');
+      var oscRe = new RegExp(esc + '[]][^' + String.fromCharCode(7) + ']*' + String.fromCharCode(7), 'g');
+      var clean = lastTermOutput.replace(ansiRe, '').replace(oscRe, '');
+
+      // Detect Claude Code permission prompt (Allow/Deny)
+      var endsQ = clean.trim().slice(-5).indexOf('?') >= 0;
+      if (/Allow|allow once|deny/i.test(clean) && endsQ) {
+        chatShowQuickActions([
+          { label: 'Yes (y)', value: 'y', cls: 'primary' },
+          { label: 'Always allow', value: 'a', cls: 'primary' },
+          { label: 'No (n)', value: 'n', cls: 'danger' },
+        ]);
+        lastTermOutput = '';
+      }
+      // Detect generic y/n prompt
+      else if (clean.indexOf('(y/n)') >= 0 || clean.indexOf('[y/N]') >= 0 || clean.indexOf('[Y/n]') >= 0) {
+        chatShowQuickActions([
+          { label: 'Yes', value: 'y', cls: 'primary' },
+          { label: 'No', value: 'n', cls: 'danger' },
+        ]);
+        lastTermOutput = '';
+      }
+      // Detect "Press Enter to continue"
+      else if (/press enter|continue[?]/i.test(clean.trim().slice(-60))) {
+        chatShowQuickActions([
+          { label: 'Continue', value: String.fromCharCode(13), enter: false, cls: 'primary' },
+        ]);
+        lastTermOutput = '';
+      }
+    }
+
+
+
+    // Auto-enable chat mode: default ON for all users (saved pref overrides)
+    (function initChatMode() {
+      var saved = localStorage.getItem('hopcode-chat-mode');
+      if (saved === '0') return; // explicitly disabled
+      setChatMode(true);
+    })();
 
     // --- File Browser ---
     var fbPanel = document.getElementById('file-browser');
