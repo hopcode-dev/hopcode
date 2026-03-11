@@ -49,9 +49,9 @@ interface Session {
 const sessions = new Map<string, Session>();
 let sessionCounter = 0;
 
-function createSession(id: string, owner: string = 'admin', linuxUser?: string): Session {
+function createSession(id: string, owner: string = 'admin', linuxUser?: string, customName?: string): Session {
   sessionCounter++;
-  const name = `Session ${sessionCounter}`;
+  const name = customName || `Session ${sessionCounter}`;
 
   // Fork worker process
   const worker = fork(path.join(__dirname, 'pty-worker.ts'), [], {
@@ -215,7 +215,7 @@ const server = http.createServer(async (req, res) => {
         }
         const owner = body.owner || 'admin';
         const linuxUser = body.linuxUser || undefined;
-        createSession(id, owner, linuxUser);
+        const session = createSession(id, owner, linuxUser, body.name);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ id }));
       } catch (err: any) {

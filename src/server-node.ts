@@ -33,6 +33,10 @@ import {
   getPtyInternalToken,
   type SessionInfo,
 } from './shared/protocol.js';
+import { ClaudeProcess } from './easymode/claude-process.js';
+import type { EasyClientMessage, EasyServerMessage } from './easymode/protocol.js';
+import { setupProjectTemplate } from './templates/index.js';
+import { getI18nScript } from './i18n.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -221,6 +225,11 @@ const VOLCANO_TOKEN = process.env.VOLCANO_TOKEN || '';
 const VOLCANO_ASR_RESOURCE_ID = process.env.VOLCANO_ASR_RESOURCE_ID || 'volc.bigasr.sauc.duration';
 const VOLCANO_ASR_ENDPOINT = 'wss://openspeech.bytedance.com/api/v3/sauc/bigmodel';
 
+// TTS config
+const VOLCANO_TTS_RESOURCE_ID = process.env.VOLCANO_RESOURCE_ID || 'seed-tts-2.0';
+const VOLCANO_TTS_VOICE = process.env.VOLCANO_VOICE || 'zh_female_wanwanxiaohe_moon_bigtts';
+const VOLCANO_TTS_ENDPOINT = 'wss://openspeech.bytedance.com/api/v3/tts/bidirection';
+
 // --- PTY service client ---
 const PTY_INTERNAL_TOKEN = getPtyInternalToken();
 const PTY_BASE_URL = `http://127.0.0.1:${PTY_SERVICE_PORT}`;
@@ -236,6 +245,21 @@ async function ptyFetch(urlPath: string, options?: RequestInit): Promise<Respons
     console.error(`[ptyFetch] ${options?.method || 'GET'} ${urlPath} → ${resp.status}: ${body}`);
   }
   return resp;
+}
+
+// --- Session limit ---
+const MAX_SESSIONS_PER_USER = 3;
+
+async function checkSessionLimit(username: string): Promise<boolean> {
+  if (username === 'root') return true;
+  try {
+    const resp = await ptyFetch(`/sessions?owner=${encodeURIComponent(username)}`);
+    if (resp.ok) {
+      const list = await resp.json() as any[];
+      return list.length < MAX_SESSIONS_PER_USER;
+    }
+  } catch {}
+  return true; // allow on error to avoid blocking
 }
 
 // --- File browser helpers ---
@@ -518,6 +542,249 @@ function connectVolcano(asrSession: AsrSession, clientWs: WebSocket): void {
   });
 }
 
+// --- TTS via Volcano Engine BigModel (WebSocket bidirectional) ---
+function synthesizeTts(text: string): Promise<Buffer> {
+  if (!VOLCANO_APP_ID || !VOLCANO_TOKEN) {
+    return Promise.reject(new Error('TTS not configured'));
+  }
+
+  // Strip markdown for cleaner speech
+  let clean = text
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/^#+\s*/gm, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^[\-*]\s+/gm, '')
+    .replace(/^\d+\.\s+/gm, '')
+    .replace(/\n{2,}/g, '\n')
+    .trim();
+  if (!clean) return Promise.reject(new Error('Empty text'));
+
+  // Limit to ~200 chars for reasonable TTS length
+  if (clean.length > 200) {
+    const sentences = clean.split(/(?<=[。！？!?.…])/);
+    clean = '';
+    for (const s of sentences) {
+      if ((clean + s).length > 200) break;
+      clean += s;
+    }
+    if (!clean) clean = text.substring(0, 200);
+  }
+
+  const sessionId = crypto.randomUUID().replace(/-/g, '');
+  const connectId = crypto.randomUUID();
+
+  // Protocol constants
+  const PROTOCOL_VERSION = 0b0001;
+  const DEFAULT_HEADER_SIZE = 0b0001;
+  const FULL_CLIENT_REQUEST = 0b0001;
+  const AUDIO_ONLY_RESPONSE = 0b1011;
+  const ERROR_INFORMATION = 0b1111;
+  const MsgTypeFlagNoSeq = 0b0000;
+  const MsgTypeFlagWithEvent = 0b0100;
+  const JSON_SERIALIZATION = 0b0001;
+  const NO_SERIALIZATION = 0b0000;
+  const COMPRESSION_NO = 0b0000;
+
+  const EVENT_StartSession = 100;
+  const EVENT_FinishSession = 102;
+  const EVENT_SessionStarted = 150;
+  const EVENT_SessionFinished = 152;
+  const EVENT_SessionFailed = 153;
+  const EVENT_TaskRequest = 200;
+  const EVENT_TTSResponse = 352;
+
+  function buildHeader(mt: number, flags = MsgTypeFlagNoSeq, serial = NO_SERIALIZATION) {
+    return new Uint8Array([
+      (PROTOCOL_VERSION << 4) | DEFAULT_HEADER_SIZE,
+      (mt << 4) | flags,
+      (serial << 4) | COMPRESSION_NO,
+      0
+    ]);
+  }
+  function buildOptional(event: number, sid?: string) {
+    const parts: number[] = [];
+    const dv = new DataView(new ArrayBuffer(4));
+    dv.setInt32(0, event, false);
+    parts.push(...new Uint8Array(dv.buffer));
+    if (sid) {
+      const enc = new TextEncoder().encode(sid);
+      const sz = new DataView(new ArrayBuffer(4));
+      sz.setInt32(0, enc.length, false);
+      parts.push(...new Uint8Array(sz.buffer));
+      parts.push(...enc);
+    }
+    return new Uint8Array(parts);
+  }
+  function buildPayloadWithSize(payload: object) {
+    const enc = new TextEncoder().encode(JSON.stringify(payload));
+    const sz = new DataView(new ArrayBuffer(4));
+    sz.setInt32(0, enc.length, false);
+    const r = new Uint8Array(4 + enc.length);
+    r.set(new Uint8Array(sz.buffer), 0);
+    r.set(enc, 4);
+    return r;
+  }
+  function buildMessage(header: Uint8Array, optional: Uint8Array, payload?: Uint8Array) {
+    const total = header.length + optional.length + (payload?.length || 0);
+    const r = new Uint8Array(total);
+    let off = 0;
+    r.set(header, off); off += header.length;
+    r.set(optional, off); off += optional.length;
+    if (payload) r.set(payload, off);
+    return r;
+  }
+  function readInt32BE(data: Uint8Array, offset: number) {
+    return new DataView(data.buffer, data.byteOffset + offset, 4).getInt32(0, false);
+  }
+  function readStringWithSize(data: Uint8Array, offset: number) {
+    const size = readInt32BE(data, offset); offset += 4;
+    offset += size;
+    return { newOffset: offset };
+  }
+  function readPayloadWithSize(data: Uint8Array, offset: number) {
+    const size = readInt32BE(data, offset); offset += 4;
+    const payload = data.slice(offset, offset + size); offset += size;
+    return { payload, newOffset: offset };
+  }
+
+  return new Promise((resolve, reject) => {
+    const audioChunks: Buffer[] = [];
+    let sessionStarted = false;
+
+    const ws = new WebSocket(VOLCANO_TTS_ENDPOINT, {
+      headers: {
+        'X-Api-App-Key': VOLCANO_APP_ID,
+        'X-Api-Access-Key': VOLCANO_TOKEN,
+        'X-Api-Resource-Id': VOLCANO_TTS_RESOURCE_ID,
+        'X-Api-Connect-Id': connectId,
+      }
+    });
+
+    const cleanup = () => {
+      if (ws.readyState === ws.OPEN || ws.readyState === ws.CONNECTING) ws.close();
+    };
+    const timeout = setTimeout(() => {
+      cleanup();
+      audioChunks.length > 0 ? resolve(Buffer.concat(audioChunks)) : reject(new Error('TTS timeout'));
+    }, 30000);
+
+    ws.on('open', () => {
+      ws.send(buildMessage(
+        buildHeader(FULL_CLIENT_REQUEST, MsgTypeFlagWithEvent, JSON_SERIALIZATION),
+        buildOptional(EVENT_StartSession, sessionId),
+        buildPayloadWithSize({
+          user: { uid: 'hopcode' },
+          event: EVENT_StartSession,
+          namespace: 'BidirectionalTTS',
+          req_params: {
+            text: '',
+            speaker: VOLCANO_TTS_VOICE,
+            audio_params: { format: 'pcm', sample_rate: 24000, enable_timestamp: false },
+            additions: JSON.stringify({ disable_markdown_filter: false }),
+          }
+        })
+      ));
+    });
+
+    ws.on('message', (rawData: Buffer) => {
+      try {
+        const data = new Uint8Array(rawData);
+        const hdr = {
+          messageType: (data[1] >> 4) & 0x0f,
+          messageTypeFlags: data[1] & 0x0f,
+        };
+        let offset = 4;
+
+        if (hdr.messageTypeFlags === MsgTypeFlagWithEvent) {
+          const eventType = readInt32BE(data, offset); offset += 4;
+
+          if (eventType === EVENT_SessionStarted) {
+            sessionStarted = true;
+            const r1 = readStringWithSize(data, offset); offset = r1.newOffset;
+            if (offset < data.length) { const r2 = readStringWithSize(data, offset); offset = r2.newOffset; }
+
+            // Send text
+            ws.send(buildMessage(
+              buildHeader(FULL_CLIENT_REQUEST, MsgTypeFlagWithEvent, JSON_SERIALIZATION),
+              buildOptional(EVENT_TaskRequest, sessionId),
+              buildPayloadWithSize({
+                user: { uid: 'hopcode' },
+                event: EVENT_TaskRequest,
+                namespace: 'BidirectionalTTS',
+                req_params: {
+                  text: clean,
+                  speaker: VOLCANO_TTS_VOICE,
+                  audio_params: { format: 'pcm', sample_rate: 24000, enable_timestamp: false },
+                  additions: JSON.stringify({ disable_markdown_filter: false }),
+                }
+              })
+            ));
+            // Finish session
+            setTimeout(() => {
+              ws.send(buildMessage(
+                buildHeader(FULL_CLIENT_REQUEST, MsgTypeFlagWithEvent, JSON_SERIALIZATION),
+                buildOptional(EVENT_FinishSession, sessionId),
+                buildPayloadWithSize({})
+              ));
+            }, 100);
+          } else if (eventType === EVENT_TTSResponse && hdr.messageType === AUDIO_ONLY_RESPONSE) {
+            const r1 = readStringWithSize(data, offset); offset = r1.newOffset;
+            const { payload } = readPayloadWithSize(data, offset);
+            audioChunks.push(Buffer.from(payload));
+          } else if (eventType === EVENT_SessionFinished) {
+            clearTimeout(timeout); cleanup();
+            resolve(Buffer.concat(audioChunks));
+          } else if (eventType === EVENT_SessionFailed) {
+            clearTimeout(timeout); cleanup();
+            reject(new Error('TTS session failed'));
+          }
+        } else if (hdr.messageType === ERROR_INFORMATION) {
+          clearTimeout(timeout); cleanup();
+          reject(new Error('TTS error'));
+        }
+      } catch (err) { /* ignore parse errors */ }
+    });
+
+    ws.on('error', (err: Error) => { clearTimeout(timeout); cleanup(); reject(err); });
+    ws.on('close', () => {
+      clearTimeout(timeout);
+      if (audioChunks.length > 0) resolve(Buffer.concat(audioChunks));
+      else if (!sessionStarted) reject(new Error('TTS WS closed early'));
+    });
+  });
+}
+
+// Convert PCM (24kHz, 16-bit, mono) to WAV for browser playback
+function pcmToWav(pcm: Buffer): Buffer {
+  const sampleRate = 24000;
+  const numChannels = 1;
+  const bitsPerSample = 16;
+  const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+  const blockAlign = numChannels * (bitsPerSample / 8);
+  const dataSize = pcm.length;
+  const headerSize = 44;
+
+  const wav = Buffer.alloc(headerSize + dataSize);
+  wav.write('RIFF', 0);
+  wav.writeUInt32LE(36 + dataSize, 4);
+  wav.write('WAVE', 8);
+  wav.write('fmt ', 12);
+  wav.writeUInt32LE(16, 16);        // Subchunk1Size
+  wav.writeUInt16LE(1, 20);         // AudioFormat (PCM)
+  wav.writeUInt16LE(numChannels, 22);
+  wav.writeUInt32LE(sampleRate, 24);
+  wav.writeUInt32LE(byteRate, 28);
+  wav.writeUInt16LE(blockAlign, 32);
+  wav.writeUInt16LE(bitsPerSample, 34);
+  wav.write('data', 36);
+  wav.writeUInt32LE(dataSize, 40);
+  pcm.copy(wav, headerSize);
+  return wav;
+}
+
 function startAsrSession(clientWs: WebSocket): AsrSession {
   const asrSession: AsrSession = {
     volcanoWs: null, ready: false, pendingChunks: [],
@@ -534,7 +801,7 @@ const voiceClients = new Map<string, WebSocket>();
 // Login page HTML — dynamic to support multi-user mode
 function getLoginHtml(): string {
   const usernameField = isMultiUser
-    ? `<input type="text" id="username" placeholder="Username" autofocus autocomplete="username" autocapitalize="off">`
+    ? `<input type="text" id="username" placeholder="Username" data-i18n-placeholder="login.placeholder_username" autofocus autocomplete="username" autocapitalize="off">`
     : '';
   const passwordAutofocus = isMultiUser ? '' : ' autofocus';
   return `<!DOCTYPE html>
@@ -551,6 +818,7 @@ function getLoginHtml(): string {
   <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
   <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
   <title>Hopcode - Login</title>
+  <script>${getI18nScript()}</script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100%; background: #1a1a2e; display: flex; align-items: center; justify-content: center; font-family: system-ui; padding: 16px; }
@@ -569,11 +837,11 @@ function getLoginHtml(): string {
 <body>
   <div class="login-box">
     <h1>Hopcode</h1>
-    <div class="error" id="error">Incorrect password</div>
+    <div class="error" id="error" data-i18n="login.error_incorrect">Incorrect password</div>
     <form onsubmit="return login()">
       ${usernameField}
-      <input type="password" id="password" placeholder="Password"${passwordAutofocus}>
-      <button type="submit">Login</button>
+      <input type="password" id="password" data-i18n-placeholder="login.placeholder_password" placeholder="Password"${passwordAutofocus}>
+      <button type="submit" data-i18n="login.btn">Login</button>
     </form>
   </div>
   <script>
@@ -587,7 +855,7 @@ function getLoginHtml(): string {
           if (d.success) {
             location.reload();
           } else {
-            document.getElementById('error').textContent = d.error || 'Incorrect password';
+            document.getElementById('error').textContent = d.error || _t('login.error_incorrect');
             document.getElementById('error').style.display = 'block';
           }
         });
@@ -602,7 +870,7 @@ function getLoginHtml(): string {
 // Session chooser HTML page - generated dynamically with server-side rendering
 async function buildSessionsHtml(username?: string): Promise<string> {
   const isRoot = username === 'root';
-  let sessionList: { id: string; name: string; owner: string; createdAt: number; lastActivity: number; clients: number }[] = [];
+  let sessionList: { id: string; name: string; owner: string; createdAt: number; lastActivity: number; clients: number; mode?: string; project?: string }[] = [];
   try {
     // Root sees all sessions; other users see only their own
     const ownerQuery = isMultiUser && username && !isRoot ? `?owner=${encodeURIComponent(username)}` : '';
@@ -612,6 +880,12 @@ async function buildSessionsHtml(username?: string): Promise<string> {
       sessionList = list.map(s => ({ id: s.id, name: s.name, owner: s.owner, createdAt: s.createdAt, lastActivity: s.lastActivity, clients: s.clientCount }));
     }
   } catch {}
+  // Append Easy Mode sessions
+  for (const [id, info] of easySessions) {
+    if (isMultiUser && username && !isRoot && info.owner !== username) continue;
+    if (sessionList.some(s => s.id === id)) continue;
+    sessionList.push({ id, name: info.name, owner: info.owner, createdAt: info.createdAt, lastActivity: info.createdAt, clients: 0, mode: 'easy', project: info.project });
+  }
   sessionList.sort((a, b) => b.lastActivity - a.lastActivity);
 
   function fmtAge(ts: number): string {
@@ -629,21 +903,24 @@ async function buildSessionsHtml(username?: string): Promise<string> {
 
   function renderCard(s: typeof sessionList[0]): string {
     const isActive = s.clients > 0;
-    const barClass = isActive ? 'bar-active' : 'bar-idle';
-    return `<a class="session-card" href="/terminal?session=${encodeURIComponent(s.id)}" data-session-id="${esc(s.id)}">
+    const barClass = s.mode === 'easy' ? 'bar-easy' : (isActive ? 'bar-active' : 'bar-idle');
+    const href = s.mode === 'easy'
+      ? `/terminal/easy?session=${encodeURIComponent(s.id)}${s.project ? '&project=' + encodeURIComponent(s.project) : ''}`
+      : `/terminal?session=${encodeURIComponent(s.id)}`;
+    return `<a class="session-card" href="${href}" data-session-id="${esc(s.id)}">
       <div class="card-bar ${barClass}"></div>
       <div class="session-info">
         <div class="session-name" data-session="${esc(s.id)}"><span class="session-name-text">${esc(s.name)}</span></div>
         <div class="session-meta">${fmtAge(s.lastActivity)}</div>
       </div>
-      <button class="rename-btn" title="Rename session">&#9998;</button>
-      <button class="delete-btn" title="Delete session">&times;</button>
+      <button class="rename-btn" data-i18n-title="portal.rename_title" title="Rename session">&#9998;</button>
+      <button class="delete-btn" data-i18n-title="portal.delete_title" title="Delete session">&times;</button>
     </a>`;
   }
 
   let cardsHtml = '';
   if (sessionList.length === 0) {
-    cardsHtml = '<div class="empty-state"><p>No active sessions</p><p class="empty-sub">Create one to get started</p></div>';
+    cardsHtml = '<div class="empty-state"><p data-i18n="portal.empty_title">No active sessions</p><p class="empty-sub" data-i18n="portal.empty_sub">Create one to get started</p></div>';
   } else if (isRoot) {
     // Group by owner, root's own sessions first
     const groups = new Map<string, typeof sessionList>();
@@ -691,6 +968,7 @@ async function buildSessionsHtml(username?: string): Promise<string> {
   <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
   <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
   <title>Hopcode - Sessions</title>
+  <script>${getI18nScript()}</script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { min-height: 100%; background: #111827; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; color: #e5e7eb; }
@@ -729,6 +1007,7 @@ async function buildSessionsHtml(username?: string): Promise<string> {
     .card-bar { width: 4px; align-self: stretch; border-radius: 4px 0 0 4px; flex-shrink: 0; }
     .bar-active { background: #4ade80; }
     .bar-idle { background: #374151; }
+    .bar-easy { background: #60a5fa; }
     .session-info { flex: 1; min-width: 0; padding: 14px 12px; }
     .session-name { display: flex; align-items: center; }
     .session-name-text { font-size: 15px; font-weight: 600; color: #f3f4f6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -830,8 +1109,10 @@ async function buildSessionsHtml(username?: string): Promise<string> {
       </div>
       <div class="header-right">
         ${isMultiUser && username ? `<span class="user-info">${esc(username)}</span>` : ''}
-        <a class="new-btn" href="/terminal?action=new">+ New</a>
-        <a class="logout-btn" href="/terminal/logout">Logout</a>
+        ${isRoot ? '<a class="new-btn" href="/terminal/easy" style="background:#3b82f6;color:#fff;" data-i18n="portal.btn_easy">Easy</a>' : ''}
+        <a class="new-btn" href="/terminal?action=new" data-i18n="portal.btn_new">+ New</a>
+        <button class="new-btn" id="lang-toggle" onclick="_setLang(_lang==='en'?'zh':'en')" style="background:#374151;color:#9ca3af;font-size:12px;cursor:pointer;border:none;padding:4px 10px;border-radius:6px;">EN/中</button>
+        <a class="logout-btn" href="/terminal/logout" data-i18n="portal.btn_logout">Logout</a>
       </div>
     </div>
     <div class="session-list">${cardsHtml}</div>
@@ -885,10 +1166,10 @@ async function buildSessionsHtml(username?: string): Promise<string> {
       var overlay = document.createElement('div');
       overlay.className = 'confirm-overlay';
       overlay.innerHTML = '<div class="confirm-box">' +
-        '<p>Delete <span class="confirm-name">' + sessionName.replace(/</g,'&lt;') + '</span>?</p>' +
+        '<p>' + _t('portal.confirm_delete', {name: sessionName.replace(/</g,'&lt;')}) + '</p>' +
         '<div class="confirm-btns">' +
-        '<button class="btn-cancel">Cancel</button>' +
-        '<button class="btn-delete">Delete</button>' +
+        '<button class="btn-cancel">' + _t('cancel') + '</button>' +
+        '<button class="btn-delete">' + _t('delete') + '</button>' +
         '</div></div>';
       document.body.appendChild(overlay);
       overlay.querySelector('.btn-cancel').onclick = function() { overlay.remove(); };
@@ -1006,6 +1287,2080 @@ async function buildSessionsHtml(username?: string): Promise<string> {
   return html;
 }
 
+// Easy Mode HTML page — terminal-free chat UI for beginners
+function getEasyModeHtml(auth: AuthInfo): string {
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Hopcode Easy Mode</title>
+<script>${getI18nScript()}</script>
+<link rel="icon" type="image/svg+xml" href="./icons/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
+#input-bar, #input-bar *, #quick-actions, #quick-actions *, #tab-bar, #tab-bar *, .fp-header, .fp-actions, .fp-actions * { -webkit-user-select:none !important; user-select:none !important; pointer-events:auto; }
+html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif; background:#f5f5f7; color:#1d1d1f; }
+#msg-input, .msg, .msg *, #debug-log { -webkit-user-select:text; user-select:text; }
+
+#app { display:flex; flex-direction:column; height:100%; height:100dvh; }
+
+/* Top bar — hidden, controls moved to bottom menu */
+#top-bar { display:none; }
+#project-bar { display:none; }
+
+/* Bottom menu sheet */
+#menu-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.3); z-index:150; display:none; }
+#menu-overlay.show { display:block; }
+#menu-sheet { position:fixed; left:0; right:0; bottom:0; background:#ffffff; border-top-left-radius:16px; border-top-right-radius:16px; z-index:151; transform:translateY(100%); transition:transform 0.25s ease; max-height:70vh; overflow-y:auto; padding-bottom:env(safe-area-inset-bottom, 12px); box-shadow:0 -4px 20px rgba(0,0,0,0.1); }
+#menu-sheet.show { transform:translateY(0); }
+#menu-sheet .menu-handle { width:36px; height:4px; background:#d2d2d7; border-radius:2px; margin:10px auto; }
+.menu-section { padding:4px 0; }
+.menu-section-title { padding:8px 20px 4px; font-size:11px; color:#86868b; text-transform:uppercase; letter-spacing:0.5px; }
+#menu-projects-wrap { display:none; }
+#menu-projects-wrap.open { display:block; }
+.menu-item { display:flex; align-items:center; padding:12px 20px; gap:12px; cursor:pointer; font-size:14px; color:#1d1d1f; }
+.menu-item:active { background:rgba(0,0,0,0.04); }
+.menu-item .mi-icon { width:20px; text-align:center; color:#86868b; font-size:16px; flex-shrink:0; }
+.menu-item .mi-label { flex:1; }
+.menu-item .mi-badge { font-size:11px; color:#86868b; }
+.menu-item .mi-arrow { color:#c7c7cc; font-size:12px; }
+.menu-item.active .mi-label { color:#34c759; font-weight:600; }
+.menu-item.active .mi-icon { color:#34c759; }
+.menu-divider { height:1px; background:#e5e5ea; margin:4px 16px; }
+
+/* Status in menu */
+.menu-status { display:flex; align-items:center; gap:8px; padding:12px 20px; }
+.menu-status .status-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+.menu-status .status-dot.green { background:#34c759; }
+.menu-status .status-dot.yellow { background:#ff9f0a; animation:pulse 1.5s infinite; }
+.menu-status .status-dot.red { background:#ff3b30; }
+.menu-status .status-dot.blue { background:#007aff; animation:pulse 1.5s infinite; }
+.menu-status .status-label { font-size:13px; color:#86868b; }
+
+/* Font size controls in menu */
+.menu-font-row { display:flex; align-items:center; gap:8px; padding:8px 20px; }
+.menu-font-row .mf-label { font-size:13px; color:#86868b; min-width:60px; }
+.menu-font-row .mf-btn { width:36px; height:36px; border-radius:8px; border:1px solid #d2d2d7; background:#ffffff; color:#1d1d1f; font-size:16px; cursor:pointer; display:flex; align-items:center; justify-content:center; }
+.menu-font-row .mf-btn:active { background:#e5e5ea; }
+.menu-font-row .mf-val { font-size:14px; color:#1d1d1f; min-width:40px; text-align:center; font-weight:600; }
+
+/* Menu button in input bar */
+#menu-btn { background:none; border:none; color:#86868b; }
+#menu-btn svg { width:22px; height:22px; }
+#menu-btn:active { color:#1d1d1f; }
+
+/* Legacy — keep for JS but hide */
+.top-btn { display:none; }
+.project-chip { padding:4px 12px; border-radius:14px; font-size:13px; background:#e5e5ea; color:#86868b; border:1px solid #d2d2d7; cursor:pointer; white-space:nowrap; flex-shrink:0; }
+.project-chip.active { background:#e3f2fd; color:#007aff; border-color:#007aff; }
+.project-chip.add { color:#34c759; border-color:#34c759; background:#f0fff4; }
+
+/* Tab bar */
+#tab-bar { display:flex; flex-shrink:0; background:#ffffff; border-bottom:1px solid #e5e5ea; padding:0 12px; gap:0; }
+.tab-item { flex:1; padding:8px 0; text-align:center; font-size:13px; color:#86868b; cursor:pointer; border-bottom:2px solid transparent; position:relative; }
+.tab-item.active { color:#1d1d1f; border-bottom-color:#007aff; }
+.tab-badge { position:absolute; top:4px; right:calc(50% - 28px); width:6px; height:6px; border-radius:50%; background:#007aff; display:none; }
+.tab-badge.show { display:block; }
+
+/* Preview frame */
+#preview-container { display:none; flex:1; flex-direction:column; overflow:hidden; background:#ffffff; }
+#preview-container.show { display:flex; }
+#preview-bar { display:flex; align-items:center; padding:4px 10px; background:#f5f5f7; gap:6px; flex-shrink:0; border-bottom:1px solid #e5e5ea; flex-wrap:wrap; }
+#preview-bar-actions { display:flex; align-items:center; gap:6px; margin-left:auto; flex-shrink:0; }
+#preview-nav { display:flex; flex-wrap:wrap; gap:4px; overflow:hidden; min-width:0; }
+.preview-pill { padding:4px 10px; border-radius:12px; font-size:11px; cursor:pointer; border:1px solid #d2d2d7; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:160px; background:#e8f0fe; color:#1a73e8; font-family:'SF Mono',Monaco,monospace; transition:all 0.15s; }
+.preview-pill:hover { background:#d2e3fc; border-color:#1a73e8; }
+.preview-pill.active { background:#1a73e8; color:#fff; border-color:#1a73e8; }
+.preview-pill.welcome-pill { background:#fef3c7; color:#92400e; border-color:#fbbf24; font-family:system-ui; }
+.preview-pill.welcome-pill:hover { background:#fde68a; border-color:#f59e0b; }
+.preview-pill.welcome-pill.active { background:#f59e0b; color:#fff; border-color:#f59e0b; }
+.preview-action { background:#ffffff; border:1px solid #d2d2d7; color:#86868b; border-radius:6px; padding:3px 10px; font-size:11px; cursor:pointer; white-space:nowrap; }
+.preview-action:active { background:#e5e5ea; }
+#preview-guide { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:20px; overflow-y:auto; }
+#preview-frame { flex:1; border:none; background:#fff; display:none; }
+#preview-frame.loaded { display:block; }
+#preview-container.fullscreen { position:fixed; inset:0; z-index:9999; width:100vw; height:100vh; background:#fff; }
+#preview-container.fullscreen #preview-bar { display:none !important; }
+#preview-container.fullscreen #preview-frame { width:100%; height:100%; }
+.fullscreen-exit { display:none; position:fixed; top:8px; right:8px; z-index:10000; background:rgba(0,0,0,0.5); color:#fff; border:none; border-radius:50%; width:32px; height:32px; font-size:16px; cursor:pointer; line-height:32px; text-align:center; opacity:0.4; transition:opacity 0.2s; }
+.fullscreen-exit:hover { opacity:1; background:rgba(0,0,0,0.8); }
+#preview-container.fullscreen .fullscreen-exit { display:block; }
+
+/* Main content wrapper */
+#main-content { display:flex; flex-direction:column; flex:1; overflow:hidden; min-height:0; }
+
+/* Left panel (desktop: sidebar with files + chat) */
+#left-panel { display:flex; flex-direction:column; flex:1; min-height:0; }
+
+/* Chat area */
+#chat-area { flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:8px; }
+.msg { max-width:92%; padding:10px 14px; border-radius:18px; font-size:var(--easy-font-size, 15px); line-height:1.5; word-wrap:break-word; white-space:pre-wrap; animation:fadeIn 0.15s ease; }
+@keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
+.msg.user { align-self:flex-end; background:#007aff; color:#ffffff; border-bottom-right-radius:6px; }
+.msg.assistant { align-self:flex-start; background:#e9e9eb; color:#1d1d1f; border-bottom-left-radius:6px; font-family:'SF Mono',Monaco,Consolas,monospace; font-size:var(--easy-font-size, 15px); max-width:98%; }
+.msg.assistant.thinking-msg { background:#f5f5f5; color:#8e8e93; font-size:calc(var(--easy-font-size, 15px) - 1px); font-style:italic; }
+.msg.system { align-self:center; background:none; color:#86868b; font-size:12px; text-align:center; padding:4px 8px; }
+.msg.error { align-self:center; background:#fff0f0; color:#ff3b30; border:1px solid #ffcdd2; font-size:13px; }
+
+/* Thinking/loading indicator */
+.thinking { display:flex; gap:4px; padding:12px 16px; align-self:flex-start; }
+.thinking span { width:6px; height:6px; background:#c7c7cc; border-radius:50%; animation:bounce 1.2s infinite; }
+.thinking span:nth-child(2) { animation-delay:0.2s; }
+.thinking span:nth-child(3) { animation-delay:0.4s; }
+@keyframes bounce { 0%,80%,100% { transform:translateY(0); } 40% { transform:translateY(-8px); } }
+
+/* Quick actions */
+#quick-actions { display:none; padding:6px 12px; flex-shrink:0; gap:6px; justify-content:center; flex-wrap:wrap; background:#f5f5f7; border-top:1px solid #e5e5ea; }
+#quick-actions.show { display:flex; }
+.qa-btn { padding:6px 16px; border-radius:8px; border:1px solid #d2d2d7; background:#ffffff; color:#1d1d1f; font-size:14px; cursor:pointer; }
+.qa-btn:active { background:#e5e5ea; }
+.qa-btn.allow { border-color:#34c759; color:#248a3d; }
+.qa-btn.deny { border-color:#ff3b30; color:#ff3b30; }
+.qa-btn.always { border-color:#007aff; color:#007aff; font-size:12px; }
+
+/* Input bar */
+#input-bar { display:flex; align-items:flex-end; padding:8px 10px; background:#ffffff; border-top:1px solid #e5e5ea; flex-shrink:0; gap:8px; padding-bottom:max(20px, env(safe-area-inset-bottom, 20px)); }
+#msg-input { flex:1; background:#f0f0f2; color:#1d1d1f; border:1px solid #d2d2d7; border-radius:20px; padding:9px 16px; font-size:var(--easy-font-size, 15px); min-height:40px; max-height:120px; resize:none; outline:none; font-family:inherit; line-height:1.4; overflow-y:auto; scrollbar-width:none; }
+#msg-input::-webkit-scrollbar { display:none; }
+#msg-input::-webkit-resizer { display:none; }
+#msg-input:focus { background:#ffffff; border-color:#007aff; box-shadow:0 0 0 3px rgba(0,122,255,0.15); }
+#msg-input::placeholder { color:#86868b; }
+.input-btn { width:40px; height:40px; border-radius:50%; border:none; cursor:pointer; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+#upload-btn { background:none; color:#86868b; }
+#upload-btn svg { width:22px; height:22px; }
+#upload-btn:active { color:#1d1d1f; }
+#send-btn { background:#007aff; color:#fff; display:none; }
+#send-btn svg { width:20px; height:20px; }
+#send-btn:active { background:#0055d4; }
+#send-btn.show { display:flex; }
+#voice-toggle { background:none; border:none; color:#86868b; }
+#voice-toggle svg { width:26px; height:26px; }
+#voice-toggle:active { color:#1d1d1f; }
+#voice-toggle.active { color:#007aff; }
+#hold-speak { display:none; flex:1; height:40px; border-radius:20px; border:1px solid #d2d2d7; background:#f0f0f2; color:#1d1d1f; font-size:15px; cursor:pointer; text-align:center; line-height:40px; touch-action:none; -webkit-touch-callout:none; }
+#hold-speak:active, #hold-speak.recording { background:#ffecec; border-color:#ff3b30; color:#ff3b30; }
+#hold-speak.show { display:block; }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.7; } }
+
+/* Resize handles — hidden on mobile */
+.resize-handle { display:none; }
+
+/* Desktop split layout */
+@media (min-width: 768px) {
+  #main-content { flex-direction:row; }
+  #left-panel { width:35%; min-width:260px; flex:none; border-right:none; background:#ffffff; display:flex; flex-direction:column; overflow:hidden; }
+  #main-content #preview-container { flex:1; display:flex; min-width:200px; }
+  #tab-bar { display:none !important; }
+  #input-bar { display:flex !important; padding-bottom:12px; }
+  #quick-actions.show { display:flex !important; }
+  /* Finder file browser — inline on desktop */
+  #files-panel { position:static !important; width:100% !important; transform:none !important; border-left:none !important; border-right:none !important; z-index:auto !important; border-bottom:none; height:40%; flex-shrink:0; min-height:80px; overflow:hidden; }
+  #files-panel .fp-close { display:none; }
+  #files-overlay { display:none !important; }
+  /* Chat area fills remaining space */
+  #chat-area { flex:1; min-height:100px; }
+  /* Swap button visible on desktop */
+  #preview-swap { display:inline-block !important; }
+  /* Swapped layout */
+  #main-content.swapped { flex-direction:row-reverse; }
+  #main-content.swapped #left-panel { border-right:none; border-left:none; }
+  /* Resize handles */
+  .resize-handle { display:block; flex-shrink:0; }
+  .resize-h { width:5px; cursor:col-resize; background:transparent; position:relative; }
+  .resize-h::after { content:''; position:absolute; top:0; bottom:0; left:2px; width:1px; background:#e5e5ea; }
+  .resize-h:hover::after, .resize-h.active::after { width:3px; left:1px; background:#007aff; border-radius:2px; }
+  .resize-v { height:5px; cursor:row-resize; background:transparent; position:relative; }
+  .resize-v::after { content:''; position:absolute; left:0; right:0; top:2px; height:1px; background:#e5e5ea; }
+  .resize-v:hover::after, .resize-v.active::after { height:3px; top:1px; background:#007aff; border-radius:2px; }
+  #menu-overlay { background:transparent; }
+  #menu-sheet { left:auto; right:auto; width:280px; bottom:auto; top:auto; max-height:60vh; border-radius:10px; box-shadow:0 4px 24px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.06); transform:scale(0.95); opacity:0; transition:transform 0.15s ease, opacity 0.15s ease; pointer-events:none; }
+  #menu-sheet .menu-handle { display:none; }
+  #menu-sheet.show { transform:scale(1); opacity:1; pointer-events:auto; }
+}
+
+/* Welcome screen */
+#welcome-screen { display:flex; flex-direction:column; align-items:center; justify-content:center; flex:1; padding:24px 16px; overflow-y:auto; background:#f5f5f7; }
+#welcome-screen { transition:opacity 0.2s ease; }
+#welcome-screen.hidden { opacity:0; pointer-events:none; position:absolute; }
+.welcome-greeting { font-size:24px; font-weight:700; color:#1d1d1f; margin-bottom:4px; text-align:center; }
+.welcome-sub { font-size:15px; color:#86868b; margin-bottom:24px; text-align:center; line-height:1.4; }
+.welcome-cards { display:flex; flex-direction:row; gap:12px; width:100%; max-width:900px; flex-wrap:wrap; justify-content:center; }
+.welcome-card { background:#ffffff; border-radius:16px; padding:20px; cursor:pointer; border:1px solid #e5e5ea; transition:all 0.2s ease; box-shadow:0 1px 4px rgba(0,0,0,0.04); flex:1 1 200px; max-width:280px; }
+.welcome-card:hover { border-color:#007aff; box-shadow:0 2px 12px rgba(0,122,255,0.12); transform:translateY(-1px); }
+.welcome-card:active { transform:scale(0.98); }
+.welcome-card .wc-icon { font-size:32px; margin-bottom:8px; }
+.welcome-card .wc-title { font-size:16px; font-weight:600; color:#1d1d1f; margin-bottom:4px; }
+.welcome-card .wc-desc { font-size:13px; color:#86868b; line-height:1.4; }
+.welcome-card .wc-time { display:inline-block; margin-top:8px; font-size:11px; color:#007aff; background:#f0f5ff; padding:2px 8px; border-radius:10px; }
+.welcome-skip { margin-top:20px; font-size:13px; color:#86868b; background:none; border:none; cursor:pointer; text-decoration:underline; }
+.welcome-skip:hover { color:#1d1d1f; }
+@media (min-width: 768px) {
+  .welcome-cards { flex-direction:row; max-width:900px; }
+  .welcome-card { max-width:260px; }
+  .welcome-greeting { font-size:24px; }
+}
+
+/* Files panel (mobile: slide-in overlay) */
+#files-panel { position:fixed; right:0; top:0; bottom:0; width:min(320px,85vw); background:#ffffff; border-left:1px solid #e5e5ea; transform:translateX(100%); transition:transform 0.25s ease; z-index:100; display:flex; flex-direction:column; }
+#files-panel.open { transform:translateX(0); }
+#files-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.3); z-index:99; display:none; }
+#files-overlay.show { display:block; }
+.fp-header { display:flex; align-items:center; padding:8px 12px; border-bottom:1px solid #e5e5ea; gap:8px; background:#f5f5f7; }
+.fp-header .fp-title { flex:1; font-size:13px; font-weight:600; color:#1d1d1f; }
+.fp-close { background:none; border:none; color:#86868b; font-size:20px; cursor:pointer; padding:4px; }
+.fp-collapse { background:none; border:none; color:#86868b; font-size:12px; cursor:pointer; padding:4px 6px; transition:transform 0.2s; }
+#files-panel.collapsed .fp-collapse { transform:rotate(-90deg); }
+#files-panel.collapsed .fp-path,
+#files-panel.collapsed .fp-list,
+#files-panel.collapsed .fp-actions { display:none !important; }
+#files-panel.collapsed { height:auto !important; min-height:0 !important; flex-shrink:0; }
+#files-panel.collapsed + .resize-v { display:none !important; }
+.fp-path { padding:4px 12px; font-size:11px; color:#86868b; background:#fafafa; border-bottom:1px solid #e5e5ea; word-break:break-all; font-family:'SF Mono',Monaco,monospace; }
+.fp-list { flex:1; overflow-y:auto; padding:0; }
+.fp-col-header { display:flex; align-items:center; padding:4px 12px; font-size:11px; color:#86868b; border-bottom:1px solid #e5e5ea; background:#fafafa; user-select:none; }
+.fp-col-header .name { flex:1; }
+.fp-col-header .date { width:90px; text-align:right; flex-shrink:0; }
+.fp-item { display:flex; align-items:center; padding:4px 12px; gap:6px; cursor:pointer; font-size:13px; color:#1d1d1f; border-bottom:1px solid #f0f0f2; }
+.fp-item:nth-child(even) { background:#fafafa; }
+.fp-item:hover { background:#e8f0fe; }
+.fp-item:active { background:#d0e0fc; }
+.fp-item .icon { font-size:14px; width:16px; text-align:center; flex-shrink:0; }
+.fp-item .name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fp-item .date { font-size:11px; color:#86868b; flex-shrink:0; width:90px; text-align:right; white-space:nowrap; }
+.fp-actions { display:flex; padding:6px 8px; gap:6px; border-top:1px solid #e5e5ea; background:#f5f5f7; }
+.fp-actions button { flex:1; padding:5px; border-radius:6px; border:1px solid #d2d2d7; background:#ffffff; color:#1d1d1f; font-size:12px; cursor:pointer; }
+.fp-actions button:active { background:#e5e5ea; }
+
+/* Apps panel */
+#apps-panel { position:fixed; left:0; top:0; bottom:0; width:min(300px,80vw); background:#ffffff; border-right:1px solid #e5e5ea; transform:translateX(-100%); transition:transform 0.25s ease; z-index:100; display:flex; flex-direction:column; }
+#apps-panel.open { transform:translateX(0); }
+.app-item { display:flex; align-items:center; padding:10px 12px; gap:8px; border-bottom:1px solid #e5e5ea; cursor:pointer; font-size:14px; }
+.app-item:active { background:#f0f0f2; }
+.app-item .dot { width:8px; height:8px; border-radius:50%; background:#34c759; flex-shrink:0; }
+.app-item .app-name { flex:1; }
+.app-item .app-link { font-size:12px; color:#86868b; }
+
+/* New project modal */
+#new-project-modal { position:fixed; inset:0; background:rgba(0,0,0,0.3); z-index:200; display:none; align-items:center; justify-content:center; padding:20px; }
+#new-project-modal.show { display:flex; }
+.modal-box { background:#ffffff; border-radius:14px; padding:24px; width:min(360px,100%); box-shadow:0 10px 40px rgba(0,0,0,0.15); }
+.modal-box h3 { font-size:17px; margin-bottom:16px; color:#1d1d1f; }
+.modal-box input { width:100%; padding:10px 14px; border-radius:8px; border:1px solid #d2d2d7; background:#f5f5f7; color:#1d1d1f; font-size:15px; outline:none; margin-bottom:16px; }
+.modal-box input:focus { border-color:#007aff; box-shadow:0 0 0 3px rgba(0,122,255,0.15); }
+.modal-box .modal-btns { display:flex; gap:8px; justify-content:flex-end; }
+.modal-box .modal-btns button { padding:8px 20px; border-radius:8px; border:none; font-size:14px; cursor:pointer; }
+.modal-cancel { background:#e5e5ea; color:#1d1d1f; }
+.modal-ok { background:#007aff; color:white; }
+
+/* Voice overlay */
+#voice-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.4); z-index:300; display:none; align-items:center; justify-content:center; flex-direction:column; gap:16px; }
+#voice-overlay.show { display:flex; }
+#voice-overlay .vo-text { font-size:18px; color:#ffffff; max-width:80%; text-align:center; min-height:28px; }
+#voice-overlay .vo-status { font-size:14px; color:#d2d2d7; }
+#voice-overlay .vo-cancel { padding:8px 24px; border-radius:8px; border:1px solid rgba(255,255,255,0.3); background:rgba(255,255,255,0.15); color:#ffffff; font-size:14px; cursor:pointer; }
+
+/* Scrollbar — Mac style */
+::-webkit-scrollbar { width:6px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:#c7c7cc; border-radius:3px; }
+::-webkit-scrollbar-thumb:hover { background:#a8a8ad; }
+
+/* Status indicator */
+#status-bar { display:none; }
+#status-bar .status-dot { width:6px; height:6px; border-radius:50%; flex-shrink:0; }
+#status-bar .status-dot.green { background:#34c759; }
+#status-bar .status-dot.yellow { background:#ff9f0a; animation:pulse 1.5s infinite; }
+#status-bar .status-dot.red { background:#ff3b30; }
+#status-bar .status-dot.blue { background:#007aff; animation:pulse 1.5s infinite; }
+
+/* Tool activity indicator */
+.msg.tool-activity { align-self:flex-start; background:#f5f5f7; color:#86868b; font-size:12px; padding:6px 12px; border:1px solid #e5e5ea; border-radius:8px; display:flex; align-items:center; gap:6px; }
+.msg.tool-activity .tool-icon { font-size:14px; }
+.msg.tool-activity.done { opacity:0.5; transition:opacity 0.5s; }
+.msg.tool-activity.done .tool-icon { color:#34c759; }
+.tool-detail { display:none; font-size:11px; color:#86868b; margin-top:4px; white-space:pre-wrap; max-height:120px; overflow-y:auto; }
+.tool-detail.show { display:block; }
+
+/* Numbered choice buttons */
+.choice-btn { padding:8px 16px; border-radius:8px; border:1px solid #d2d2d7; background:#ffffff; color:#1d1d1f; font-size:14px; cursor:pointer; text-align:left; width:100%; }
+.choice-btn:active { background:#e5e5ea; }
+.choice-btn .choice-num { color:#007aff; font-weight:600; margin-right:6px; }
+.choice-btn.type-in { border-color:#007aff; color:#007aff; }
+
+/* Cancel/Stop button */
+#cancel-btn { display:none; background:#ffecec; color:#ff3b30; }
+#cancel-btn svg { width:18px; height:18px; }
+#cancel-btn:active { background:#ffd4d4; }
+#cancel-btn.show { display:flex; }
+
+/* Restart button */
+.restart-btn { display:inline-block; padding:6px 16px; border-radius:8px; border:1px solid #d2d2d7; background:#ffffff; color:#007aff; font-size:13px; cursor:pointer; margin-top:4px; }
+.restart-btn:active { background:#e5e5ea; }
+
+/* Permission context */
+.perm-context { font-size:12px; color:#86868b; margin-bottom:6px; line-height:1.4; }
+.perm-context strong { color:#1d1d1f; }
+.perm-context code { background:#f0f0f2; padding:1px 4px; border-radius:3px; font-size:11px; color:#007aff; }
+
+/* Timeout warning */
+.msg.warning { align-self:center; background:#fff8e1; color:#f57c00; border:1px solid #ffe082; font-size:12px; }
+
+/* Debug log overlay */
+#debug-log { position:fixed; bottom:0; left:0; right:0; max-height:35vh; overflow-y:auto; background:rgba(0,0,0,0.9); color:#0f0; font-family:monospace; font-size:10px; padding:4px 6px; z-index:9999; display:none; white-space:pre-wrap; word-break:break-all; line-height:1.3; }
+#debug-log.show { display:block; }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- Top bar -->
+  <div id="top-bar">
+    <img class="logo" src="./icons/favicon.svg" alt="Hopcode" style="width:24px;height:24px;">
+    <span class="title">Hopcode<span class="subtitle">Easy</span></span>
+    <button class="top-btn" id="apps-btn" title="My Apps">Apps</button>
+    <button class="top-btn primary" id="pro-btn" title="Switch to Pro Mode">Pro</button>
+  </div>
+
+  <!-- Project bar -->
+  <div id="project-bar">
+    <div class="project-chip add" id="new-project-btn">+ New</div>
+  </div>
+
+  <!-- Status bar -->
+  <div id="status-bar">
+    <span class="status-dot yellow" id="status-dot"></span>
+    <span id="status-text">Starting Claude...</span>
+  </div>
+
+  <!-- Tab bar (shown when preview URL exists) -->
+  <div id="tab-bar">
+    <div class="tab-item active" id="tab-chat"><span data-i18n="easy.tab.chat">Chat</span><span class="tab-badge" id="chat-badge"></span></div>
+    <div class="tab-item" id="tab-preview"><span data-i18n="easy.tab.preview">Preview</span><span class="tab-badge" id="preview-badge"></span></div>
+  </div>
+
+  <!-- Main content (side-by-side on desktop) -->
+  <div id="main-content">
+  <div id="left-panel">
+    <!-- Files panel (Finder-style on desktop, slide-in on mobile) -->
+    <div id="files-panel">
+      <div class="fp-header">
+        <span class="fp-title">Files</span>
+        <button class="fp-collapse" id="fp-collapse" title="Collapse">&#x25BC;</button>
+        <button class="fp-close" id="fp-close">&times;</button>
+      </div>
+      <div class="fp-path" id="fp-path">~</div>
+      <div class="fp-list" id="fp-list"></div>
+      <div class="fp-actions">
+        <button id="fp-upload-btn">Upload</button>
+        <button id="fp-mkdir-btn">New Folder</button>
+      </div>
+    </div>
+    <div class="resize-handle resize-v" id="resize-files-chat"></div>
+    <!-- Welcome screen (placeholder, content moved to preview guide) -->
+    <div id="welcome-screen" style="display:none"></div>
+    <!-- Chat area -->
+    <div id="chat-area">
+    </div>
+    <!-- Quick actions -->
+    <div id="quick-actions"></div>
+    <!-- Input bar -->
+    <div id="input-bar">
+    <button class="input-btn" id="menu-btn" title="Menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
+    <button class="input-btn" id="voice-toggle" title="Voice/Keyboard"><svg id="vt-mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg><svg id="vt-kb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display:none"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="6" y1="8" x2="6" y2="8.01"/><line x1="10" y1="8" x2="10" y2="8.01"/><line x1="14" y1="8" x2="14" y2="8.01"/><line x1="18" y1="8" x2="18" y2="8.01"/><line x1="6" y1="12" x2="6" y2="12.01"/><line x1="10" y1="12" x2="10" y2="12.01"/><line x1="14" y1="12" x2="14" y2="12.01"/><line x1="18" y1="12" x2="18" y2="12.01"/><line x1="8" y1="16" x2="16" y2="16"/></svg></button>
+    <button class="input-btn" id="cancel-btn" title="Stop"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>
+    <button id="hold-speak">Hold to speak</button>
+    <textarea id="msg-input" rows="1" placeholder="Message..." autocomplete="off"></textarea>
+    <button class="input-btn" id="upload-btn" title="Upload file"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M12 16V8m0 0l-3 3m3-3l3 3"/></svg></button>
+    <button class="input-btn" id="send-btn" title="Send"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg></button>
+  </div>
+  </div><!-- /left-panel -->
+  <div class="resize-handle resize-h" id="resize-chat-preview"></div>
+  <!-- Preview container -->
+  <div id="preview-container">
+    <button class="fullscreen-exit" id="fullscreen-exit">&#x2716;</button>
+    <div id="preview-bar">
+      <div id="preview-nav"></div>
+      <div id="preview-bar-actions">
+        <button class="preview-action" id="preview-swap" title="Swap panels" style="display:none;">&#x21C4;</button>
+        <button class="preview-action" id="preview-share" data-i18n-title="easy.preview.share_title" data-i18n="easy.preview.share">Share</button>
+        <button class="preview-action" id="preview-fullscreen" data-i18n-title="easy.preview.fullscreen">&#x26F6;</button>
+        <button class="preview-action" id="preview-refresh" data-i18n="easy.preview.refresh">Refresh</button>
+        <button class="preview-action" id="preview-open" data-i18n="easy.preview.open">Open</button>
+      </div>
+    </div>
+    <div id="preview-guide">
+      <div id="preview-welcome">
+        <div class="welcome-greeting" data-i18n="easy.welcome.greeting">Welcome to Hopcode</div>
+        <div class="welcome-sub" data-i18n="easy.welcome.sub">Pick a project and build something amazing with AI in under 5 minutes.</div>
+        <div class="welcome-cards">
+          <div class="welcome-card" data-task="dashboard">
+            <div class="wc-icon">&#x1F4CA;</div>
+            <div class="wc-title" data-i18n="easy.welcome.dashboard.title">Data Dashboard</div>
+            <div class="wc-desc" data-i18n="easy.welcome.dashboard.desc">A beautiful sales analytics dashboard with interactive charts, KPI cards, and trend analysis.</div>
+            <div class="wc-time" data-i18n="easy.welcome.dashboard.time">~3 min</div>
+          </div>
+          <div class="welcome-card" data-task="game">
+            <div class="wc-icon">&#x1F3AE;</div>
+            <div class="wc-title" data-i18n="easy.welcome.game.title">Classic Snake Game</div>
+            <div class="wc-desc" data-i18n="easy.welcome.game.desc">A fully playable Snake game with score tracking, speed levels, and smooth animations.</div>
+            <div class="wc-time" data-i18n="easy.welcome.game.time">~2 min</div>
+          </div>
+          <div class="welcome-card" data-task="portfolio">
+            <div class="wc-icon">&#x1F310;</div>
+            <div class="wc-title" data-i18n="easy.welcome.portfolio.title">Personal Portfolio</div>
+            <div class="wc-desc" data-i18n="easy.welcome.portfolio.desc">A stunning personal website with smooth scroll animations, responsive design, and modern aesthetic.</div>
+            <div class="wc-time" data-i18n="easy.welcome.portfolio.time">~3 min</div>
+          </div>
+        </div>
+        <button class="welcome-skip" id="welcome-skip" data-i18n="easy.welcome.skip">Or just start chatting</button>
+      </div>
+    </div>
+    <iframe id="preview-frame" allow="clipboard-read; clipboard-write"></iframe>
+  </div>
+  </div><!-- /main-content -->
+</div><!-- /app -->
+
+<!-- Bottom menu sheet -->
+<div id="menu-overlay"></div>
+<div id="menu-sheet">
+  <div class="menu-handle"></div>
+  <div class="menu-status">
+    <span class="status-dot yellow" id="menu-status-dot"></span>
+    <span class="menu-status-label" id="menu-status-text">Starting...</span>
+  </div>
+  <div class="menu-divider"></div>
+  <div class="menu-section">
+    <div class="menu-item" id="menu-home"><span class="mi-icon">&#x1F3E0;</span><span class="mi-label" data-i18n="easy.menu.home">Home</span><span class="mi-arrow">&#x203A;</span></div>
+    <div class="menu-item" id="menu-files"><span class="mi-icon">&#x1F4C1;</span><span class="mi-label" data-i18n="easy.menu.files">Files</span><span class="mi-arrow">&#x203A;</span></div>
+    <div class="menu-item" id="menu-apps"><span class="mi-icon">&#x2B50;</span><span class="mi-label" data-i18n="easy.menu.apps">Apps</span><span class="mi-arrow">&#x203A;</span></div>
+  </div>
+  <div class="menu-divider"></div>
+  <div class="menu-section">
+    <div class="menu-font-row">
+      <span class="mf-label" data-i18n="easy.menu.font_size">Font Size</span>
+      <button class="mf-btn" id="menu-font-down">A&#x2212;</button>
+      <span class="mf-val" id="menu-font-val">15px</span>
+      <button class="mf-btn" id="menu-font-up">A+</button>
+    </div>
+  </div>
+  <div class="menu-divider"></div>
+  <div class="menu-section">
+    <div class="menu-item" id="menu-projects-title" style="cursor:pointer;"><span class="mi-icon">&#x1F4C2;</span><span class="mi-label" data-i18n="easy.menu.projects">Projects</span><span class="mi-arrow" id="menu-projects-arrow" style="font-size:10px;transition:transform 0.2s;">&#x25B8;</span></div>
+    <div id="menu-projects-wrap">
+      <div id="menu-projects"></div>
+      <div class="menu-item" id="menu-new-project"><span class="mi-icon" style="color:#34c759;">+</span><span class="mi-label" style="color:#34c759;" data-i18n="easy.menu.new_project">New Project</span></div>
+    </div>
+  </div>
+  <div class="menu-divider"></div>
+  <div class="menu-section">
+    <div class="menu-item" onclick="_setLang(_lang==='en'?'zh':'en')"><span class="mi-icon">&#x1F310;</span><span class="mi-label" data-i18n="easy.menu.lang">Language</span><span class="mi-arrow" id="menu-lang-val" style="font-size:12px;color:#86868b;"></span></div>
+    <div class="menu-item" id="menu-debug"><span class="mi-icon">&#x1F41B;</span><span class="mi-label">Debug Log</span></div>
+  </div>
+</div>
+
+<!-- Files overlay (mobile only) -->
+<div id="files-overlay"></div>
+
+<!-- Apps panel -->
+<div id="apps-panel">
+  <div class="fp-header">
+    <span class="fp-title">My Apps</span>
+    <button class="fp-close" id="apps-close">&times;</button>
+  </div>
+  <div id="apps-list" style="flex:1;overflow-y:auto;"></div>
+</div>
+
+<!-- New project modal -->
+<div id="new-project-modal">
+  <div class="modal-box">
+    <h3>New Project</h3>
+    <input id="project-name-input" placeholder="Project name (e.g. sales-report)" autocomplete="off">
+    <div class="modal-btns">
+      <button class="modal-cancel" id="modal-cancel">Cancel</button>
+      <button class="modal-ok" id="modal-ok">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Voice overlay -->
+<div id="voice-overlay">
+  <div class="vo-status" id="vo-status">Recording...</div>
+  <div class="vo-text" id="vo-text"></div>
+  <button class="vo-cancel" id="vo-cancel">Cancel</button>
+</div>
+
+<!-- Hidden file input for uploads -->
+<input type="file" id="file-input-hidden" multiple style="display:none">
+
+<!-- Debug log -->
+<div id="debug-log"></div>
+
+<script>
+(function() {
+  'use strict';
+  var sessionId = new URLSearchParams(location.search).get('session');
+  if (!sessionId) return;
+
+  var username = ${JSON.stringify(auth.username)};
+  var linuxUser = ${JSON.stringify(auth.linuxUser || '')};
+  var homeDir = linuxUser ? (linuxUser === 'root' ? '/root' : '/home/' + linuxUser) : '/root';
+
+  // Debug log
+  var dbgEl = document.getElementById('debug-log');
+  var dbgBtn = document.getElementById('debug-toggle');
+  var dbgLines = [];
+  function dbg(msg) {
+    console.log('[easy] ' + msg);
+    dbgLines.push(msg);
+    if (dbgLines.length > 80) dbgLines.shift();
+    if (dbgEl) dbgEl.textContent = dbgLines.join('\\n');
+    if (dbgEl) dbgEl.scrollTop = dbgEl.scrollHeight;
+  }
+  var menuDebugBtn = document.getElementById('menu-debug');
+  if (menuDebugBtn) menuDebugBtn.addEventListener('click', function() {
+    if (dbgEl) dbgEl.classList.toggle('show');
+    menuHide();
+  });
+
+  // DOM refs
+  var chatArea = document.getElementById('chat-area');
+  var msgInput = document.getElementById('msg-input');
+  var sendBtn = document.getElementById('send-btn');
+  var voiceToggle = document.getElementById('voice-toggle');
+  var holdSpeak = document.getElementById('hold-speak');
+  var vtMicIcon = document.getElementById('vt-mic-icon');
+  var vtKbIcon = document.getElementById('vt-kb-icon');
+  var proBtn = document.getElementById('pro-btn');
+  var appsBtn = document.getElementById('apps-btn');
+  var filesPanel = document.getElementById('files-panel');
+  var filesOverlay = document.getElementById('files-overlay');
+  var fpList = document.getElementById('fp-list');
+  var fpPath = document.getElementById('fp-path');
+  var fpClose = document.getElementById('fp-close');
+  var fpUploadBtn = document.getElementById('fp-upload-btn');
+  var fpMkdirBtn = document.getElementById('fp-mkdir-btn');
+  var fileInputHidden = document.getElementById('file-input-hidden');
+  var appsPanel = document.getElementById('apps-panel');
+  var appsList = document.getElementById('apps-list');
+  var appsClose = document.getElementById('apps-close');
+  var newProjectBtn = document.getElementById('new-project-btn');
+  var projectBar = document.getElementById('project-bar');
+  var newProjectModal = document.getElementById('new-project-modal');
+  var projectNameInput = document.getElementById('project-name-input');
+  var modalCancel = document.getElementById('modal-cancel');
+  var modalOk = document.getElementById('modal-ok');
+  var voiceOverlay = document.getElementById('voice-overlay');
+  var voStatus = document.getElementById('vo-status');
+  var voText = document.getElementById('vo-text');
+  var voCancel = document.getElementById('vo-cancel');
+
+  // Menu sheet refs
+  var menuOverlay = document.getElementById('menu-overlay');
+  var menuSheet = document.getElementById('menu-sheet');
+  var menuStatusDot = document.getElementById('menu-status-dot');
+  var menuStatusText = document.getElementById('menu-status-text');
+  var menuProjects = document.getElementById('menu-projects');
+
+  function menuShow(anchorEl) {
+    if (anchorEl && window.innerWidth >= 768) {
+      var r = anchorEl.getBoundingClientRect();
+      menuSheet.style.position = 'fixed';
+      menuSheet.style.left = r.left + 'px';
+      menuSheet.style.bottom = (window.innerHeight - r.top + 4) + 'px';
+      menuSheet.style.top = 'auto';
+    } else {
+      menuSheet.style.position = '';
+      menuSheet.style.left = '';
+      menuSheet.style.bottom = '';
+      menuSheet.style.top = '';
+    }
+    menuOverlay.classList.add('show');
+    menuSheet.classList.add('show');
+  }
+  function menuHide() {
+    menuOverlay.classList.remove('show');
+    menuSheet.classList.remove('show');
+  }
+
+  var menuBtn = document.getElementById('menu-btn');
+  menuBtn.addEventListener('click', function(e) {
+    e.preventDefault(); e.stopPropagation(); menuShow(menuBtn);
+  });
+  var menuProjectsTitle = document.getElementById('menu-projects-title');
+  var menuProjectsWrap = document.getElementById('menu-projects-wrap');
+  var menuProjectsArrow = document.getElementById('menu-projects-arrow');
+  menuProjectsTitle.addEventListener('click', function() {
+    var isOpen = menuProjectsWrap.classList.toggle('open');
+    menuProjectsArrow.style.transform = isOpen ? 'rotate(90deg)' : '';
+  });
+  menuOverlay.addEventListener('click', function() { menuHide(); });
+  document.getElementById('menu-home').addEventListener('click', function() {
+    menuHide();
+    window.location.href = '/terminal';
+  });
+  document.getElementById('menu-files').addEventListener('click', function() {
+    menuHide();
+    if (filesPanel) filesPanel.classList.toggle('open');
+  });
+  document.getElementById('menu-apps').addEventListener('click', function() {
+    menuHide();
+    if (appsPanel) appsPanel.classList.toggle('show');
+  });
+  document.getElementById('menu-new-project').addEventListener('click', function() {
+    menuHide();
+    if (newProjectModal) newProjectModal.classList.add('show');
+  });
+
+  // Font size controls — shared localStorage key with Pro Mode
+  var easyFontKey = 'hopcode-font-size';
+  var savedEasyFont = parseInt(localStorage.getItem(easyFontKey));
+  var easyFontSize = savedEasyFont > 0 ? savedEasyFont : 15;
+  var menuFontVal = document.getElementById('menu-font-val');
+
+  function applyEasyFontSize() {
+    document.querySelectorAll('.msg').forEach(function(el) { el.style.fontSize = easyFontSize + 'px'; });
+    document.getElementById('msg-input').style.fontSize = easyFontSize + 'px';
+    // Set CSS custom property so new messages also get the size
+    document.documentElement.style.setProperty('--easy-font-size', easyFontSize + 'px');
+    menuFontVal.textContent = easyFontSize + 'px';
+    localStorage.setItem(easyFontKey, String(easyFontSize));
+  }
+  // Apply saved size on load
+  applyEasyFontSize();
+
+  document.getElementById('menu-font-down').addEventListener('click', function() {
+    easyFontSize = Math.max(10, easyFontSize - 1);
+    applyEasyFontSize();
+  });
+  document.getElementById('menu-font-up').addEventListener('click', function() {
+    easyFontSize = Math.min(30, easyFontSize + 1);
+    applyEasyFontSize();
+  });
+
+  // ---- Welcome screen (in preview panel) ----
+  var welcomeEl = document.getElementById('preview-welcome');
+  var welcomeSkip = document.getElementById('welcome-skip');
+  var welcomeActive = true;
+  var welcomeTaskPrompts = {
+    dashboard: 'Build me an impressive interactive sales analytics dashboard as a single HTML file. Include: 1) A header with company name and date range selector, 2) KPI cards showing Total Revenue, Orders, Avg Order Value, and Growth % with colored indicators, 3) A revenue trend line chart (use canvas or SVG, no external libs), 4) A pie/donut chart for sales by category, 5) A sortable top-10 products table with sparkline bars, 6) Make it responsive with a professional dark theme and smooth hover animations. Use realistic sample data for a tech accessories store. The file should be completely self-contained with no external dependencies.',
+    game: 'Build me a polished Snake game as a single HTML file. Include: 1) A canvas-based game board with a grid, 2) Smooth snake movement with arrow key and swipe controls (mobile friendly), 3) Score display and high score tracking (localStorage), 4) Speed increases every 5 points, 5) Game over screen with restart button, 6) A clean modern UI with dark theme, subtle grid lines, glowing snake effect, and food animations, 7) Start screen with instructions. Make it completely self-contained, no external dependencies. Make the visual quality impressive with gradients and subtle effects.',
+    portfolio: 'Build me a stunning personal portfolio website as a single HTML file. Include: 1) A hero section with animated gradient background, name \"Alex Chen\" and title \"Creative Developer\", with a subtle floating particle effect, 2) An About section with a brief bio and skill tags with hover effects, 3) A Projects section with 3 project cards that have image placeholders, hover lift animations and tech stack badges, 4) A Contact section with social links and a simple contact form (no backend needed), 5) Smooth scroll navigation with a sticky header that changes on scroll, 6) Fully responsive, modern glassmorphism design, dark theme. No external dependencies, all CSS and JS inline.'
+  };
+
+  function dismissWelcome() {
+    if (!welcomeActive) return;
+    welcomeActive = false;
+    welcomeEl.style.display = 'none';
+  }
+
+  // Don't dismiss welcome based on chat history — only dismiss when preview has content
+
+  // Card click → send prompt + switch to chat
+  var welcomeCards = document.querySelectorAll('.welcome-card');
+  for (var wci = 0; wci < welcomeCards.length; wci++) {
+    welcomeCards[wci].addEventListener('click', function(e) {
+      var task = this.getAttribute('data-task');
+      var prompt = welcomeTaskPrompts[task];
+      if (!prompt) return;
+      dismissWelcome();
+      // Switch to chat tab
+      if (tabChat) tabChat.click();
+      // Wait for Claude to be ready and WS connected, then send
+      function trySend(attempts) {
+        if (!attempts) attempts = 0;
+        if (attempts > 30) { dbg('trySend gave up after 30 attempts'); return; }
+        if (state === 'ready' && ws && ws.readyState === 1) {
+          addUserMsg(prompt);
+          currentAssistantMsg = null;
+          ws.send(JSON.stringify({ type: 'send', text: prompt }));
+          dbg('trySend sent prompt: ' + prompt.substring(0, 40));
+        } else {
+          dbg('trySend waiting: state=' + state + ' ws=' + (ws ? ws.readyState : 'null') + ' attempt=' + attempts);
+          setTimeout(function() { trySend(attempts + 1); }, 500);
+        }
+      }
+      trySend(0);
+    });
+  }
+
+  welcomeSkip.addEventListener('click', function() {
+    dismissWelcome();
+    if (tabChat) tabChat.click();
+    msgInput.focus();
+  });
+
+  // Preview tab refs
+  var tabBar = document.getElementById('tab-bar');
+  var tabChat = document.getElementById('tab-chat');
+  var tabPreview = document.getElementById('tab-preview');
+  var chatBadge = document.getElementById('chat-badge');
+  var previewBadge = document.getElementById('preview-badge');
+  var previewContainer = document.getElementById('preview-container');
+  var previewFrame = document.getElementById('preview-frame');
+  var previewRefreshBtn = document.getElementById('preview-refresh');
+  var previewOpenBtn = document.getElementById('preview-open');
+  var currentPreviewUrl = '';
+  var previewUrls = []; // all detected URLs, newest first
+  var activeTab = 'chat'; // 'chat' | 'preview'
+
+  function isDesktop() { return window.innerWidth >= 768; }
+
+  function showTab(tab) {
+    activeTab = tab;
+    if (isDesktop()) {
+      // Desktop: both always visible, just update tab highlight
+      chatArea.style.display = 'flex';
+      previewContainer.classList.add('show');
+      tabChat.classList.toggle('active', tab === 'chat');
+      tabPreview.classList.toggle('active', tab === 'preview');
+      return;
+    }
+    var leftPanel = document.getElementById('left-panel');
+    if (tab === 'chat') {
+      leftPanel.style.display = 'flex';
+      previewContainer.classList.remove('show');
+      tabChat.classList.add('active');
+      tabPreview.classList.remove('active');
+      chatBadge.classList.remove('show');
+    } else {
+      leftPanel.style.display = 'none';
+      previewContainer.classList.add('show');
+      tabPreview.classList.add('active');
+      tabChat.classList.remove('active');
+      previewBadge.classList.remove('show');
+    }
+  }
+
+  // Hard-refresh iframe: blank it first, then reload with cache-bust
+  function hardRefreshPreview(url) {
+    // Remove and re-create iframe to guarantee a full reload
+    // Setting .src alone may not work after in-iframe navigation
+    var parent = previewFrame.parentNode;
+    var newFrame = document.createElement('iframe');
+    newFrame.id = 'preview-frame';
+    newFrame.className = previewFrame.className;
+    var sep = url.indexOf('?') >= 0 ? '&' : '?';
+    newFrame.src = url + sep + '_t=' + Date.now();
+    parent.replaceChild(newFrame, previewFrame);
+    previewFrame = newFrame;
+  }
+
+  var previewNav = document.getElementById('preview-nav');
+  var MAX_PREVIEW_PILLS = 6;
+
+  var previewTitles = {}; // url -> page title
+  function pillLabel(url) {
+    if (previewTitles[url]) return previewTitles[url];
+    try {
+      var u = new URL(url);
+      var port = u.port || (u.protocol === 'https:' ? '443' : '80');
+      var p = u.pathname.replace(/\\/+$/, '');
+      if (p && p !== '' && p !== '/index.html') return p.replace(/^.*\\//, '');
+      return ':' + port;
+    } catch(e) { return url.substring(0, 20); }
+  }
+
+  function renderPreviewNav() {
+    previewNav.innerHTML = '';
+    var shown = previewUrls.slice(0, MAX_PREVIEW_PILLS);
+    for (var i = 0; i < shown.length; i++) {
+      (function(url) {
+        var pill = document.createElement('span');
+        pill.className = 'preview-pill' + (url === currentPreviewUrl ? ' active' : '');
+        pill.textContent = pillLabel(url);
+        pill.title = url;
+        pill.addEventListener('click', function() {
+          currentPreviewUrl = url;
+          hardRefreshPreview(url);
+          previewFrame.classList.add('loaded');
+          document.getElementById('preview-guide').style.display = 'none';
+          if (welcomeActive) dismissWelcome();
+          renderPreviewNav();
+        });
+        previewNav.appendChild(pill);
+      })(shown[i]);
+    }
+    // Welcome pill (always shown when there are link pills, so user can switch back)
+    if (previewUrls.length > 0 || !currentPreviewUrl) {
+      var wp = document.createElement('span');
+      wp.className = 'preview-pill welcome-pill' + (!currentPreviewUrl ? ' active' : '');
+      wp.textContent = '\\u2728 Get Started';
+      wp.addEventListener('click', function() {
+        previewFrame.classList.remove('loaded');
+        document.getElementById('preview-guide').style.display = '';
+        // Restore welcome cards if they were dismissed
+        welcomeEl.style.display = '';
+        welcomeActive = true;
+        currentPreviewUrl = '';
+        renderPreviewNav();
+      });
+      previewNav.appendChild(wp);
+    }
+    // Show/hide action buttons based on whether there are URLs
+    document.getElementById('preview-bar-actions').style.display = previewUrls.length > 0 ? 'flex' : 'none';
+  }
+
+  function setPreviewUrl(url, forceReload) {
+    if (!url) return;
+    // Remove duplicate if exists, then add to front (newest first)
+    var idx = previewUrls.indexOf(url);
+    if (idx >= 0) previewUrls.splice(idx, 1);
+    previewUrls.unshift(url);
+    // Trim to max
+    if (previewUrls.length > MAX_PREVIEW_PILLS) previewUrls.length = MAX_PREVIEW_PILLS;
+    // Load the URL — hard refresh to bypass all caches
+    if (url !== currentPreviewUrl || forceReload) {
+      currentPreviewUrl = url;
+      hardRefreshPreview(url);
+    }
+    previewFrame.classList.add('loaded');
+    document.getElementById('preview-guide').style.display = 'none';
+    if (welcomeActive) dismissWelcome();
+    renderPreviewNav();
+    // Show badge on preview tab if we're on chat
+    if (activeTab === 'chat') {
+      previewBadge.classList.add('show');
+    }
+    // Persist preview URLs
+    try { localStorage.setItem('easy_preview_' + sessionId, JSON.stringify({ urls: previewUrls, current: currentPreviewUrl })); } catch(e) {}
+  }
+
+  // Restore preview URLs from localStorage on load
+  try {
+    var savedPreview = JSON.parse(localStorage.getItem('easy_preview_' + sessionId) || '');
+    if (savedPreview && savedPreview.urls && savedPreview.urls.length > 0) {
+      previewUrls = savedPreview.urls;
+      currentPreviewUrl = savedPreview.current || previewUrls[0];
+      hardRefreshPreview(currentPreviewUrl);
+      previewFrame.classList.add('loaded');
+      document.getElementById('preview-guide').style.display = 'none';
+      renderPreviewNav();
+    }
+  } catch(e) {}
+
+  // Extract URL from text that looks like a generated site (localhost, tunnel, /serve/ etc.)
+  function detectPreviewUrl(text) {
+    var fixed = joinSplitUrls(text);
+    // Check for /serve/ relative paths first (our built-in static serving)
+    var serveMatch = fixed.match(/\\/serve\\/[^\\s<>'"\`]+/g);
+    if (serveMatch) {
+      return serveMatch[0].replace(/[.,;:!?)\`]+$/, '');
+    }
+    var urlMatch = fixed.match(/https?:\\/\\/[^\\s<>'"\`]+/g);
+    if (!urlMatch) return null;
+    for (var i = 0; i < urlMatch.length; i++) {
+      var u = urlMatch[i].replace(/[.,;:!?)]+$/, '');
+      // Match localhost, *.trycloudflare.com, *.ngrok.io, or similar tunnel/dev URLs
+      if (/localhost|127\\.0\\.0\\.1|trycloudflare|ngrok|loca\\.lt|\\d+\\.\\d+\\.\\d+\\.\\d+:\\d+/.test(u)) {
+        return u;
+      }
+    }
+    // If none matched known patterns, return last URL (likely the one Claude just generated)
+    return urlMatch[urlMatch.length - 1].replace(/[.,;:!?)]+$/, '');
+  }
+
+  tabChat.addEventListener('click', function() { showTab('chat'); });
+  tabPreview.addEventListener('click', function() { showTab('preview'); });
+
+  // On new session (welcome active), start on preview tab (mobile) so cards are visible
+  if (welcomeActive) {
+    showTab('preview');
+  }
+
+  // Desktop: init side-by-side and handle resize
+  var desktopFilesLoaded = false;
+  function applyDesktopLayout() {
+    if (isDesktop()) {
+      chatArea.style.display = 'flex';
+      previewContainer.classList.add('show');
+      document.getElementById('input-bar').style.display = '';
+      document.getElementById('quick-actions').style.display = '';
+      // Auto-load files in Finder panel on desktop (deferred until loadFiles is defined)
+      if (!desktopFilesLoaded && window._loadFiles) {
+        desktopFilesLoaded = true;
+        window._loadFiles('');
+      }
+    } else {
+      // Re-apply current tab for mobile
+      showTab(activeTab);
+    }
+  }
+  applyDesktopLayout();
+  window.addEventListener('resize', applyDesktopLayout);
+  // Capture page title from iframe after load
+  function capturePreviewTitle() {
+    try {
+      var title = previewFrame.contentDocument && previewFrame.contentDocument.title;
+      if (title && currentPreviewUrl) {
+        previewTitles[currentPreviewUrl] = title;
+        renderPreviewNav();
+      }
+    } catch(e) {} // cross-origin will throw
+  }
+  previewFrame.addEventListener('load', function() { setTimeout(capturePreviewTitle, 300); });
+  // Initial pill render
+  renderPreviewNav();
+  var previewFullscreenBtn = document.getElementById('preview-fullscreen');
+  previewRefreshBtn.addEventListener('click', function() {
+    if (currentPreviewUrl) hardRefreshPreview(currentPreviewUrl);
+  });
+  previewOpenBtn.addEventListener('click', function() {
+    if (currentPreviewUrl) window.open(currentPreviewUrl, '_blank');
+  });
+  var fullscreenExitBtn = document.getElementById('fullscreen-exit');
+  function toggleFullscreen() {
+    previewContainer.classList.toggle('fullscreen');
+    previewFullscreenBtn.textContent = previewContainer.classList.contains('fullscreen') ? '\\u2716' : '\\u26F6';
+  }
+  previewFullscreenBtn.addEventListener('click', toggleFullscreen);
+  fullscreenExitBtn.addEventListener('click', toggleFullscreen);
+
+  // Share button — create shareable tunnel link
+  var shareBtn = document.getElementById('preview-share');
+  var shareTunnels = {}; // port → { url, pid }
+  shareBtn.addEventListener('click', function() {
+    if (!currentPreviewUrl) return;
+    try {
+      var u = new URL(currentPreviewUrl);
+      var port = u.port || (u.protocol === 'https:' ? '443' : '80');
+      if (shareTunnels[port]) {
+        // Already tunneled — copy URL
+        navigator.clipboard.writeText(shareTunnels[port]).then(function() {
+          shareBtn.textContent = _t('copied');
+          setTimeout(function() { shareBtn.textContent = _t('easy.preview.share'); }, 2000);
+        });
+        return;
+      }
+      shareBtn.textContent = _t('creating');
+      shareBtn.disabled = true;
+      fetch('/terminal/share', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ port: port })
+      }).then(function(r) { return r.json(); }).then(function(data) {
+        shareBtn.disabled = false;
+        if (data.url) {
+          shareTunnels[port] = data.url;
+          navigator.clipboard.writeText(data.url).then(function() {
+            shareBtn.textContent = _t('copied');
+            setTimeout(function() { shareBtn.textContent = _t('easy.preview.share'); }, 2000);
+          });
+          // Also add tunnel URL as a preview pill
+          setPreviewUrl(data.url);
+        } else {
+          shareBtn.textContent = 'Failed';
+          setTimeout(function() { shareBtn.textContent = _t('easy.preview.share'); }, 2000);
+        }
+      }).catch(function() {
+        shareBtn.disabled = false;
+        shareBtn.textContent = 'Failed';
+        setTimeout(function() { shareBtn.textContent = _t('easy.preview.share'); }, 2000);
+      });
+    } catch(e) {}
+  });
+
+  // State
+  var ws = null;
+  var currentAssistantMsg = null;
+  var projects = JSON.parse(localStorage.getItem('easy_projects_' + username) || '[]');
+  var activeProject = localStorage.getItem('easy_active_project_' + username) || '';
+  // If URL has ?project=xxx from server session creation, adopt it
+  var urlProject = new URLSearchParams(location.search).get('project');
+  if (urlProject && projects.indexOf(urlProject) < 0) {
+    projects.push(urlProject);
+    localStorage.setItem('easy_projects_' + username, JSON.stringify(projects));
+  }
+  if (urlProject) {
+    activeProject = urlProject;
+    localStorage.setItem('easy_active_project_' + username, urlProject);
+  }
+  var filePath = homeDir;
+
+  // ---- State Machine ----
+  // States: 'initializing' | 'ready' | 'thinking' | 'tool_running' | 'error'
+  var state = 'initializing';
+  var stuckTimer = null;
+
+  // DOM refs for new elements
+  var statusDot = document.getElementById('status-dot');
+  var statusText = document.getElementById('status-text');
+  var cancelBtn = document.getElementById('cancel-btn');
+  var quickActions = document.getElementById('quick-actions');
+
+  function setState(newState) {
+    var prev = state;
+    state = newState;
+    dbg('state: ' + prev + ' -> ' + newState);
+
+    // Update status bar
+    var dotCls = 'status-dot';
+    var text = '';
+    switch (newState) {
+      case 'initializing':
+        dotCls += ' yellow'; text = _t('easy.status.initializing'); break;
+      case 'ready':
+        dotCls += ' green'; text = _t('easy.status.ready'); break;
+      case 'thinking':
+        dotCls += ' blue'; text = _t('easy.status.thinking'); break;
+      case 'tool_running':
+        dotCls += ' blue'; text = _t('easy.status.tool_running'); break;
+      case 'error':
+        dotCls += ' red'; text = _t('easy.status.error'); break;
+    }
+    statusDot.className = dotCls;
+    statusText.textContent = text;
+    if (menuStatusDot) menuStatusDot.className = dotCls;
+    if (menuStatusText) menuStatusText.textContent = text;
+
+    // Update input placeholder & disabled state
+    var canInput = (newState === 'ready');
+    msgInput.disabled = !canInput;
+    if (newState === 'ready') {
+      msgInput.placeholder = _t('easy.input.placeholder');
+    } else if (newState === 'thinking') {
+      msgInput.placeholder = _t('easy.input.thinking');
+    } else {
+      msgInput.placeholder = _t('easy.input.working');
+    }
+
+    // Show/hide cancel (stop) button
+    var showCancel = (newState === 'thinking' || newState === 'tool_running');
+    cancelBtn.classList.toggle('show', showCancel);
+    voiceToggle.style.display = showCancel ? 'none' : 'flex';
+
+    // Manage stuck timer
+    clearTimeout(stuckTimer);
+    if (newState === 'thinking' || newState === 'tool_running') {
+      stuckTimer = setTimeout(function() {
+        if (state === 'thinking' || state === 'tool_running') {
+          addWarningMsg(_t('easy.msg.stuck'));
+        }
+      }, 180000);
+    }
+
+    // Show thinking animation for thinking & tool_running
+    if (newState === 'thinking' || newState === 'tool_running') {
+      showThinking();
+    } else if (prev === 'thinking' || prev === 'tool_running') {
+      hideThinking();
+    }
+
+    // Clear tool indicator when leaving tool_running
+    if (prev === 'tool_running' && newState !== 'tool_running') {
+      clearToolIndicator();
+    }
+
+    // On transition to ready, finalize current message
+    if (newState === 'ready' && prev !== 'ready' && prev !== 'initializing') {
+      currentAssistantMsg = null;
+      if (currentPreviewUrl) {
+        hardRefreshPreview(currentPreviewUrl);
+      }
+    }
+  }
+
+  // ---- WebSocket (connects to /ws-easy for structured JSON messaging) ----
+  var wsRetryDelay = 1000;
+
+  function connectWs() {
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var projectParam = new URLSearchParams(location.search).get('project') || '';
+    ws = new WebSocket(proto + '//' + location.host + '/terminal/ws-easy?session=' + encodeURIComponent(sessionId) + '&project=' + encodeURIComponent(projectParam));
+    ws.onopen = function() {
+      wsRetryDelay = 1000;
+      dbg('ws connected');
+    };
+    ws.onmessage = function(e) {
+      var d;
+      try { d = JSON.parse(e.data); } catch { return; }
+      dbg('ws msg: ' + d.type + (d.state ? ' state=' + d.state : '') + (d.text ? ' text=' + d.text.substring(0, 40) : ''));
+
+      if (d.type === 'state') {
+        setState(d.state);
+      } else if (d.type === 'message') {
+        // Don't hide thinking here — let setState('ready') handle it
+        // This avoids losing spinner during multi-step tasks
+        appendAssistantText(d.text, d.thinking);
+        if (voiceTriggered && !d.thinking) { voiceTriggered = false; playTts(d.text); }
+        autoScroll();
+      } else if (d.type === 'tool') {
+        if (d.status === 'done') {
+          clearToolIndicator();
+        } else {
+          showToolActivity(d.name, d.detail);
+        }
+      } else if (d.type === 'history') {
+        // Restore history on reconnect (only if chat is empty)
+        var existingMsgs = chatArea.querySelectorAll('.msg.user, .msg.assistant');
+        if (existingMsgs.length === 0 && d.messages) {
+          for (var i = 0; i < d.messages.length; i++) {
+            var m = d.messages[i];
+            if (m.role === 'user') addUserMsg(m.text);
+            else appendAssistantText(m.text);
+            currentAssistantMsg = null;
+          }
+        }
+      } else if (d.type === 'error') {
+        addErrorMsg(d.message || _t('error_generic'));
+      }
+    };
+    ws.onclose = function() {
+      statusText.textContent = _t('easy.status.reconnecting');
+      statusDot.className = 'status-dot yellow';
+      setTimeout(connectWs, wsRetryDelay);
+      wsRetryDelay = Math.min(wsRetryDelay * 1.5, 15000);
+    };
+  }
+
+  function wsSend(msg) {
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify(msg));
+      dbg('wsSend: ' + JSON.stringify(msg).substring(0, 80));
+    } else {
+      dbg('wsSend DROPPED (ws not ready): ' + JSON.stringify(msg).substring(0, 80));
+    }
+  }
+
+  function showToolActivity(name, detail) {
+    var icons = { Read: '\ud83d\udcc4', Write: '\u270f\ufe0f', Edit: '\u270f\ufe0f', Bash: '\u25b6', Glob: '\ud83d\udd0d', Grep: '\ud83d\udd0d' };
+    var label = _t('tool.' + name) || _t('tool.working');
+    var icon = icons[name] || '\u2699\ufe0f';
+    var content = '<span class="tool-icon">' + icon + '</span> ' + escHtml(label) + (detail ? ': ' + escHtml(detail) : '');
+    // Always create a new persistent tool bubble
+    var el = document.createElement('div');
+    el.className = 'msg tool-activity';
+    el.innerHTML = content;
+    chatArea.appendChild(el);
+    toolIndicatorEl = el;
+    autoScroll();
+  }
+
+  // ---- Permission prompt UX (not needed with --dangerously-skip-permissions, kept as stub) ----
+  function showNumberedChoices(choices) {
+    quickActions.innerHTML = '';
+    choices.forEach(function(c) {
+      var btn = document.createElement('button');
+      btn.className = 'choice-btn' + (c.isTypeIn ? ' type-in' : '');
+      btn.innerHTML = '<span class="choice-num">' + c.num + '.</span> ' + escHtml(c.label);
+      btn.onclick = function() {
+        if (c.isTypeIn) {
+          // Focus input and let user type
+          hideQuickActions();
+          msgInput.disabled = false;
+          msgInput.placeholder = _t('easy.input.type_response');
+          msgInput.focus();
+        } else {
+          hideQuickActions();
+        }
+      };
+      quickActions.appendChild(btn);
+    });
+    quickActions.classList.add('show');
+  }
+
+  function showQuickActions(actions) {
+    // Don't clear - may have context div already
+    actions.forEach(function(a) {
+      var btn = document.createElement('button');
+      btn.className = 'qa-btn ' + a.cls;
+      btn.textContent = a.label;
+      btn.onclick = function() {
+        hideQuickActions();
+        setState('thinking');
+      };
+      quickActions.appendChild(btn);
+    });
+    quickActions.classList.add('show');
+  }
+
+  function hideQuickActions() {
+    quickActions.innerHTML = '';
+    quickActions.classList.remove('show');
+  }
+
+  // ---- Tool activity indicator (single reusable element) ----
+  var toolIndicatorEl = null;
+
+  function clearToolIndicator() {
+    if (toolIndicatorEl) {
+      toolIndicatorEl.classList.add('done');
+    }
+    toolIndicatorEl = null;
+  }
+
+  // ---- Chat history persistence ----
+  var chatHistoryKey = 'easy_chat_' + sessionId;
+
+  function saveChatHistory() {
+    try {
+      var msgs = [];
+      var items = chatArea.querySelectorAll('.msg.user, .msg.assistant');
+      for (var i = 0; i < items.length; i++) {
+        var rawText = items[i]._rawText || items[i].textContent;
+        msgs.push({ role: items[i].classList.contains('user') ? 'user' : 'assistant', text: rawText });
+      }
+      // Keep last 50 messages
+      if (msgs.length > 50) msgs = msgs.slice(-50);
+      localStorage.setItem(chatHistoryKey, JSON.stringify(msgs));
+    } catch(e) {}
+  }
+
+  function restoreChatHistory() {
+    try {
+      var raw = localStorage.getItem(chatHistoryKey);
+      if (!raw) return;
+      var msgs = JSON.parse(raw);
+      if (!Array.isArray(msgs) || msgs.length === 0) return;
+      for (var i = 0; i < msgs.length; i++) {
+        var div = document.createElement('div');
+        div.className = 'msg ' + msgs[i].role;
+        if (msgs[i].role === 'assistant') {
+          div._rawText = msgs[i].text;
+          div.innerHTML = linkify(msgs[i].text);
+        } else {
+          div.textContent = msgs[i].text;
+        }
+        chatArea.appendChild(div);
+      }
+      autoScroll();
+    } catch(e) {}
+  }
+
+  // ---- Linkify URLs in text (XSS-safe) ----
+  // Join URLs that got split across lines (terminal 120-col wrap or Claude formatting)
+  function joinSplitUrls(text) {
+    var lines = text.split('\\n');
+    var joined = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      // If line contains a URL that ends at end-of-line without punctuation/space,
+      // and next line starts with URL-valid chars — it's likely a wrapped URL
+      while (i + 1 < lines.length && /https?:\\/\\/[^\\s]+[a-zA-Z0-9/\\-_~]$/.test(line.trimEnd())) {
+        var nextTrimmed = lines[i + 1].trim();
+        var nextWord = (nextTrimmed.split(/\\s/)[0] || '');
+        if (nextWord && /^[a-zA-Z0-9\\-._~:/?#\\[\\]@!$&'()*+,;=%]+$/.test(nextWord)) {
+          // Join: append next line's first word (or whole line if single word)
+          if (nextWord === nextTrimmed) {
+            line = line.trimEnd() + nextTrimmed;
+            i++;
+          } else {
+            line = line.trimEnd() + nextWord;
+            lines[i + 1] = nextTrimmed.substring(nextWord.length).trimStart();
+            break;
+          }
+        } else {
+          break;
+        }
+      }
+      joined.push(line);
+    }
+    return joined.join('\\n');
+  }
+
+  function linkify(text) {
+    var fixed = joinSplitUrls(text);
+    var escaped = escHtml(fixed);
+    return escaped.replace(/(https?:\\/\\/[^\\s<>'"]+)/g, '<a href="$1" class="chat-link" style="color:#007aff;word-break:break-all;text-decoration:underline;">$1</a>');
+  }
+
+  // Intercept link clicks in chat — open in preview instead of navigating away
+  chatArea.addEventListener('click', function(e) {
+    var a = e.target.closest && e.target.closest('a.chat-link');
+    if (!a) return;
+    e.preventDefault();
+    setPreviewUrl(a.href, true);
+    if (!isDesktop()) showTab('preview');
+  });
+
+  // ---- Chat messages ----
+  function addUserMsg(text) {
+    currentAssistantMsg = null;
+    var div = document.createElement('div');
+    div.className = 'msg user';
+    div.textContent = text;
+    chatArea.appendChild(div);
+    autoScroll();
+    saveChatHistory();
+  }
+
+  function appendAssistantText(text, isThinking) {
+    // Each message is a separate bubble with appropriate styling
+    currentAssistantMsg = document.createElement('div');
+    currentAssistantMsg.className = 'msg assistant' + (isThinking ? ' thinking-msg' : '');
+    currentAssistantMsg._rawText = text;
+    currentAssistantMsg.innerHTML = linkify(text);
+    chatArea.appendChild(currentAssistantMsg);
+    // Auto-detect preview URL
+    var detectedUrl = detectPreviewUrl(text);
+    if (detectedUrl) setPreviewUrl(detectedUrl, true);
+    // Badge on chat tab if user is on preview
+    if (activeTab === 'preview') chatBadge.classList.add('show');
+    saveChatHistory();
+  }
+
+  // Replace the current assistant message content (for streaming updates)
+  function setAssistantText(text) {
+    if (!currentAssistantMsg) {
+      currentAssistantMsg = document.createElement('div');
+      currentAssistantMsg.className = 'msg assistant';
+      currentAssistantMsg._rawText = '';
+      chatArea.appendChild(currentAssistantMsg);
+    }
+    currentAssistantMsg._rawText = text;
+    currentAssistantMsg.innerHTML = linkify(text);
+    var detectedUrl = detectPreviewUrl(text);
+    if (detectedUrl) setPreviewUrl(detectedUrl, true);
+    if (activeTab === 'preview') chatBadge.classList.add('show');
+    saveChatHistory();
+  }
+
+  function addSystemMsg(text) {
+    var div = document.createElement('div');
+    div.className = 'msg system';
+    div.textContent = text;
+    chatArea.appendChild(div);
+    autoScroll();
+  }
+
+  function addErrorMsg(text) {
+    var div = document.createElement('div');
+    div.className = 'msg error';
+    div.textContent = text;
+    chatArea.appendChild(div);
+    autoScroll();
+  }
+
+  function addWarningMsg(text) {
+    // Don't add duplicate warnings
+    var existing = chatArea.querySelectorAll('.msg.warning');
+    for (var i = 0; i < existing.length; i++) {
+      if (existing[i].textContent === text) return;
+    }
+    var div = document.createElement('div');
+    div.className = 'msg warning';
+    div.textContent = text;
+    chatArea.appendChild(div);
+    autoScroll();
+  }
+
+  function addExitedMsg() {
+    currentAssistantMsg = null;
+    var div = document.createElement('div');
+    div.className = 'msg system';
+    div.innerHTML = _t('easy.msg.stopped') + ' <button class="restart-btn" id="restart-claude-btn">' + _t('easy.msg.restart') + '</button>';
+    chatArea.appendChild(div);
+    var restartBtn = document.getElementById('restart-claude-btn');
+    if (restartBtn) {
+      restartBtn.onclick = function() {
+        restartClaude();
+      };
+    }
+    autoScroll();
+  }
+
+  function restartClaude() {
+    // With claude -p, no restart needed — just set ready
+    currentAssistantMsg = null;
+    setState('ready');
+  }
+
+  function showThinking() {
+    var existing = chatArea.querySelector('.thinking');
+    if (existing) return;
+    var div = document.createElement('div');
+    div.className = 'thinking';
+    div.innerHTML = '<span></span><span></span><span></span>';
+    chatArea.appendChild(div);
+    autoScroll();
+  }
+
+  function hideThinking() {
+    var t = chatArea.querySelector('.thinking');
+    if (t) t.remove();
+  }
+
+  function autoScroll() {
+    // Double rAF: first ensures styles applied, second ensures layout computed
+    requestAnimationFrame(function() {
+      requestAnimationFrame(function() {
+        chatArea.scrollTop = chatArea.scrollHeight;
+      });
+    });
+  }
+
+  // TTS playback — fetch WAV from server and play
+  var ttsAudio = null;
+  function playTts(text) {
+    if (!text || text.length < 2) return;
+    // Stop any playing TTS
+    if (ttsAudio) { try { ttsAudio.pause(); } catch(e){} ttsAudio = null; }
+    fetch('/terminal/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ text: text })
+    }).then(function(r) {
+      if (!r.ok) throw new Error('TTS failed');
+      return r.blob();
+    }).then(function(blob) {
+      var url = URL.createObjectURL(blob);
+      ttsAudio = new Audio(url);
+      ttsAudio.play().catch(function(e) { dbg('TTS play error: ' + e.message); });
+      ttsAudio.onended = function() { URL.revokeObjectURL(url); ttsAudio = null; };
+    }).catch(function(e) { dbg('TTS error: ' + e.message); });
+  }
+
+  // ---- Send message ----
+  function sendMessage() {
+    var text = msgInput.value.trim();
+    if (!text) return;
+    if (state !== 'ready') return;
+
+    addUserMsg(text);
+    currentAssistantMsg = null;
+    wsSend({ type: 'send', text: text });
+    msgInput.value = '';
+    msgInput.style.height = 'auto';
+    updateSendBtn();
+    // State will be set to 'thinking' by the server response
+  }
+
+  // Cancel button
+  cancelBtn.addEventListener('click', function() {
+    wsSend({ type: 'cancel' });
+    addSystemMsg(_t('easy.msg.cancelled'));
+    setState('ready');
+  });
+
+  // Input handlers
+  function updateSendBtn() {
+    var hasText = !!msgInput.value.trim();
+    sendBtn.classList.toggle('show', hasText);
+  }
+  msgInput.addEventListener('input', function() {
+    updateSendBtn();
+    msgInput.style.height = 'auto';
+    msgInput.style.height = Math.min(msgInput.scrollHeight, 120) + 'px';
+  });
+
+  msgInput.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      voiceTriggered = false; // typed, not voice
+      sendMessage();
+    }
+  });
+
+  sendBtn.addEventListener('click', function() {
+    voiceTriggered = false; // tapped send, not voice
+    sendMessage();
+  });
+
+  // ---- Pro Mode ----
+  proBtn.addEventListener('click', function() {
+    location.href = '/terminal?session=' + encodeURIComponent(sessionId);
+  });
+
+  // ---- Projects ----
+  function renderProjects() {
+    // Remove old chips (except new-project-btn)
+    var chips = projectBar.querySelectorAll('.project-chip:not(.add)');
+    for (var i = 0; i < chips.length; i++) chips[i].remove();
+
+    projects.forEach(function(p) {
+      var chip = document.createElement('div');
+      chip.className = 'project-chip' + (p === activeProject ? ' active' : '');
+      chip.textContent = p;
+      chip.addEventListener('click', function() {
+        switchProject(p);
+      });
+      projectBar.insertBefore(chip, newProjectBtn);
+    });
+
+    // Also render in menu sheet
+    if (menuProjects) {
+      menuProjects.innerHTML = '';
+      projects.forEach(function(p) {
+        var item = document.createElement('div');
+        item.className = 'menu-item' + (p === activeProject ? ' active' : '');
+        item.innerHTML = '<span class="mi-icon">' + (p === activeProject ? '&#x25CF;' : '&#x25CB;') + '</span><span class="mi-label">' + p + '</span>';
+        item.addEventListener('click', function() {
+          menuHide();
+          switchProject(p);
+        });
+        menuProjects.appendChild(item);
+      });
+    }
+  }
+
+  function switchProject(name) {
+    activeProject = name;
+    localStorage.setItem('easy_active_project_' + username, name);
+    // Navigate to /terminal/easy without session — server auto-creates and redirects
+    location.href = '/terminal/easy';
+  }
+
+  newProjectBtn.addEventListener('click', function() {
+    projectNameInput.value = '';
+    newProjectModal.classList.add('show');
+    projectNameInput.focus();
+  });
+
+  modalCancel.addEventListener('click', function() {
+    newProjectModal.classList.remove('show');
+  });
+
+  modalOk.addEventListener('click', createProject);
+  projectNameInput.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') createProject();
+  });
+
+  function createProject() {
+    var name = projectNameInput.value.trim().replace(/[^a-zA-Z0-9_-]/g, '-');
+    if (!name) return;
+    newProjectModal.classList.remove('show');
+    if (projects.indexOf(name) < 0) {
+      projects.push(name);
+      localStorage.setItem('easy_projects_' + username, JSON.stringify(projects));
+    }
+    // Create directory via API
+    var codingDir = homeDir + '/coding';
+    fetch('/terminal/mkdir?session=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(codingDir) + '&name=' + encodeURIComponent(name) + '&exists=rename', { method: 'POST' })
+      .then(function() {
+        switchProject(name);
+      })
+      .catch(function() {
+        switchProject(name); // Try anyway
+      });
+  }
+
+  renderProjects();
+
+  // ---- Files panel ----
+  function openFiles() {
+    if (isDesktop()) {
+      // On desktop, files panel is always visible — just reload
+      loadFiles('');
+      return;
+    }
+    filesPanel.classList.add('open');
+    filesOverlay.classList.add('show');
+    loadFiles('');
+  }
+  function closeFiles() {
+    if (isDesktop()) return; // Never close on desktop
+    filesPanel.classList.remove('open');
+    filesOverlay.classList.remove('show');
+  }
+  fpClose.addEventListener('click', closeFiles);
+  filesOverlay.addEventListener('click', closeFiles);
+
+  // Collapse/expand files panel (desktop)
+  var fpCollapseBtn = document.getElementById('fp-collapse');
+  if (fpCollapseBtn) {
+    var filesCollapsed = localStorage.getItem('easy_files_collapsed') === '1';
+    if (filesCollapsed) filesPanel.classList.add('collapsed');
+    fpCollapseBtn.addEventListener('click', function() {
+      filesPanel.classList.toggle('collapsed');
+      localStorage.setItem('easy_files_collapsed', filesPanel.classList.contains('collapsed') ? '1' : '0');
+    });
+  }
+
+  function loadFiles(dir) {
+    filePath = dir;
+    fpPath.textContent = dir ? dir.replace(homeDir, '~') : _t('loading');
+    fpList.innerHTML = '<div style="padding:20px;text-align:center;color:#86868b;">' + _t('loading') + '</div>';
+
+    fetch('/terminal/files?session=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(dir))
+      .then(function(r) { return r.json(); })
+      .then(function(resp) {
+        // Server returns { path, cwd, items }
+        var items = resp.items || resp;
+        if (resp.path) {
+          filePath = resp.path;
+          dir = resp.path;
+        }
+        fpPath.textContent = dir.replace(homeDir, '~') || '~';
+        fpList.innerHTML = '';
+        // Column header
+        var colHdr = document.createElement('div');
+        colHdr.className = 'fp-col-header';
+        colHdr.innerHTML = '<span class="name">Name</span><span class="date">Modified</span>';
+        fpList.appendChild(colHdr);
+        // Parent dir
+        if (dir !== '/' && dir !== homeDir) {
+          var parent = dir.split('/').slice(0, -1).join('/') || '/';
+          var up = document.createElement('div');
+          up.className = 'fp-item';
+          up.innerHTML = '<span class="icon">&#128193;</span><span class="name">..</span><span class="date"></span>';
+          up.addEventListener('click', function() { loadFiles(parent); });
+          fpList.appendChild(up);
+        }
+        if (!items || !items.length) {
+          fpList.innerHTML += '<div style="padding:20px;text-align:center;color:#86868b;">' + _t('easy.files.empty') + '</div>';
+          return;
+        }
+        // Sort: dirs first, then files
+        items.sort(function(a,b) {
+          if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        });
+        items.forEach(function(item) {
+          var row = document.createElement('div');
+          row.className = 'fp-item';
+          var icon = item.isDirectory ? '&#128193;' : fileIcon(item.name);
+          var dateStr = item.modified ? fmtDate(item.modified) : '';
+          row.innerHTML = '<span class="icon">' + icon + '</span><span class="name">' + escHtml(item.name) + '</span><span class="date">' + dateStr + '</span>';
+          row.addEventListener('click', function() {
+            if (item.isDirectory) {
+              loadFiles(dir + '/' + item.name);
+            } else {
+              // Download file — same approach as Pro Mode
+              var a = document.createElement('a');
+              a.href = '/terminal/download?session=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(dir + '/' + item.name);
+              a.download = item.name;
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+            }
+          });
+          fpList.appendChild(row);
+        });
+      })
+      .catch(function() {
+        fpList.innerHTML = '<div style="padding:20px;text-align:center;color:#ff3b30;">' + _t('easy.files.error_load') + '</div>';
+      });
+  }
+
+  // Desktop: auto-load files panel
+  window._loadFiles = loadFiles;
+  if (isDesktop()) { desktopFilesLoaded = true; loadFiles(''); }
+
+  function fileIcon(name) {
+    var ext = (name.split('.').pop() || '').toLowerCase();
+    var icons = {
+      html:'&#127760;', htm:'&#127760;', css:'&#127912;', js:'&#9889;', ts:'&#9889;', jsx:'&#9889;', tsx:'&#9889;',
+      json:'&#128203;', md:'&#128221;', txt:'&#128221;', csv:'&#128202;',
+      png:'&#127748;', jpg:'&#127748;', jpeg:'&#127748;', gif:'&#127748;', svg:'&#127748;', webp:'&#127748;', ico:'&#127748;',
+      pdf:'&#128213;', zip:'&#128230;', gz:'&#128230;', tar:'&#128230;',
+      py:'&#128013;', rb:'&#128142;', go:'&#128049;', rs:'&#9881;', java:'&#9749;', sh:'&#128424;', bash:'&#128424;',
+    };
+    return icons[ext] || '&#128196;';
+  }
+
+  function fmtDate(ms) {
+    var d = new Date(ms);
+    var now = new Date();
+    var mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var h = d.getHours(), m = d.getMinutes();
+    var time = (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+    if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()) {
+      return time;
+    }
+    if (d.getFullYear() === now.getFullYear()) {
+      return mon[d.getMonth()] + ' ' + d.getDate() + ' ' + time;
+    }
+    return d.getFullYear() + '-' + (d.getMonth()+1) + '-' + d.getDate();
+  }
+
+  function formatSize(bytes) {
+    if (bytes < 1024) return bytes + 'B';
+    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + 'K';
+    return (bytes / 1048576).toFixed(1) + 'M';
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // File upload (from files panel — uses filePath which is the panel's current dir)
+  fpUploadBtn.addEventListener('click', function() {
+    fileInputHidden.dataset.dest = 'panel';
+    fileInputHidden.click();
+  });
+  // Upload button in input bar — uses empty path so server resolves to PTY CWD
+  document.getElementById('upload-btn').addEventListener('click', function() {
+    fileInputHidden.dataset.dest = 'cwd';
+    fileInputHidden.click();
+  });
+  fileInputHidden.addEventListener('change', function() {
+    var files = fileInputHidden.files;
+    if (!files.length) return;
+    var dest = fileInputHidden.dataset.dest === 'panel' ? filePath : '';
+    for (var i = 0; i < files.length; i++) {
+      uploadFile(files[i], dest);
+    }
+    fileInputHidden.value = '';
+  });
+
+  var pendingUploads = [];
+  var uploadBatchTimer = null;
+  function uploadFile(file, destDir) {
+    var url = '/terminal/file-upload?session=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(destDir);
+    fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'X-Filename': encodeURIComponent(file.name) },
+      body: file,
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.error) { addSystemMsg(_t('easy.msg.upload_failed') + file.name + ' - ' + data.error); return; }
+        if (filesPanel.classList.contains('open')) loadFiles(destDir);
+        pendingUploads.push(data.path || (destDir + '/' + file.name));
+        clearTimeout(uploadBatchTimer);
+        uploadBatchTimer = setTimeout(function() {
+          var paths = pendingUploads.slice();
+          pendingUploads = [];
+          var msg = _t('easy.msg.uploaded') + paths.join(', ');
+          addUserMsg(msg);
+          currentAssistantMsg = null;
+          wsSend({ type: 'send', text: msg });
+        }, 500);
+      })
+      .catch(function() { addSystemMsg(_t('easy.msg.upload_failed') + file.name); });
+  }
+
+  // New folder
+  fpMkdirBtn.addEventListener('click', function() {
+    var name = prompt(_t('easy.files.prompt_folder'));
+    if (!name) return;
+    fetch('/terminal/mkdir?session=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(filePath) + '&name=' + encodeURIComponent(name), { method: 'POST' })
+      .then(function() { loadFiles(filePath); })
+      .catch(function() { addSystemMsg(_t('failed')); });
+  });
+
+  // ---- Apps panel ----
+  appsBtn.addEventListener('click', function() {
+    appsPanel.classList.add('open');
+    filesOverlay.classList.add('show');
+    loadApps();
+  });
+  appsClose.addEventListener('click', function() {
+    appsPanel.classList.remove('open');
+    filesOverlay.classList.remove('show');
+  });
+
+  function loadApps() {
+    appsList.innerHTML = '<div style="padding:20px;text-align:center;color:#6b7280;">Checking apps...</div>';
+    // We don't have a direct API for pony-app list, so show instructions
+    appsList.innerHTML = '<div style="padding:16px;font-size:13px;color:#9ca3af;line-height:1.6;">' +
+      '<p style="margin-bottom:12px;">Ask Claude to deploy your app:</p>' +
+      '<p style="color:#e0e0e0;margin-bottom:12px;">"Start a server on port 8001 and register it with pony-app"</p>' +
+      '<p style="margin-bottom:8px;">Your apps will be available at:</p>' +
+      '<p style="color:#60a5fa;word-break:break-all;">https://gotong.gizwitsapi.com/' + escHtml(linuxUser || username) + '/&lt;app-name&gt;/</p>' +
+      '</div>';
+  }
+
+  // ---- Voice (ASR) ----
+  var voiceWs = null;
+  var audioStream = null, audioContext = null, sourceNode = null, processorNode = null;
+  var audioReady = false;
+  var isRecording = false;
+  var micReleaseTimer = null;
+
+  function releaseMic() {
+    audioReady = false;
+    if (sourceNode) { try { sourceNode.disconnect(); } catch {} sourceNode = null; }
+    if (processorNode) { try { processorNode.disconnect(); } catch {} processorNode = null; }
+    if (audioStream) { audioStream.getTracks().forEach(function(t) { t.stop(); }); audioStream = null; }
+    if (audioContext) { try { audioContext.close(); } catch {} audioContext = null; }
+  }
+  var pendingAsrText = '';
+  var cancelledRec = false;
+  var voiceSent = false;
+  var voiceTriggered = false; // true when user sent via voice → auto-TTS reply
+
+  function connectVoice() {
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    voiceWs = new WebSocket(proto + '//' + location.host + '/terminal/ws-voice');
+    voiceWs.onopen = function() { voiceRetryDelay = 1000; };
+    voiceWs.onmessage = function(e) {
+      var d = JSON.parse(e.data);
+      if (cancelledRec) return;
+      if (d.type === 'asr' && d.text) {
+        pendingAsrText = d.text;
+        voText.textContent = d.text;
+        if (!isRecording && !voiceSent) {
+          // Final result after release — auto-send in Easy Mode
+          voiceSent = true;
+          voiceTriggered = true;
+          voiceOverlay.classList.remove('show');
+          msgInput.value = d.text;
+          sendMessage();
+        }
+      } else if (d.type === 'asr_partial' && d.text) {
+        pendingAsrText = d.text;
+        voText.textContent = d.text;
+      } else if (d.type === 'error') {
+        if (pendingAsrText && !voiceSent) {
+          voiceSent = true;
+          voiceTriggered = true;
+          voiceOverlay.classList.remove('show');
+          msgInput.value = pendingAsrText;
+          sendMessage();
+        } else {
+          voStatus.textContent = _t('easy.voice.error');
+          setTimeout(function() { voiceOverlay.classList.remove('show'); }, 1500);
+        }
+      }
+    };
+    voiceWs.onclose = function() {
+      voiceRetryDelay = Math.min((voiceRetryDelay || 1000) * 1.5, 15000);
+      setTimeout(connectVoice, voiceRetryDelay);
+    };
+  }
+  var voiceRetryDelay = 1000;
+
+  async function acquireMic() {
+    if (audioReady) return true;
+    if (!navigator.mediaDevices) return false;
+    try {
+      audioStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } });
+      audioContext = new AudioContext({ sampleRate: 16000 });
+      sourceNode = audioContext.createMediaStreamSource(audioStream);
+      processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+      processorNode.onaudioprocess = function(e) {
+        if (!isRecording || !voiceWs || voiceWs.readyState !== 1) return;
+        var input = e.inputBuffer.getChannelData(0);
+        var pcm = new Int16Array(input.length);
+        for (var i = 0; i < input.length; i++) {
+          pcm[i] = Math.max(-1, Math.min(1, input[i])) * (input[i] < 0 ? 0x8000 : 0x7FFF);
+        }
+        voiceWs.send(pcm.buffer);
+      };
+      sourceNode.connect(processorNode);
+      processorNode.connect(audioContext.destination);
+      audioReady = true;
+      return true;
+    } catch { return false; }
+  }
+
+  async function startRec() {
+    if (isRecording) return;
+    clearTimeout(micReleaseTimer);
+    var ok = await acquireMic();
+    if (!ok) { addSystemMsg(_t('easy.voice.no_mic')); return; }
+    if (audioContext.state === 'suspended') audioContext.resume();
+    isRecording = true;
+    pendingAsrText = '';
+    cancelledRec = false;
+    voiceSent = false;
+    voText.textContent = '';
+    voStatus.textContent = _t('easy.voice.recording');
+    voiceOverlay.classList.add('show');
+    holdSpeak.classList.add('recording');
+    if (voiceWs && voiceWs.readyState === 1) voiceWs.send(JSON.stringify({ type: 'asr_start' }));
+  }
+
+  function stopRec(cancel) {
+    if (!isRecording) return;
+    isRecording = false;
+    holdSpeak.classList.remove('recording');
+    clearTimeout(micReleaseTimer);
+    micReleaseTimer = setTimeout(releaseMic, 30000);
+    if (cancel) {
+      cancelledRec = true;
+      pendingAsrText = '';
+      voiceOverlay.classList.remove('show');
+      if (voiceWs && voiceWs.readyState === 1) voiceWs.send(JSON.stringify({ type: 'asr_end' }));
+      return;
+    }
+    voStatus.textContent = _t('easy.voice.processing');
+    if (voiceWs && voiceWs.readyState === 1) voiceWs.send(JSON.stringify({ type: 'asr_end' }));
+    // Wait for final result via onmessage
+    setTimeout(function() {
+      if (pendingAsrText && !voiceSent && voiceOverlay.classList.contains('show')) {
+        voiceSent = true;
+        voiceTriggered = true;
+        voiceOverlay.classList.remove('show');
+        msgInput.value = pendingAsrText;
+        sendMessage();
+      }
+    }, 3000);
+  }
+
+  // Voice toggle: switch between text input and hold-to-speak
+  var voiceMode = false;
+  voiceToggle.addEventListener('click', function() {
+    voiceMode = !voiceMode;
+    if (voiceMode) {
+      holdSpeak.classList.add('show');
+      msgInput.style.display = 'none';
+      sendBtn.classList.remove('show');
+      vtMicIcon.style.display = 'none';
+      vtKbIcon.style.display = '';
+      voiceToggle.classList.add('active');
+    } else {
+      holdSpeak.classList.remove('show');
+      msgInput.style.display = '';
+      vtMicIcon.style.display = '';
+      vtKbIcon.style.display = 'none';
+      voiceToggle.classList.remove('active');
+      updateSendBtn();
+      msgInput.focus();
+    }
+  });
+
+  // Hold-to-speak button (touch events like Pro Mode — prevents context menu)
+  var micDown = false;
+  var holdTouchStartY = 0;
+  var holdSwipedCancel = false;
+  holdSpeak.addEventListener('touchstart', function(e) {
+    e.preventDefault();
+    micDown = true;
+    holdTouchStartY = e.touches[0].clientY;
+    holdSwipedCancel = false;
+    holdSpeak.textContent = _t('easy.btn.release_to_send');
+    startRec();
+  }, { passive: false });
+  holdSpeak.addEventListener('touchmove', function(e) {
+    if (!micDown) return;
+    var dy = holdTouchStartY - e.touches[0].clientY;
+    if (dy > 50 && !holdSwipedCancel) {
+      holdSwipedCancel = true;
+      holdSpeak.textContent = _t('easy.btn.release_to_cancel');
+    } else if (dy <= 30 && holdSwipedCancel) {
+      holdSwipedCancel = false;
+      holdSpeak.textContent = _t('easy.btn.release_to_send');
+    }
+  }, { passive: true });
+  holdSpeak.addEventListener('touchend', function(e) {
+    e.preventDefault();
+    if (!micDown) return;
+    micDown = false;
+    holdSpeak.textContent = _t('easy.btn.hold_to_speak');
+    stopRec(holdSwipedCancel);
+  }, { passive: false });
+  holdSpeak.addEventListener('touchcancel', function() {
+    micDown = false;
+    holdSpeak.textContent = _t('easy.btn.hold_to_speak');
+    stopRec(true);
+  });
+  holdSpeak.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+  voCancel.addEventListener('click', function() {
+    micDown = false;
+    holdSpeak.textContent = _t('easy.btn.hold_to_speak');
+    stopRec(true);
+  });
+
+  // ---- Drag & drop upload ----
+  document.addEventListener('dragover', function(e) { e.preventDefault(); });
+  document.addEventListener('drop', function(e) {
+    e.preventDefault();
+    var files = e.dataTransfer.files;
+    if (!files.length) return;
+    for (var i = 0; i < files.length; i++) {
+      uploadFile(files[i], '');
+    }
+    addSystemMsg(_t('easy.msg.uploading', {n: files.length}));
+  });
+
+  // ---- Init ----
+  restoreChatHistory();
+  connectWs();
+  connectVoice();
+
+  // Set initial file path to project dir
+  if (activeProject) {
+    filePath = homeDir + '/coding/' + activeProject;
+  }
+
+  // Ensure coding dir exists
+  fetch('/terminal/mkdir?session=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(homeDir) + '&name=coding&exists=skip', { method: 'POST' }).catch(function(){});
+
+  // ---- Desktop swap + resize handles ----
+  if (isDesktop()) {
+    var mainContent = document.getElementById('main-content');
+    var leftPanel = document.getElementById('left-panel');
+    var previewContainer = document.getElementById('preview-container');
+    var resizeChatPreview = document.getElementById('resize-chat-preview');
+    var resizeFilesChat = document.getElementById('resize-files-chat');
+
+    // Swap panels button
+    var swapBtn = document.getElementById('preview-swap');
+    if (localStorage.getItem('easy_swapped') === '1') { mainContent.classList.add('swapped'); document.body.classList.add('swapped'); }
+    swapBtn.addEventListener('click', function() {
+      mainContent.classList.toggle('swapped');
+      document.body.classList.toggle('swapped');
+      localStorage.setItem('easy_swapped', mainContent.classList.contains('swapped') ? '1' : '0');
+    });
+
+    function setupResize(handle, onMove) {
+      if (!handle) return;
+      function onDown(e) {
+        e.preventDefault();
+        handle.classList.add('active');
+        var ev = e.touches ? e.touches[0] : e;
+        onMove('start', ev.clientX, ev.clientY);
+        document.addEventListener('mousemove', onDrag);
+        document.addEventListener('mouseup', onUp);
+        document.addEventListener('touchmove', onDrag, {passive:false});
+        document.addEventListener('touchend', onUp);
+        // Prevent iframe from stealing pointer events
+        var iframes = document.querySelectorAll('iframe');
+        for (var i = 0; i < iframes.length; i++) iframes[i].style.pointerEvents = 'none';
+      }
+      function onDrag(e) {
+        e.preventDefault();
+        var ev = e.touches ? e.touches[0] : e;
+        onMove('move', ev.clientX, ev.clientY);
+      }
+      function onUp() {
+        handle.classList.remove('active');
+        document.removeEventListener('mousemove', onDrag);
+        document.removeEventListener('mouseup', onUp);
+        document.removeEventListener('touchmove', onDrag);
+        document.removeEventListener('touchend', onUp);
+        var iframes = document.querySelectorAll('iframe');
+        for (var i = 0; i < iframes.length; i++) iframes[i].style.pointerEvents = '';
+        onMove('end', 0, 0);
+      }
+      handle.addEventListener('mousedown', onDown);
+      handle.addEventListener('touchstart', onDown, {passive:false});
+    }
+
+    // Horizontal resize: left-panel vs preview
+    setupResize(resizeChatPreview, function(phase, x) {
+      if (phase === 'move') {
+        var mcRect = mainContent.getBoundingClientRect();
+        var swapped = mainContent.classList.contains('swapped');
+        var newW = swapped ? (mcRect.right - x) : (x - mcRect.left);
+        var minL = 260, minR = 200;
+        newW = Math.max(minL, Math.min(mcRect.width - minR - 5, newW));
+        leftPanel.style.width = newW + 'px';
+        leftPanel.style.maxWidth = 'none';
+        localStorage.setItem('easy_left_panel_w', String(newW));
+      }
+    });
+
+    // Vertical resize: files-panel vs chat-area
+    setupResize(resizeFilesChat, function(phase, x, y) {
+      if (phase === 'move') {
+        var newH = y - filesPanel.getBoundingClientRect().top;
+        var maxH = leftPanel.offsetHeight - 200; // leave room for chat + input
+        newH = Math.max(80, Math.min(maxH, newH));
+        filesPanel.style.height = newH + 'px';
+        localStorage.setItem('easy_files_panel_h', String(newH));
+      }
+    });
+
+    // Restore saved sizes
+    var savedLpW = parseInt(localStorage.getItem('easy_left_panel_w'));
+    if (savedLpW > 0) { leftPanel.style.width = savedLpW + 'px'; leftPanel.style.maxWidth = 'none'; }
+    var savedFpH = parseInt(localStorage.getItem('easy_files_panel_h'));
+    if (savedFpH > 0) { filesPanel.style.height = savedFpH + 'px'; }
+  }
+})();
+</script>
+</body>
+</html>`;
+}
+
 // Terminal HTML page
 const indexHtml = `<!DOCTYPE html>
 <html>
@@ -1021,7 +3376,8 @@ const indexHtml = `<!DOCTYPE html>
   <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
   <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
   <title>Hopcode</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
+  <script>${getI18nScript()}</script>
+  <link rel="stylesheet" href="./vendor/xterm.css">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100%; overflow: hidden; background: #1a1a2e; }
@@ -1064,6 +3420,7 @@ const indexHtml = `<!DOCTYPE html>
     }
     #vp-text[contenteditable="true"] {
       border: 1px solid #4ade80; background: rgba(0,0,0,0.3);
+      -webkit-user-select: text; user-select: text; cursor: text;
     }
     #vp-hint { font-size: 12px; color: #666; margin-top: 8px; }
     #vp-actions { display: none; justify-content: center; gap: 12px; margin-top: 12px; }
@@ -1137,6 +3494,7 @@ const indexHtml = `<!DOCTYPE html>
     .menu-sess-dot { width:6px;height:6px;border-radius:50%;flex-shrink:0; }
     .menu-sess-dot.active { background:#4ade80; }
     .menu-sess-dot.idle { background:#555; }
+    .menu-sess-dot.easy { background:#60a5fa; }
     body.light-mode .menu-sess-item { color:#333; }
     body.light-mode .menu-sess-item.current { background:rgba(34,197,94,0.12);color:#16a34a; }
     body.light-mode .menu-sess-dot.idle { background:#bbb; }
@@ -1217,25 +3575,21 @@ const indexHtml = `<!DOCTYPE html>
       flex: 1; background: #111827; color: #e0e0e0; border: 1px solid #333;
       border-radius: 8px; padding: 7px 12px; font-size: 15px; font-family: system-ui;
       outline: none; resize: none; min-height: 34px; max-height: 120px;
-      line-height: 1.3; overflow-y: auto;
+      line-height: 1.3; overflow-y: auto; scrollbar-width: none;
     }
+    #chat-input::-webkit-scrollbar { display: none; }
     #chat-input:focus { border-color: #4ade80; }
     #chat-input::placeholder { color: #555; }
     #chat-send-btn {
-      width: 34px; height: 34px; border-radius: 6px; border: none;
-      background: #4ade80; color: #000; font-size: 16px; cursor: pointer;
+      padding: 0 14px; height: 34px; border-radius: 6px; border: none;
+      background: #4ade80; color: #000; font-size: 14px; font-weight: 600; cursor: pointer;
       display: flex; align-items: center; justify-content: center; flex-shrink: 0;
       -webkit-tap-highlight-color: transparent;
     }
     #chat-send-btn:active { background: #22c55e; }
-    #chat-send-btn:disabled { background: #333; color: #666; }
-    #chat-mic-btn {
-      width: 34px; height: 34px; border-radius: 6px; border: 1px solid #4ade80;
-      background: transparent; color: #4ade80; font-size: 16px; cursor: pointer;
-      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-      -webkit-tap-highlight-color: transparent;
-    }
-    #chat-mic-btn:active, #chat-mic-btn.recording { background: #4ade80; color: #000; }
+    #chat-send-btn:disabled { background: #333; color: #666; cursor: default; }
+    #chat-voice-toggle.active { border-color: #4ade80; color: #4ade80; }
+    #chat-hold-speak:active, #chat-hold-speak.recording { background: #1a3a2e !important; border-color: #4ade80 !important; color: #4ade80 !important; }
     #chat-quick-actions {
       display: none; flex-wrap: wrap; gap: 6px; padding: 0 4px;
     }
@@ -1263,6 +3617,7 @@ const indexHtml = `<!DOCTYPE html>
     body.mobile #status { font-size: 15px; padding: 14px 8px; flex: 3; text-align: center; border-radius: 8px; }
     body.mobile #text { display: none; }
     body.mobile #font-controls { display: none; }
+    body.mobile .desktop-paste-btn { display: none; }
     body.mobile .key-btn { min-width: 0; flex: 1; padding: 0 4px; height: 34px; font-size: 14px; }
     .mobile-only { display: none; }
     body.mobile .mobile-only { display: inline-block; }
@@ -1368,10 +3723,10 @@ const indexHtml = `<!DOCTYPE html>
     <div id="terminal"></div>
     <div id="copy-overlay">
       <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid #333;">
-        <span style="color:#e0e0e0;font:13px system-ui;">Select &amp; Copy</span>
+        <span style="color:#e0e0e0;font:13px system-ui;" data-i18n="pro.copy.title">Select &amp; Copy</span>
         <div style="display:flex;gap:8px;">
-          <button id="copy-all-btn" style="padding:4px 10px;background:#0f3460;color:#e0e0e0;border:none;border-radius:4px;font-size:12px;cursor:pointer;">Copy All</button>
-          <button id="copy-close-btn" style="padding:4px 10px;background:#333;color:#e0e0e0;border:none;border-radius:4px;font-size:12px;cursor:pointer;">Close</button>
+          <button id="copy-all-btn" style="padding:4px 10px;background:#0f3460;color:#e0e0e0;border:none;border-radius:4px;font-size:12px;cursor:pointer;" data-i18n="pro.copy.copy_all">Copy All</button>
+          <button id="copy-close-btn" style="padding:4px 10px;background:#333;color:#e0e0e0;border:none;border-radius:4px;font-size:12px;cursor:pointer;" data-i18n="pro.copy.close">Close</button>
         </div>
       </div>
       <pre id="copy-content"></pre>
@@ -1389,7 +3744,7 @@ const indexHtml = `<!DOCTYPE html>
           <button class="key-btn" id="copy-btn" title="Select/Copy text">Sel</button>
           <button class="key-btn" id="scroll-bottom" title="Scroll to bottom" style="font-size:20px;">&#x21E9;</button>
         </div>
-        <div id="font-controls">
+        <div id="font-controls" style="display:none;">
           <button class="font-btn" onclick="changeFontSize(-2)">&#x2212;</button>
           <span id="font-size">21px</span>
           <button class="font-btn" onclick="changeFontSize(2)">+</button>
@@ -1397,7 +3752,7 @@ const indexHtml = `<!DOCTYPE html>
       </div>
       <div id="bar-row2">
         <button id="menu-btn-mobile" class="key-btn mobile-only" style="min-width:32px;padding:2px 6px;"><svg viewBox="0 0 512 512" fill="none" style="width:34px;height:34px;vertical-align:middle;"><circle cx="185" cy="175" r="42" fill="#4ade80"/><circle cx="327" cy="175" r="42" fill="#4ade80"/><circle cx="185" cy="175" r="16" fill="#1a1a2e"/><circle cx="327" cy="175" r="16" fill="#1a1a2e"/><rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/><path d="M205 218L230 240L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M242 240L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/><rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/><rect x="165" y="340" width="50" height="20" rx="10" fill="#22c55e"/><rect x="297" y="340" width="50" height="20" rx="10" fill="#22c55e"/></svg></button>
-        <div id="status">Hold Option to speak</div>
+        <div id="status" data-i18n="pro.status.hold_to_speak">Hold Alt to speak</div>
         <div id="text"></div>
         <button id="return-btn" class="key-btn" title="Return" style="font-size:20px;">&#x23CE;</button>
       </div>
@@ -1406,10 +3761,13 @@ const indexHtml = `<!DOCTYPE html>
       <div id="chat-quick-actions"></div>
       <div class="chat-input-row">
         <button id="chat-menu-btn" class="key-btn" style="min-width:32px;padding:2px 6px;flex-shrink:0;"><svg viewBox="0 0 512 512" fill="none" style="width:34px;height:34px;vertical-align:middle;"><circle cx="185" cy="175" r="42" fill="#4ade80"/><circle cx="327" cy="175" r="42" fill="#4ade80"/><circle cx="185" cy="175" r="16" fill="#1a1a2e"/><circle cx="327" cy="175" r="16" fill="#1a1a2e"/><rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/><path d="M205 218L230 240L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M242 240L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/><rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/><rect x="165" y="340" width="50" height="20" rx="10" fill="#22c55e"/><rect x="297" y="340" width="50" height="20" rx="10" fill="#22c55e"/></svg></button>
+        <button id="chat-voice-toggle" title="Switch voice/keyboard" style="width:34px;height:34px;border-radius:6px;border:1px solid #374151;background:transparent;color:#9ca3af;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;"><svg id="cvt-mic-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg><svg id="cvt-kb-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display:none"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="6" y1="8" x2="6" y2="8.01"/><line x1="10" y1="8" x2="10" y2="8.01"/><line x1="14" y1="8" x2="14" y2="8.01"/><line x1="18" y1="8" x2="18" y2="8.01"/><line x1="6" y1="12" x2="6" y2="12.01"/><line x1="10" y1="12" x2="10" y2="12.01"/><line x1="14" y1="12" x2="14" y2="12.01"/><line x1="18" y1="12" x2="18" y2="12.01"/><line x1="8" y1="16" x2="16" y2="16"/></svg></button>
         <label for="chat-input" style="position:absolute;left:-9999px">Chat input</label>
-        <textarea id="chat-input" name="chat-input" rows="1" placeholder="Tell Claude what to do..." autocomplete="off"></textarea>
-        <button id="chat-mic-btn" title="Hold to speak">&#x1F3A4;</button>
-        <button id="chat-send-btn" title="Send">&#x25B6;</button>
+        <textarea id="chat-input" name="chat-input" rows="1" placeholder="Message..." autocomplete="off"></textarea>
+        <button id="chat-hold-speak" data-i18n="pro.chat.hold_to_speak" style="display:none;flex:1;height:36px;border-radius:8px;border:1px solid #374151;background:#111827;color:#9ca3af;font-size:14px;cursor:pointer;text-align:center;touch-action:none;-webkit-touch-callout:none;">Hold to speak</button>
+        <button id="chat-upload-btn" title="Upload file" style="width:34px;height:34px;border-radius:6px;border:1px solid #374151;background:transparent;color:#9ca3af;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3m0 0l-4 4m4-4l4 4"/><path d="M2 17l.621 2.485A2 2 0 004.561 21h14.878a2 2 0 001.94-1.515L22 17"/></svg></button>
+        <input type="file" id="chat-upload-input" multiple style="display:none;">
+        <button id="chat-send-btn" disabled data-i18n="pro.chat.btn_send">Send</button>
       </div>
     </div>
   </div>
@@ -1418,8 +3776,8 @@ const indexHtml = `<!DOCTYPE html>
     <div id="vp-text"></div>
     <div id="vp-hint">&#x2191; Swipe up to cancel</div>
     <div id="vp-actions">
-      <button id="vp-cancel">Cancel</button>
-      <button id="vp-send">Send &#x23CE;</button>
+      <button id="vp-cancel" data-i18n="pro.vp.btn_cancel">Cancel</button>
+      <button id="vp-send" data-i18n="pro.vp.btn_send">Send &#x23CE;</button>
     </div>
   </div>
   <div id="floating-keys"><button id="bar-handle">&#x2328;</button></div>
@@ -1452,29 +3810,29 @@ const indexHtml = `<!DOCTYPE html>
   </div>
 
   <div id="file-browser">
-    <div id="fb-drop-overlay">Drop files here</div>
+    <div id="fb-drop-overlay" data-i18n="pro.fb.drop_here">Drop files here</div>
     <div id="fb-header">
       <button id="fb-close">&times;</button>
-      <span id="fb-title">Files</span>
-      <button id="fb-upload-btn" class="key-btn" title="Upload files" style="font-size:14px;">&#x2191;</button>
+      <span id="fb-title" data-i18n="pro.fb.title">Files</span>
+      <button id="fb-upload-btn" class="key-btn" data-i18n-title="pro.fb.upload" title="Upload files" style="font-size:14px;">&#x2191;</button>
       <input type="file" id="fb-upload-input" multiple style="display:none;">
-      <button id="fb-mkdir-btn" class="key-btn" title="New folder" style="font-size:12px;">+&#x1F4C1;</button>
-      <button id="fb-hidden-btn" class="key-btn" title="Toggle hidden files" style="font-size:10px;opacity:0.5">.*</button>
-      <button id="fb-cwd-btn" class="key-btn" title="Go to PTY working directory">CWD</button>
+      <button id="fb-mkdir-btn" class="key-btn" data-i18n-title="pro.fb.mkdir" title="New folder" style="font-size:12px;">+&#x1F4C1;</button>
+      <button id="fb-hidden-btn" class="key-btn" data-i18n-title="pro.fb.hidden" title="Toggle hidden files" style="font-size:10px;opacity:0.5">.*</button>
+      <button id="fb-cwd-btn" class="key-btn" data-i18n-title="pro.fb.cwd" title="Go to PTY working directory" data-i18n="pro.fb.cwd">CWD</button>
     </div>
     <div id="fb-breadcrumb"></div>
     <div id="fb-pending-drop" style="display:none;padding:8px 12px;background:#1a2a1a;border-bottom:1px solid #0f3460;display:none;flex-direction:column;gap:6px;">
       <div style="color:#e0e0e0;font-size:12px;font-family:system-ui;" id="fb-pending-label">Drop files pending</div>
       <div style="display:flex;gap:6px;">
-        <button id="fb-pending-upload" style="flex:1;padding:6px;background:#4ade80;color:#000;border:none;border-radius:4px;font-size:13px;font-weight:bold;cursor:pointer;">Upload Here</button>
-        <button id="fb-pending-cancel" style="padding:6px 12px;background:#333;color:#e0e0e0;border:none;border-radius:4px;font-size:13px;cursor:pointer;">Cancel</button>
+        <button id="fb-pending-upload" style="flex:1;padding:6px;background:#4ade80;color:#000;border:none;border-radius:4px;font-size:13px;font-weight:bold;cursor:pointer;" data-i18n="pro.fb.upload_here">Upload Here</button>
+        <button id="fb-pending-cancel" style="padding:6px 12px;background:#333;color:#e0e0e0;border:none;border-radius:4px;font-size:13px;cursor:pointer;" data-i18n="cancel">Cancel</button>
       </div>
     </div>
     <div id="fb-error"></div>
     <div id="fb-list"></div>
     <div id="fb-text-preview">
       <div id="fb-text-header">
-        <button id="fb-text-back" class="key-btn">&larr; Back</button>
+        <button id="fb-text-back" class="key-btn" data-i18n="pro.fb.back">&larr; Back</button>
         <span id="fb-text-name"></span>
         <button id="fb-text-dl" class="key-btn">&#x2193;</button>
       </div>
@@ -1493,15 +3851,15 @@ const indexHtml = `<!DOCTYPE html>
   <div id="app-menu" style="display:none;">
     <div class="app-menu-backdrop"></div>
     <div class="app-menu-panel">
-      <div class="app-menu-section collapsible" data-collapse="menu-sessions-body">&#x1F4CB; Sessions</div>
+      <div class="app-menu-section collapsible" data-collapse="menu-sessions-body" data-i18n="pro.menu.sessions">&#x1F4CB; Sessions</div>
       <div id="menu-sessions-body" class="app-menu-collapse">
-        <div id="menu-sessions" class="menu-sess-list"><div style="padding:8px 16px;color:#888;font-size:13px;">Loading...</div></div>
+        <div id="menu-sessions" class="menu-sess-list"><div style="padding:8px 16px;color:#888;font-size:13px;" data-i18n="loading">Loading...</div></div>
         <div style="padding:4px 16px 6px;">
-          <button class="app-menu-btn" id="menu-new-session" style="width:100%">+ New Session</button>
+          <button class="app-menu-btn" id="menu-new-session" style="width:100%" data-i18n="pro.menu.new_session">+ New Session</button>
         </div>
       </div>
       <div class="app-menu-sep"></div>
-      <div class="app-menu-section collapsible" data-collapse="menu-terminal-body">&#x2699; Terminal</div>
+      <div class="app-menu-section collapsible" data-collapse="menu-terminal-body" data-i18n="pro.menu.terminal">&#x2699; Terminal</div>
       <div id="menu-terminal-body" class="app-menu-collapse">
         <div class="app-menu-row" style="padding:6px 16px;gap:10px;">
           <button class="app-menu-btn" id="menu-font-down">A&#x2212;</button>
@@ -1511,20 +3869,25 @@ const indexHtml = `<!DOCTYPE html>
           <button class="app-menu-btn" id="theme-toggle">&#x263E;</button>
         </div>
       </div>
-      <div class="app-menu-section collapsible" data-collapse="menu-fk-body">&#x2328; Floating Keys</div>
+      <div class="app-menu-section collapsible" data-collapse="menu-fk-body" data-i18n="pro.menu.floating_keys">&#x2328; Floating Keys</div>
       <div id="menu-fk-body" class="app-menu-collapse">
         <div id="menu-fk-list" style="padding:6px 16px;display:flex;flex-direction:column;gap:4px;"></div>
         <div class="app-menu-row" style="padding:6px 16px;gap:8px;">
-          <button class="app-menu-btn" id="menu-fk-add">+ Add</button>
-          <button class="app-menu-btn" id="menu-fk-hide">Hide</button>
-          <button class="app-menu-btn" id="menu-fk-reset" style="background:#333;color:#f87171;">Reset</button>
+          <button class="app-menu-btn" id="menu-fk-add" data-i18n="pro.menu.fk_add">+ Add</button>
+          <button class="app-menu-btn" id="menu-fk-hide" data-i18n="pro.menu.fk_hide">Hide</button>
+          <button class="app-menu-btn" id="menu-fk-reset" style="background:#333;color:#f87171;" data-i18n="pro.menu.fk_reset">Reset</button>
         </div>
       </div>
       <div class="app-menu-sep"></div>
-      <div class="app-menu-item" id="menu-files">&#x1F4C1; Files</div>
-      <a class="app-menu-item" href="/terminal" style="text-decoration:none;">&#x1F3E0; Home</a>
-      <div style="padding:8px 16px;display:flex;align-items:center;justify-content:space-between;">
-        <span id="menu-chat-toggle" style="font-size:11px;color:#4ade80;cursor:pointer;">&#x1F4AC; Chat Mode</span>
+      <div class="app-menu-item" id="menu-files" data-i18n="pro.menu.files">&#x1F4C1; Files</div>
+      <a class="app-menu-item" href="/terminal" style="text-decoration:none;" data-i18n="pro.menu.home">&#x1F3E0; Home</a>
+      <div class="app-menu-item" id="menu-easy-mode" style="color:#60a5fa;" data-i18n="pro.menu.easy_mode">&#x1F438; Easy Mode</div>
+      <div class="app-menu-sep"></div>
+      <div class="app-menu-item" id="menu-lang-toggle" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;">
+        <span data-i18n="pro.menu.lang">Language</span>
+        <span style="font-size:13px;color:#60a5fa;" id="menu-lang-val">EN/中</span>
+      </div>
+      <div style="padding:8px 16px;display:flex;align-items:center;justify-content:flex-end;">
         <span id="menu-devtools-link" style="font-size:11px;color:#555;cursor:pointer;">DevTools</span>
       </div>
       <div id="menu-devtools-panel" style="display:none;padding:6px 16px 10px;">
@@ -1539,17 +3902,20 @@ const indexHtml = `<!DOCTYPE html>
     </div>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-webgl@0.16.0/lib/xterm-addon-webgl.min.js"></script>
+  <script src="./vendor/xterm.js"></script>
+  <script src="./vendor/xterm-addon-fit.js"></script>
+  <script src="./vendor/xterm-addon-webgl.js"></script>
   <script>
     window.onerror = function(msg, src, line) {
       document.getElementById('status').textContent = 'JS Error: ' + msg;
       document.getElementById('status').style.background = '#f87171';
     };
 
-    const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    const isMobile = ('ontouchstart' in window || navigator.maxTouchPoints > 0) && window.innerWidth < 768;
     if (isMobile) document.body.classList.add('mobile');
+    var isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent);
+    var holdKeyName = isMac ? 'Option' : 'Alt';
+    document.getElementById('status').textContent = isMobile ? _t('pro.status.hold_here') : _t('pro.status.hold_to_speak', {key: holdKeyName});
     var savedFontSize = parseInt(localStorage.getItem('hopcode-font-size'));
     let fontSize = savedFontSize > 0 ? savedFontSize : (isMobile ? 14 : 21);
     const term = new Terminal({
@@ -1570,6 +3936,14 @@ const indexHtml = `<!DOCTYPE html>
       term.options.scrollback = 500;
     }
     fitAddon.fit();
+
+    // Auto-copy selection to clipboard (desktop: mouse select → auto-copy)
+    term.onSelectionChange(function() {
+      var sel = term.getSelection();
+      if (sel && navigator.clipboard) {
+        navigator.clipboard.writeText(sel).catch(function() {});
+      }
+    });
 
     // --- Performance self-check: monitor write latency, auto-trim if degraded ---
     function perfWrite(data, cb) {
@@ -1618,25 +3992,37 @@ const indexHtml = `<!DOCTYPE html>
       return cachedCellHeight || 16;
     }
     if (isMobile && xtermScreen) {
+      var touchTotalDelta = 0;
+      var touchIsTap = true;
       xtermScreen.addEventListener('touchstart', function(e) {
         cancelAnimationFrame(momentumId);
         touchLastY = e.touches[0].clientY;
         touchVelocity = 0;
+        touchTotalDelta = 0;
+        touchIsTap = true;
         cachedCellHeight = xtermScreen.offsetHeight / term.rows;
       }, { passive: true });
       xtermScreen.addEventListener('touchmove', function(e) {
         e.preventDefault();
+        touchIsTap = false;
         var y = e.touches[0].clientY;
         var delta = touchLastY - y;
         touchVelocity = delta;
+        touchTotalDelta += delta;
         var lines = Math.round(delta / getCellHeight());
         if (lines !== 0) {
           term.scrollLines(lines);
           touchLastY = y;
-          if (lines < 0 && xtermTextarea) xtermTextarea.blur();
+          // Only blur (hide keyboard) on significant upward scroll (3+ lines total)
+          if (touchTotalDelta < -getCellHeight() * 3 && xtermTextarea) xtermTextarea.blur();
         }
       }, { passive: false });
       xtermScreen.addEventListener('touchend', function() {
+        if (touchIsTap) {
+          // Tap on terminal = refocus (re-show keyboard)
+          term.focus();
+          return;
+        }
         // Momentum scrolling
         var v = touchVelocity;
         var ch = getCellHeight();
@@ -1684,9 +4070,10 @@ const indexHtml = `<!DOCTYPE html>
     var wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/terminal/ws?session=' + sessionId;
     var termWs = null;
     var isReconnect = false;
+    var outputRefocusTimer = null;
 
     function connectTerminal() {
-      document.getElementById('status').textContent = isReconnect ? 'Reconnecting...' : 'Connecting...';
+      document.getElementById('status').textContent = isReconnect ? _t('pro.status.reconnecting') : _t('pro.status.connecting');
       termWs = new WebSocket(wsUrl);
       termWs.onmessage = (e) => {
         const msg = JSON.parse(e.data);
@@ -1719,20 +4106,27 @@ const indexHtml = `<!DOCTYPE html>
               }
             }
           });
+          // Re-focus terminal after output settles (mobile loses focus during heavy output)
+          clearTimeout(outputRefocusTimer);
+          outputRefocusTimer = setTimeout(function() {
+            if (document.activeElement !== xtermTextarea && !isMobile) {
+              term.focus();
+            }
+          }, 300);
         }
       };
       termWs.onopen = () => {
-        document.getElementById('status').textContent = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
+        document.getElementById('status').textContent = isMobile ? _t('pro.status.hold_here') : _t('pro.status.hold_to_speak', {key: holdKeyName});
         document.getElementById('status').style.background = '';
         lastCols = 0; lastRows = 0; sendResize();
       };
       termWs.onerror = () => {
-        document.getElementById('status').textContent = 'WS error';
+        document.getElementById('status').textContent = _t('pro.status.ws_error');
         document.getElementById('status').style.background = '#f87171';
       };
       termWs.onclose = (e) => {
         if (termWs.sessionExited) return;
-        document.getElementById('status').textContent = 'Reconnecting...';
+        document.getElementById('status').textContent = _t('pro.status.reconnecting');
         document.getElementById('status').style.background = '#6b7280';
         isReconnect = true;
         setTimeout(connectTerminal, 2000);
@@ -1804,7 +4198,7 @@ const indexHtml = `<!DOCTYPE html>
       var text = dbgLines.join('\\n');
       if (navigator.clipboard) {
         navigator.clipboard.writeText(text).then(function() {
-          document.getElementById('dbg-copy').textContent = 'Copied!';
+          document.getElementById('dbg-copy').textContent = _t('copied');
           setTimeout(function() { document.getElementById('dbg-copy').textContent = 'Copy'; }, 1500);
         });
       }
@@ -2129,34 +4523,43 @@ const indexHtml = `<!DOCTYPE html>
     // Paste button — popup textarea for manual paste
     var pasteOverlay = document.createElement('div');
     pasteOverlay.id = 'paste-overlay';
-    pasteOverlay.style.cssText = 'display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:500;background:rgba(0,0,0,0.8);flex-direction:column;align-items:center;justify-content:center;padding:20px;';
-    pasteOverlay.innerHTML = '<div style="width:100%;max-width:480px;background:#16213e;border:2px solid #0f3460;border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:12px;">'
-      + '<div style="color:#e0e0e0;font-size:14px;font-family:system-ui;">Paste content here:</div>'
-      + '<textarea id="paste-input" style="width:100%;height:120px;background:#1a1a2e;color:#e0e0e0;border:1px solid #333;border-radius:8px;padding:10px;font-family:monospace;font-size:14px;resize:vertical;outline:none;" placeholder="Long press or Ctrl+V to paste..."></textarea>'
-      + '<div id="paste-file-preview" style="display:none;text-align:center;"><img id="paste-file-thumb" style="max-width:100%;max-height:120px;border-radius:6px;border:1px solid #333;"><div id="paste-file-icon" style="display:none;font-size:40px;padding:10px;">&#x1F4CE;</div><div id="paste-file-name" style="font-size:12px;color:#888;margin-top:4px;"></div></div>'
+    pasteOverlay.style.cssText = 'display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:500;background:rgba(0,0,0,0.3);flex-direction:column;align-items:center;justify-content:center;padding:20px;';
+    pasteOverlay.innerHTML = '<div style="width:100%;max-width:480px;background:#ffffff;border:1px solid #d2d2d7;border-radius:14px;padding:16px;display:flex;flex-direction:column;gap:12px;box-shadow:0 10px 40px rgba(0,0,0,0.15);">'
+      + '<div style="color:#1d1d1f;font-size:14px;font-family:system-ui;" data-i18n="pro.paste.title">Paste content here:</div>'
+      + '<textarea id="paste-input" style="width:100%;height:120px;background:#f5f5f7;color:#1d1d1f;border:1px solid #d2d2d7;border-radius:8px;padding:10px;font-family:monospace;font-size:14px;resize:vertical;outline:none;" data-i18n-placeholder="pro.paste.placeholder" placeholder="Long press or Ctrl+V to paste..."></textarea>'
+      + '<div id="paste-file-preview" style="display:none;text-align:center;"><img id="paste-file-thumb" style="max-width:100%;max-height:120px;border-radius:6px;border:1px solid #d2d2d7;"><div id="paste-file-icon" style="display:none;font-size:40px;padding:10px;">&#x1F4CE;</div><div id="paste-file-name" style="font-size:12px;color:#86868b;margin-top:4px;"></div></div>'
       + '<div style="display:flex;gap:8px;justify-content:flex-end;align-items:center;">'
-      + '<button id="paste-file-btn" style="padding:8px 12px;background:#0f3460;color:#e0e0e0;border:none;border-radius:6px;font-size:13px;cursor:pointer;margin-right:auto;" title="Upload file">&#x1F4CE; File</button>'
+      + '<button id="paste-file-btn" style="padding:8px 12px;background:#f0f0f2;color:#1d1d1f;border:1px solid #d2d2d7;border-radius:6px;font-size:13px;cursor:pointer;margin-right:auto;" data-i18n="pro.paste.btn_file">&#x1F4CE; File</button>'
       + '<input type="file" id="paste-file-input" style="display:none;">'
-      + '<button id="paste-cancel" style="padding:8px 16px;background:#333;color:#e0e0e0;border:none;border-radius:6px;font-size:14px;cursor:pointer;">Cancel</button>'
-      + '<button id="paste-send" style="padding:8px 16px;background:#4ade80;color:#000;border:none;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer;">Send</button>'
+      + '<button id="paste-cancel" style="padding:8px 16px;background:#e5e5ea;color:#1d1d1f;border:none;border-radius:6px;font-size:14px;cursor:pointer;" data-i18n="cancel">Cancel</button>'
+      + '<button id="paste-send" style="padding:8px 16px;background:#007aff;color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer;" data-i18n="send">Send</button>'
       + '</div></div>';
     document.body.appendChild(pasteOverlay);
+    _applyI18n(); // Apply i18n to dynamically created elements
+    // Prevent xterm from stealing focus when interacting with paste overlay
+    pasteOverlay.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+    pasteOverlay.addEventListener('touchstart', function(e) { e.stopPropagation(); });
+    // Prevent xterm from stealing keystrokes while paste overlay is open
+    pasteOverlay.addEventListener('keydown', function(e) { e.stopPropagation(); });
+    pasteOverlay.addEventListener('keyup', function(e) { e.stopPropagation(); });
+    pasteOverlay.addEventListener('keypress', function(e) { e.stopPropagation(); });
 
     // Upload chooser popup — shown when files are dropped outside file browser
     var uploadChooser = document.createElement('div');
     uploadChooser.id = 'upload-chooser';
-    uploadChooser.style.cssText = 'display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:500;background:rgba(0,0,0,0.8);flex-direction:column;align-items:center;justify-content:center;padding:20px;';
-    uploadChooser.innerHTML = '<div style="width:100%;max-width:400px;background:#16213e;border:2px solid #0f3460;border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:12px;">'
-      + '<div style="color:#e0e0e0;font-size:14px;font-family:system-ui;font-weight:bold;">Where do you want to drop the file(s)?</div>'
-      + '<div id="uc-file-list" style="color:#aaa;font-size:12px;font-family:monospace;max-height:80px;overflow-y:auto;padding:8px;background:#1a1a2e;border-radius:6px;border:1px solid #333;"></div>'
+    uploadChooser.style.cssText = 'display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:500;background:rgba(0,0,0,0.3);flex-direction:column;align-items:center;justify-content:center;padding:20px;';
+    uploadChooser.innerHTML = '<div style="width:100%;max-width:400px;background:#ffffff;border:1px solid #d2d2d7;border-radius:14px;padding:16px;display:flex;flex-direction:column;gap:12px;box-shadow:0 10px 40px rgba(0,0,0,0.15);">'
+      + '<div style="color:#1d1d1f;font-size:14px;font-family:system-ui;font-weight:bold;" data-i18n="pro.upload.where">Where do you want to drop the file(s)?</div>'
+      + '<div id="uc-file-list" style="color:#86868b;font-size:12px;font-family:monospace;max-height:80px;overflow-y:auto;padding:8px;background:#f5f5f7;border-radius:6px;border:1px solid #d2d2d7;"></div>'
       + '<div style="display:flex;flex-direction:column;gap:8px;">'
-      + '<button id="uc-terminal" style="padding:10px 16px;background:#0f3460;color:#e0e0e0;border:none;border-radius:6px;font-size:14px;cursor:pointer;text-align:left;">&#x1F4CB; Paste to Terminal<span style="display:block;font-size:11px;color:#888;margin-top:2px;">Upload to ~/.hopcode/uploads/, paste path into terminal</span></button>'
-      + '<button id="uc-files" style="padding:10px 16px;background:#0f3460;color:#e0e0e0;border:none;border-radius:6px;font-size:14px;cursor:pointer;text-align:left;">&#x1F4C1; Save to Files<span style="display:block;font-size:11px;color:#888;margin-top:2px;">Browse and choose a folder in the file browser</span></button>'
+      + '<button id="uc-terminal" style="padding:10px 16px;background:#f0f0f2;color:#1d1d1f;border:1px solid #d2d2d7;border-radius:6px;font-size:14px;cursor:pointer;text-align:left;" data-i18n="pro.upload.to_terminal">&#x1F4CB; Paste to Terminal<span style="display:block;font-size:11px;color:#86868b;margin-top:2px;" data-i18n="pro.upload.to_terminal_sub">Upload to ~/.hopcode/uploads/, paste path into terminal</span></button>'
+      + '<button id="uc-files" style="padding:10px 16px;background:#f0f0f2;color:#1d1d1f;border:1px solid #d2d2d7;border-radius:6px;font-size:14px;cursor:pointer;text-align:left;" data-i18n="pro.upload.to_files">&#x1F4C1; Save to Files<span style="display:block;font-size:11px;color:#86868b;margin-top:2px;" data-i18n="pro.upload.to_files_sub">Browse and choose a folder in the file browser</span></button>'
       + '</div>'
       + '<div style="display:flex;justify-content:flex-end;">'
-      + '<button id="uc-cancel" style="padding:8px 16px;background:#333;color:#e0e0e0;border:none;border-radius:6px;font-size:14px;cursor:pointer;">Cancel</button>'
+      + '<button id="uc-cancel" style="padding:8px 16px;background:#e5e5ea;color:#1d1d1f;border:none;border-radius:6px;font-size:14px;cursor:pointer;" data-i18n="cancel">Cancel</button>'
       + '</div></div>';
     document.body.appendChild(uploadChooser);
+    _applyI18n(); // Apply i18n to dynamically created elements
 
     var ucPendingFiles = null;
     var ucPendingEntries = null;
@@ -2242,18 +4645,21 @@ const indexHtml = `<!DOCTYPE html>
       var inp = document.getElementById('paste-input');
       inp.value = '';
       pasteOverlay.style.display = 'flex';
-      inp.focus();
+      // Disable xterm textarea to prevent it stealing keystrokes
+      if (xtermTextarea) { xtermTextarea.disabled = true; xtermTextarea.blur(); }
+      setTimeout(function() { inp.focus(); }, 50);
     }
     function pasteHide() {
       pasteOverlay.style.display = 'none';
       pasteReset();
+      if (xtermTextarea) xtermTextarea.disabled = false;
       term.focus();
     }
-    function pasteUploadFile(file) {
+    function pasteUploadFile(file, extraText) {
       pasteHide();
       var statusEl = document.getElementById('status');
       var prevStatus = statusEl ? statusEl.textContent : '';
-      if (statusEl) { statusEl.textContent = 'Uploading...'; statusEl.style.background = '#60a5fa'; }
+      if (statusEl) { statusEl.textContent = _t('pro.status.uploading'); statusEl.style.background = '#60a5fa'; }
       fetch('/terminal/upload', {
         method: 'POST', credentials: 'include',
         headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-Filename': encodeURIComponent(file.name) },
@@ -2263,8 +4669,15 @@ const indexHtml = `<!DOCTYPE html>
         return r.json();
       }).then(function(data) {
         if (data.error) throw new Error(data.error);
-        if (data.path) sendInput(data.path + ' ');
-        if (statusEl) { statusEl.textContent = 'Uploaded'; statusEl.style.background = '#4ade80'; }
+        // Combine text + file path if both present
+        var combined = '';
+        if (extraText && data.path) {
+          combined = extraText + ' ' + data.path + ' ';
+        } else if (data.path) {
+          combined = data.path + ' ';
+        }
+        if (combined) sendInput(combined);
+        if (statusEl) { statusEl.textContent = _t('pro.status.uploaded'); statusEl.style.background = '#4ade80'; }
         setTimeout(function() { if (statusEl) { statusEl.textContent = prevStatus; statusEl.style.background = ''; } }, 2000);
       }).catch(function(err) {
         if (statusEl) { statusEl.textContent = 'Upload failed: ' + err.message; statusEl.style.background = '#f87171'; }
@@ -2276,11 +4689,20 @@ const indexHtml = `<!DOCTYPE html>
       e.stopPropagation();
       pasteShow();
     });
+    var pasteBtnDesktop = document.getElementById('paste-btn-desktop');
+    if (pasteBtnDesktop) {
+      pasteBtnDesktop.addEventListener('click', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        pasteShow();
+      });
+    }
     document.getElementById('paste-send').addEventListener('click', function() {
+      var text = document.getElementById('paste-input').value;
       if (pasteFile) {
-        pasteUploadFile(pasteFile);
+        // Upload file, passing text along to combine after upload
+        pasteUploadFile(pasteFile, text || '');
       } else {
-        var text = document.getElementById('paste-input').value;
         pasteHide();
         if (text) sendInput(text);
       }
@@ -2334,11 +4756,23 @@ const indexHtml = `<!DOCTYPE html>
         nameEl.style.display = '';
         if (val && val !== oldName) {
           nameEl.textContent = val;
+          var safeVal = val.replace(/[^a-zA-Z0-9_\\-\\u4e00-\\u9fff]/g, '-');
           fetch('/terminal/rename', {
             method: 'POST', credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ session: sid, name: val })
+            body: JSON.stringify({ session: sid, name: val, oldName: oldName })
           });
+          // Update local project list if this is current session
+          if (sid === sessionId) {
+            var idx = projects.indexOf(oldName);
+            if (idx >= 0) projects[idx] = safeVal;
+            else projects.push(safeVal);
+            localStorage.setItem('easy_projects_' + username, JSON.stringify(projects));
+            activeProject = safeVal;
+            localStorage.setItem('easy_active_project_' + username, safeVal);
+            filePath = homeDir + '/coding/' + safeVal;
+            renderProjects();
+          }
         }
       }
       input.addEventListener('keydown', function(e) {
@@ -2349,7 +4783,7 @@ const indexHtml = `<!DOCTYPE html>
       input.addEventListener('blur', save);
     }
     function menuSessKill(sid, item) {
-      if (!confirm('Delete this session?')) return;
+      if (!confirm(_t('pro.menu.confirm_delete'))) return;
       item.style.opacity = '0.4';
       fetch('/terminal/sessions/' + encodeURIComponent(sid), {
         method: 'DELETE', credentials: 'include'
@@ -2366,18 +4800,21 @@ const indexHtml = `<!DOCTYPE html>
         .then(function(r) { return r.json(); })
         .then(function(data) {
           var currentUser = data.currentUser;
+          initChatModeForUser(currentUser);
           var sessions = data.sessions;
           if (!sessions.length) {
-            container.innerHTML = '<div style="padding:8px 16px;color:#888;font-size:13px;">No sessions</div>';
+            container.innerHTML = '<div style="padding:8px 16px;color:#888;font-size:13px;">' + _t('pro.menu.no_sessions') + '</div>';
             return;
           }
           container.innerHTML = '';
           sessions.forEach(function(s) {
             var a = document.createElement('a');
             a.className = 'menu-sess-item' + (s.id === sessionId ? ' current' : '');
-            a.href = '/terminal?session=' + encodeURIComponent(s.id);
+            a.href = s.mode === 'easy'
+              ? '/terminal/easy?session=' + encodeURIComponent(s.id) + (s.project ? '&project=' + encodeURIComponent(s.project) : '')
+              : '/terminal?session=' + encodeURIComponent(s.id);
             var dot = document.createElement('span');
-            dot.className = 'menu-sess-dot ' + (s.clientCount > 0 || s.clients > 0 ? 'active' : 'idle');
+            dot.className = 'menu-sess-dot ' + (s.mode === 'easy' ? 'easy' : (s.clientCount > 0 || s.clients > 0 ? 'active' : 'idle'));
             var name = document.createElement('span');
             name.className = 'menu-sess-name';
             name.textContent = s.name || s.id;
@@ -2415,14 +4852,20 @@ const indexHtml = `<!DOCTYPE html>
       e.stopPropagation();
       var btn = e.currentTarget;
       btn.disabled = true;
-      btn.textContent = 'Creating...';
+      btn.textContent = _t('creating');
       fetch('/terminal/api/sessions', { method: 'POST', credentials: 'include' })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-          if (data.id) location.href = '/terminal?session=' + encodeURIComponent(data.id);
-          else { btn.disabled = false; btn.textContent = '+ New Session'; }
+        .then(function(r) {
+          return r.json().then(function(data) { return { status: r.status, data: data }; });
         })
-        .catch(function() { btn.disabled = false; btn.textContent = '+ New Session'; });
+        .then(function(res) {
+          if (res.data.id) {
+            location.href = '/terminal?session=' + encodeURIComponent(res.data.id);
+          } else {
+            btn.disabled = false; btn.textContent = _t('pro.menu.new_session');
+            if (res.status === 403 && res.data.error) alert(res.data.error);
+          }
+        })
+        .catch(function() { btn.disabled = false; btn.textContent = _t('pro.menu.new_session'); });
     });
     function menuShow() {
       appMenu.style.display = 'block';
@@ -2709,8 +5152,8 @@ const indexHtml = `<!DOCTYPE html>
       if (navigator.clipboard) {
         navigator.clipboard.writeText(text).then(function() {
           var btn = document.getElementById('copy-all-btn');
-          btn.textContent = 'Copied!';
-          setTimeout(function() { btn.textContent = 'Copy All'; }, 1500);
+          btn.textContent = _t('copied');
+          setTimeout(function() { btn.textContent = _t('pro.copy.copy_all'); }, 1500);
         });
       }
     });
@@ -2731,7 +5174,7 @@ const indexHtml = `<!DOCTYPE html>
     var swipedToCancel = false; // Whether user swiped up into cancel zone
     var swipedToSend = false; // Whether user swiped right to send directly
 
-    var defaultStatusText = isMobile ? 'Hold here to speak' : 'Hold Option to speak';
+    var defaultStatusText = isMobile ? _t('pro.status.hold_here') : _t('pro.status.hold_to_speak', {key: holdKeyName});
 
     var vpEl = document.getElementById('voice-popup');
     var vpText = document.getElementById('vp-text');
@@ -2740,7 +5183,7 @@ const indexHtml = `<!DOCTYPE html>
     function vpShow() {
       vpText.textContent = '';
       vpText.classList.add('listening');
-      vpHint.textContent = '\u2191 Swipe up to cancel  \u2192 Swipe right to send';
+      vpHint.textContent = _t('pro.vp.hint_default');
       vpHint.style.display = '';
       vpActions.style.display = 'none';
       vpEl.classList.remove('hidden', 'cancel', 'send-ready');
@@ -2751,20 +5194,20 @@ const indexHtml = `<!DOCTYPE html>
       if (on) {
         vpEl.classList.add('cancel');
         vpEl.classList.remove('send-ready');
-        vpHint.textContent = '\u2191 Release to cancel';
+        vpHint.textContent = _t('pro.vp.hint_cancel');
       } else {
         vpEl.classList.remove('cancel');
-        vpHint.textContent = '\u2191 Swipe up to cancel  \u2192 Swipe right to send';
+        vpHint.textContent = _t('pro.vp.hint_default');
       }
     }
     function vpSetSendReady(on) {
       if (on) {
         vpEl.classList.add('send-ready');
         vpEl.classList.remove('cancel');
-        vpHint.textContent = '\u2192 Release to send';
+        vpHint.textContent = _t('pro.vp.hint_send');
       } else {
         vpEl.classList.remove('send-ready');
-        vpHint.textContent = '\u2191 Swipe up to cancel  \u2192 Swipe right to send';
+        vpHint.textContent = _t('pro.vp.hint_default');
       }
     }
 
@@ -2773,7 +5216,8 @@ const indexHtml = `<!DOCTYPE html>
       vpEl.classList.remove('cancel', 'send-ready');
       vpConfirmVisible = true;
       vpText.contentEditable = 'true';
-      vpText.focus();
+      // Delay focus to avoid Alt keyup stealing focus on Windows
+      setTimeout(function() { vpText.focus(); }, 100);
       // Place cursor at end of text
       var range = document.createRange();
       range.selectNodeContents(vpText);
@@ -2785,7 +5229,7 @@ const indexHtml = `<!DOCTYPE html>
         vpHint.style.display = 'none';
       } else {
         vpHint.style.display = '';
-        vpHint.textContent = 'Option: send | Control: cancel';
+        vpHint.textContent = _t('pro.vp.hint_confirm', {key: holdKeyName});
       }
     }
 
@@ -2797,7 +5241,7 @@ const indexHtml = `<!DOCTYPE html>
       if (finalText && termWs && termWs.readyState === 1) {
         asrFlushed = true;
         pendingAsrText = finalText;
-        status.textContent = 'Sending to terminal...';
+        status.textContent = _t('pro.status.sending');
         // Send text as raw input + separate Enter, same as physical keyboard
         sendInput(pendingAsrText);
         setTimeout(function() { sendInput(String.fromCharCode(13)); }, 50);
@@ -2822,17 +5266,30 @@ const indexHtml = `<!DOCTYPE html>
     var vpConfirmVisible = false;
 
     // Keyboard shortcuts for confirm popup
+    var ctrlAlone = false;
     document.addEventListener('keydown', function(e) {
       if (!vpConfirmVisible) return;
       if (e.key === 'Control') {
-        e.preventDefault();
-        e.stopPropagation();
-        vpDismiss();
+        ctrlAlone = true;
+        // Don't prevent default — allow Ctrl+V etc. to work
+      } else if (e.ctrlKey || e.metaKey) {
+        // Ctrl/Cmd combined with another key — let browser handle (paste, select all, etc.)
+        ctrlAlone = false;
       } else if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         e.stopPropagation();
         vpSend();
+      } else {
+        ctrlAlone = false;
       }
+    }, true);
+    document.addEventListener('keyup', function(e) {
+      if (!vpConfirmVisible) return;
+      if (e.key === 'Control' && ctrlAlone) {
+        // Control released without combining — dismiss
+        vpDismiss();
+      }
+      ctrlAlone = false;
     }, true);
 
     function flushAsrText() {
@@ -2840,11 +5297,12 @@ const indexHtml = `<!DOCTYPE html>
       if (isRecording || altDown) return; // Still recording, wait for release
       if (pendingAsrText) {
         // Chat mode: put voice result in chat input instead of voice popup
-        if (chatModeEnabled && chatMicDown === false) {
+        if (chatModeEnabled && !chatMicDown && !chatHoldDown && !chatVoiceMode) {
           asrFlushed = true;
           chatInput.value = pendingAsrText;
           chatInput.style.height = 'auto';
           chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
+          chatSendBtn.disabled = !chatInput.value.trim();
           chatInput.focus();
           pendingAsrText = '';
           vpHide();
@@ -2860,7 +5318,7 @@ const indexHtml = `<!DOCTYPE html>
 
     function scheduleMicRelease() {
       clearTimeout(micReleaseTimer);
-      micReleaseTimer = setTimeout(releaseMic, 60000);
+      micReleaseTimer = setTimeout(releaseMic, 30000);
     }
 
     function connectVoice() {
@@ -2913,7 +5371,7 @@ const indexHtml = `<!DOCTYPE html>
         vpHide();
         scheduleMicRelease();
         status.classList.remove('recording');
-        if (status.textContent === 'Processing...' || status.textContent === 'Finishing...' || status.textContent === 'Recording...') {
+        if (status.textContent === _t('pro.status.processing') || status.textContent === 'Finishing...' || status.textContent === _t('pro.status.recording')) {
           status.textContent = defaultStatusText;
         }
         setTimeout(connectVoice, 2000);
@@ -2923,7 +5381,7 @@ const indexHtml = `<!DOCTYPE html>
     async function acquireMic() {
       if (audioReady) return true;
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        status.textContent = window.isSecureContext ? 'Mic not available' : 'Mic needs HTTPS';
+        status.textContent = window.isSecureContext ? _t('pro.status.mic_not_available') : _t('pro.status.mic_needs_https');
         return false;
       }
       try {
@@ -2946,9 +5404,9 @@ const indexHtml = `<!DOCTYPE html>
         return true;
       } catch (e) {
         if (e.name === 'NotAllowedError') {
-          status.textContent = 'Mic denied - check browser settings';
+          status.textContent = _t('pro.status.mic_denied');
         } else if (e.name === 'SecurityError') {
-          status.textContent = 'Mic blocked - not secure context';
+          status.textContent = _t('pro.status.mic_blocked');
         } else {
           status.textContent = 'Mic error: ' + (e.message || e.name || 'unknown');
         }
@@ -2985,7 +5443,7 @@ const indexHtml = `<!DOCTYPE html>
         stopRec(true, false);
         return;
       }
-      status.textContent = 'Recording...';
+      status.textContent = _t('pro.status.recording');
       status.classList.add('recording');
       text.textContent = '';
       vpShow();
@@ -3016,7 +5474,7 @@ const indexHtml = `<!DOCTYPE html>
 
       // Normal release: keep capturing audio for 300ms to avoid cutting off trailing speech,
       // then send asr_end. UI already shows "processing" state.
-      status.textContent = 'Processing...';
+      status.textContent = _t('pro.status.processing');
       trailingTimer = setTimeout(function() {
         isRecording = false;
         if (voiceWs?.readyState === 1) voiceWs.send(JSON.stringify({ type: 'asr_end' }));
@@ -3134,7 +5592,7 @@ const indexHtml = `<!DOCTYPE html>
         swipedToSend = false;
         voiceBar.classList.remove('cancel-zone');
         voiceBar.classList.add('recording');
-        status.textContent = 'Recording...';
+        status.textContent = _t('pro.status.recording');
         status.classList.add('recording');
         vpSetCancel(false);
         vpSetSendReady(false);
@@ -3302,17 +5760,27 @@ const indexHtml = `<!DOCTYPE html>
     // --- Chat Mode ---
     var chatBar = document.getElementById('chat-bar');
     var chatInput = document.getElementById('chat-input');
+    if (!isMobile) {
+      var pasteKey = isMac ? 'Cmd' : 'Ctrl';
+      chatInput.placeholder = _t('pro.chat.placeholder', {key: holdKeyName, paste: pasteKey});
+    }
     var chatSendBtn = document.getElementById('chat-send-btn');
-    var chatMicBtn = document.getElementById('chat-mic-btn');
+    var chatMicBtn = null; // removed from UI
     var chatQuickActions = document.getElementById('chat-quick-actions');
     var chatMenuToggle = document.getElementById('menu-chat-toggle');
     var chatMenuBtn = document.getElementById('chat-menu-btn');
+    var chatVoiceToggle = document.getElementById('chat-voice-toggle');
+    var chatHoldSpeak = document.getElementById('chat-hold-speak');
+    var cvtMicIcon = document.getElementById('cvt-mic-icon');
+    var cvtKbIcon = document.getElementById('cvt-kb-icon');
     var chatModeEnabled = false;
+    var chatVoiceMode = false; // false=keyboard, true=hold-to-speak
 
-    // Auto-grow textarea
+    // Auto-grow textarea + toggle send button
     chatInput.addEventListener('input', function() {
       this.style.height = 'auto';
       this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+      chatSendBtn.disabled = !this.value.trim();
     });
 
     // Send chat message to terminal
@@ -3323,37 +5791,74 @@ const indexHtml = `<!DOCTYPE html>
       setTimeout(function() { sendInput(String.fromCharCode(13)); }, 50);
       chatInput.value = '';
       chatInput.style.height = 'auto';
+      chatSendBtn.disabled = true;
       autoScroll = true;
       scrollToCursor();
     }
 
     chatSendBtn.addEventListener('click', chatSend);
     chatInput.addEventListener('keydown', function(e) {
+      e.stopPropagation(); // Prevent xterm from stealing keystrokes
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         chatSend();
       }
     });
+    chatInput.addEventListener('keyup', function(e) { e.stopPropagation(); });
+    chatInput.addEventListener('keypress', function(e) { e.stopPropagation(); });
+    // Disable xterm textarea when chat input is focused to prevent double input
+    chatInput.addEventListener('focus', function() {
+      if (xtermTextarea) xtermTextarea.disabled = true;
+    });
+    chatInput.addEventListener('blur', function() {
+      if (xtermTextarea) xtermTextarea.disabled = false;
+    });
 
-    // Chat mic: reuse Hold to speak
-    var chatMicDown = false;
-    function chatMicStart(e) {
+    // Voice toggle in chat bar: switch between text input and hold-to-speak
+    chatVoiceToggle.addEventListener('click', function() {
+      chatVoiceMode = !chatVoiceMode;
+      if (chatVoiceMode) {
+        chatInput.style.display = 'none';
+        chatHoldSpeak.style.display = '';
+        chatSendBtn.style.display = 'none';
+        cvtMicIcon.style.display = 'none';
+        cvtKbIcon.style.display = '';
+        chatVoiceToggle.classList.add('active');
+      } else {
+        chatInput.style.display = '';
+        chatHoldSpeak.style.display = 'none';
+        chatSendBtn.style.display = '';
+        cvtMicIcon.style.display = '';
+        cvtKbIcon.style.display = 'none';
+        chatVoiceToggle.classList.remove('active');
+        chatInput.focus();
+      }
+    });
+
+    // Chat hold-to-speak button events
+    var chatHoldDown = false;
+    function chatHoldStart(e) {
       e.preventDefault();
-      chatMicDown = true;
-      chatMicBtn.classList.add('recording');
+      chatHoldDown = true;
+      chatHoldSpeak.classList.add('recording');
+      chatHoldSpeak.textContent = _t('pro.chat.recording');
       startRec();
     }
-    function chatMicEnd(e) {
-      if (!chatMicDown) return;
-      chatMicDown = false;
-      chatMicBtn.classList.remove('recording');
+    function chatHoldEnd(e) {
+      if (!chatHoldDown) return;
+      chatHoldDown = false;
+      chatHoldSpeak.classList.remove('recording');
+      chatHoldSpeak.textContent = _t('pro.chat.hold_to_speak');
       stopRec(false, false);
     }
-    chatMicBtn.addEventListener('mousedown', chatMicStart);
-    chatMicBtn.addEventListener('mouseup', chatMicEnd);
-    chatMicBtn.addEventListener('mouseleave', chatMicEnd);
-    chatMicBtn.addEventListener('touchstart', chatMicStart, { passive: false });
-    chatMicBtn.addEventListener('touchend', chatMicEnd);
+    chatHoldSpeak.addEventListener('mousedown', chatHoldStart);
+    chatHoldSpeak.addEventListener('mouseup', chatHoldEnd);
+    chatHoldSpeak.addEventListener('mouseleave', chatHoldEnd);
+    chatHoldSpeak.addEventListener('touchstart', chatHoldStart, { passive: false });
+    chatHoldSpeak.addEventListener('touchend', chatHoldEnd);
+
+    // chatMicBtn removed — voice toggle replaces it
+    var chatMicDown = false;
 
     // When in chat mode, voice result goes to chat input instead of terminal
     var chatModeVoiceIntercept = false;
@@ -3365,16 +5870,17 @@ const indexHtml = `<!DOCTYPE html>
       if (on) {
         chatBar.classList.add('active');
         voiceBar.style.display = 'none';
-        if (chatMenuToggle) chatMenuToggle.textContent = '\\u{1F4AC} Classic Mode';
+        if (chatMenuToggle) chatMenuToggle.textContent = _t('pro.menu.classic_mode');
       } else {
         chatBar.classList.remove('active');
         voiceBar.style.display = '';
-        if (chatMenuToggle) chatMenuToggle.textContent = '\\u{1F4AC} Chat Mode';
+        if (chatMenuToggle) chatMenuToggle.textContent = _t('pro.menu.chat_mode');
       }
       localStorage.setItem('hopcode-chat-mode', on ? '1' : '0');
     }
 
     if (chatMenuToggle) chatMenuToggle.addEventListener('click', function() {
+      if (!chatModeAllowed) return;
       setChatMode(!chatModeEnabled);
     });
     // Chat bar menu button opens the app menu (menuShow is hoisted)
@@ -3443,12 +5949,22 @@ const indexHtml = `<!DOCTYPE html>
 
 
 
-    // Auto-enable chat mode: default ON for all users (saved pref overrides)
-    (function initChatMode() {
+    // Auto-enable chat mode for all users on desktop
+    var chatModeAllowed = true;
+    // Immediately enable chat mode on desktop (don't wait for sessions API)
+    (function() {
+      var isWideScreen = window.innerWidth >= 768;
       var saved = localStorage.getItem('hopcode-chat-mode');
-      if (saved === '0') return; // explicitly disabled
-      setChatMode(true);
+      if (isWideScreen) {
+        // Desktop: always enable chat mode
+        setChatMode(true);
+      } else if (saved === '1') {
+        setChatMode(true);
+      }
     })();
+    function initChatModeForUser(user) {
+      if (chatMenuToggle) chatMenuToggle.style.display = '';
+    }
 
     // --- File Browser ---
     var fbPanel = document.getElementById('file-browser');
@@ -3487,7 +6003,7 @@ const indexHtml = `<!DOCTYPE html>
       var count = 0;
       if (fbPendingDropFiles && fbPendingDropFiles.length > 0) count = fbPendingDropFiles.length;
       else if (fbPendingDropEntries) count = fbPendingDropEntries.length;
-      fbPendingLabel.textContent = count + ' file' + (count !== 1 ? 's' : '') + ' ready to upload \u2014 navigate to target folder';
+      fbPendingLabel.textContent = _t('pro.fb.pending', {n: count});
       fbPendingDropEl.style.display = 'flex';
     }
 
@@ -3527,7 +6043,7 @@ const indexHtml = `<!DOCTYPE html>
     function fbLoadDir(dirPath) {
       var url = '/terminal/files?session=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(dirPath) + (fbShowHidden ? '&hidden=1' : '');
       fbError.style.display = 'none';
-      fbList.innerHTML = '<div style="padding:20px;text-align:center;color:#666">Loading...</div>';
+      fbList.innerHTML = '<div style="padding:20px;text-align:center;color:#666">' + _t('loading') + '</div>';
       fbTextPreview.style.display = 'none';
       fbList.style.display = '';
       fetch(url, { credentials: 'include' })
@@ -3557,7 +6073,7 @@ const indexHtml = `<!DOCTYPE html>
               html += '<div class="fb-item fb-file" data-path="'+fbEscHtml(fullPath)+'" data-name="'+fbEscHtml(item.name)+'" data-type="'+dtype+'"><span class="fb-icon">'+icon+'</span><div class="fb-info"><div class="fb-name">'+fbEscHtml(item.name)+'</div><div class="fb-meta">'+fbFormatSize(item.size)+' &middot; '+fbFormatTime(item.modified)+'</div></div>'+actions+'</div>';
             }
           });
-          fbList.innerHTML = html || '<div style="padding:20px;text-align:center;color:#666">Empty directory</div>';
+          fbList.innerHTML = html || '<div style="padding:20px;text-align:center;color:#666">' + _t('pro.fb.empty') + '</div>';
         })
         .catch(function(e) {
           if (dirPath) { fbLoadDir(''); return; }
@@ -3691,6 +6207,13 @@ const indexHtml = `<!DOCTYPE html>
       fbOpen();
       if (isMobile && xtermTextarea) xtermTextarea.blur();
     });
+    document.getElementById('menu-easy-mode').addEventListener('click', function(e) {
+      e.preventDefault();
+      location.href = '/terminal/easy?session=' + encodeURIComponent(sessionId);
+    });
+    document.getElementById('menu-lang-toggle').addEventListener('click', function() {
+      _setLang(_lang === 'en' ? 'zh' : 'en');
+    });
     document.getElementById('fb-close').addEventListener('click', fbClose);
     document.getElementById('fb-cwd-btn').addEventListener('click', function() { fbLoadDir(''); });
     var fbUploadInput = document.getElementById('fb-upload-input');
@@ -3701,8 +6224,42 @@ const indexHtml = `<!DOCTYPE html>
         fbUploadInput.value = '';
       }
     });
+    // Chat upload button (in input bar) — upload to CWD, not file browser path
+    var chatUploadInput = document.getElementById('chat-upload-input');
+    document.getElementById('chat-upload-btn').addEventListener('click', function() { chatUploadInput.click(); });
+    chatUploadInput.addEventListener('change', function() {
+      if (!chatUploadInput.files || chatUploadInput.files.length === 0) return;
+      var files = chatUploadInput.files;
+      var total = files.length;
+      var done = 0;
+      var errors = [];
+      for (var i = 0; i < files.length; i++) {
+        (function(file) {
+          fetch('/terminal/file-upload?session=' + encodeURIComponent(sessionId) + '&path=', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'X-Filename': encodeURIComponent(file.name) },
+            body: file,
+          })
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (data.error) errors.push(file.name + ': ' + data.error);
+            done++;
+            if (done === total) {
+              if (errors.length > 0) alert('Upload errors: ' + errors.join('; '));
+              if (fbPanel.classList.contains('open')) fbLoadDir(fbCurrentPath);
+            }
+          })
+          .catch(function(err) {
+            errors.push(file.name + ': ' + err.message);
+            done++;
+          });
+        })(files[i]);
+      }
+      chatUploadInput.value = '';
+    });
     document.getElementById('fb-mkdir-btn').addEventListener('click', function() {
-      var name = prompt('New folder name:');
+      var name = prompt(_t('pro.fb.folder_prompt'));
       if (!name || !name.trim()) return;
       name = name.trim();
       fetch('/terminal/mkdir?path=' + encodeURIComponent(fbCurrentPath) + '&name=' + encodeURIComponent(name) + '&exists=error', {
@@ -4334,6 +6891,21 @@ function getRecordingsHtml(): string {
 // Pre-compress large HTML responses for faster delivery over slow networks
 const indexHtmlGz = zlib.gzipSync(indexHtml);
 const loginHtmlGz = new Map<string, Buffer>(); // cached per multi-user state
+const vendorGzCache = new Map<string, { raw: Buffer; gz: Buffer }>(); // gzip cache for vendor files
+const easyHtmlGzCache = new Map<string, Buffer>(); // gzip cache for Easy Mode HTML per user
+
+// ---- Easy Mode Session Bootstrap ----
+// Tracks server-side Claude startup for new easy sessions.
+// Server connects to PTY, sends cd+claude, monitors output for ❯ prompt.
+// Easy Mode: map of session ID → ClaudeProcess (manages claude -p subprocesses)
+interface EasySessionInfo {
+  cp: ClaudeProcess;
+  owner: string;
+  project: string;
+  name: string;
+  createdAt: number;
+}
+const easySessions = new Map<string, EasySessionInfo>();
 
 function sendHtml(req: http.IncomingMessage, res: http.ServerResponse, html: string, precompressed?: Buffer): void {
   const acceptGzip = (req.headers['accept-encoding'] || '').includes('gzip');
@@ -4376,7 +6948,7 @@ const server = http.createServer(async (req, res) => {
   // Security headers
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' ws: wss: https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net data:; img-src 'self' data:; worker-src 'self' blob:; manifest-src 'self';");
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' ws: wss: https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net data:; img-src 'self' data:; worker-src 'self' blob:; manifest-src 'self'; frame-src *;");
 
   // Only log non-routine requests
   if (req.url !== '/health' && !req.url?.startsWith('/health/diagnose') && !req.url?.startsWith('/terminal?session=')) {
@@ -4487,7 +7059,22 @@ const server = http.createServer(async (req, res) => {
     try {
       const ownerParam = isMultiUser && auth.username && auth.username !== 'root' ? `?owner=${encodeURIComponent(auth.username)}` : '';
       const resp = await ptyFetch(`/sessions${ownerParam}`);
-      const sessions = await resp.json();
+      const sessions: any[] = await resp.json();
+      // Append Easy Mode sessions
+      for (const [id, info] of easySessions) {
+        if (isMultiUser && auth.username !== 'root' && info.owner !== auth.username) continue;
+        // Don't duplicate if PTY session with same ID exists
+        if (sessions.some((s: any) => s.id === id)) continue;
+        sessions.push({
+          id,
+          name: info.name,
+          owner: info.owner,
+          clientCount: 0,
+          mode: 'easy',
+          project: info.project,
+          createdAt: info.createdAt,
+        });
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ currentUser: auth.username, sessions }));
     } catch {
@@ -4505,6 +7092,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const auth = getAuthInfo(req);
+    if (!(await checkSessionLimit(auth.username))) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `You can have up to ${MAX_SESSIONS_PER_USER} sessions. Please close an existing session first.` }));
+      return;
+    }
     const id = 'sess_' + randomBytes(12).toString('hex');
     try {
       const sessionBody: Record<string, string> = { id, owner: auth.username };
@@ -4540,18 +7132,87 @@ const server = http.createServer(async (req, res) => {
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('end', async () => {
       try {
-        const { session, name } = JSON.parse(Buffer.concat(chunks).toString());
+        const { session, name, oldName: clientOldName } = JSON.parse(Buffer.concat(chunks).toString());
         const resp = await ptyFetch(`/sessions/${encodeURIComponent(session)}/rename`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name }),
         });
         const data = await resp.json();
+        // For easy sessions: rename the project folder too
+        if (session.startsWith('easy_') && clientOldName && name !== clientOldName) {
+          const renameAuth = getAuthInfo(req);
+          const rHomeDir = (!renameAuth.linuxUser || renameAuth.linuxUser === 'root') ? (process.env.HOME || '/root') : `/home/${renameAuth.linuxUser}`;
+          const safeName = name.replace(/[^a-zA-Z0-9_\-\u4e00-\u9fff]/g, '-');
+          const oldDir = `${rHomeDir}/coding/${clientOldName}`;
+          const newDir = `${rHomeDir}/coding/${safeName}`;
+          try {
+            const fs = await import('fs');
+            if (fs.existsSync(oldDir) && !fs.existsSync(newDir)) {
+              fs.renameSync(oldDir, newDir);
+              // Regenerate CLAUDE.md with new project name
+              setupProjectTemplate(newDir, renameAuth.linuxUser || renameAuth.username, safeName);
+            }
+          } catch (e) {
+            console.error('Failed to rename project folder:', e);
+          }
+        }
         res.writeHead(resp.status, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(data));
       } catch {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: 'Bad request' }));
+      }
+    });
+    req.resume();
+    return;
+  }
+
+  // Share: create Cloudflare tunnel for a local port
+  if ((req.url === '/terminal/share' || req.url === '/share') && req.method === 'POST') {
+    if (!isAuthenticated(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return;
+    }
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', async () => {
+      try {
+        const { port } = JSON.parse(Buffer.concat(chunks).toString());
+        if (!port) throw new Error('No port');
+        // Use cloudflared quick tunnel (no account needed)
+        const { execFile } = await import('child_process');
+        const child = execFile('cloudflared', ['tunnel', '--url', `http://127.0.0.1:${port}`], { timeout: 15000 });
+        let output = '';
+        let tunnelUrl = '';
+        const onData = (data: Buffer) => {
+          output += data.toString();
+          const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+          if (match) tunnelUrl = match[0];
+        };
+        child.stdout?.on('data', onData);
+        child.stderr?.on('data', onData);
+        // Wait for tunnel URL (up to 10s)
+        await new Promise<void>((resolve) => {
+          const check = setInterval(() => {
+            if (tunnelUrl) { clearInterval(check); resolve(); }
+          }, 300);
+          setTimeout(() => { clearInterval(check); resolve(); }, 10000);
+        });
+        if (tunnelUrl) {
+          // Keep tunnel process alive — store pid for cleanup
+          console.log(`[share] Tunnel created: ${tunnelUrl} → port ${port} (pid ${child.pid})`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ url: tunnelUrl, port }));
+        } else {
+          child.kill();
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Tunnel creation timeout' }));
+        }
+      } catch (e: any) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message || 'Bad request' }));
       }
     });
     req.resume();
@@ -4730,6 +7391,40 @@ const server = http.createServer(async (req, res) => {
   // Strip /terminal prefix so PWA assets work behind reverse proxy
   const assetPath = pathname.startsWith('/terminal/') ? pathname.slice('/terminal'.length) : pathname;
 
+  // Serve vendor files from node_modules (xterm, etc.)
+  if (assetPath.startsWith('/vendor/')) {
+    const VENDOR_MAP: Record<string, string> = {
+      '/vendor/xterm.css': 'node_modules/xterm/css/xterm.css',
+      '/vendor/xterm.js': 'node_modules/xterm/lib/xterm.js',
+      '/vendor/xterm-addon-fit.js': 'node_modules/xterm-addon-fit/lib/xterm-addon-fit.js',
+      '/vendor/xterm-addon-webgl.js': 'node_modules/xterm-addon-webgl/lib/xterm-addon-webgl.js',
+    };
+    const vendorFile = VENDOR_MAP[assetPath];
+    if (vendorFile) {
+      // Serve with gzip if not cached yet
+      if (!vendorGzCache.has(assetPath)) {
+        try {
+          const data = await fs.promises.readFile(path.join(__dirname, '..', vendorFile));
+          vendorGzCache.set(assetPath, { raw: data, gz: zlib.gzipSync(data) });
+        } catch {
+          res.writeHead(404); res.end('Not found'); return;
+        }
+      }
+      const cached = vendorGzCache.get(assetPath)!;
+      const ext = path.extname(assetPath);
+      const ct = ext === '.css' ? 'text/css' : 'application/javascript';
+      const acceptGzip = (req.headers['accept-encoding'] || '').includes('gzip');
+      if (acceptGzip) {
+        res.writeHead(200, { 'Content-Type': ct, 'Content-Encoding': 'gzip', 'Cache-Control': 'public, max-age=604800, immutable', 'Vary': 'Accept-Encoding' });
+        res.end(cached.gz);
+      } else {
+        res.writeHead(200, { 'Content-Type': ct, 'Cache-Control': 'public, max-age=604800, immutable' });
+        res.end(cached.raw);
+      }
+      return;
+    }
+  }
+
   if (assetPath === '/manifest.json' || assetPath === '/sw.js' ||
       assetPath.startsWith('/icons/') || assetPath === '/favicon.ico') {
     const MIME_TYPES: Record<string, string> = {
@@ -4815,13 +7510,18 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: 'Permission denied' }));
         return;
       }
-      const existsMode = parsedUrl.searchParams.get('exists') || 'rename'; // 'error' | 'rename'
+      const existsMode = parsedUrl.searchParams.get('exists') || 'rename'; // 'error' | 'rename' | 'skip'
       const target = path.join(parentDir, folderName);
       let actualName = folderName;
       let newDir = target;
       let alreadyExists = false;
       try { await fs.promises.access(target); alreadyExists = true; } catch {}
       if (alreadyExists) {
+        if (existsMode === 'skip') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, path: target, name: folderName, existed: true }));
+          return;
+        }
         if (existsMode === 'error') {
           res.writeHead(409, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Folder already exists' }));
@@ -4846,7 +7546,25 @@ const server = http.createServer(async (req, res) => {
 
   if ((pathname === '/terminal/file-upload' || pathname === '/file-upload') && req.method === 'POST') {
     try {
-      const targetDir = resolveSafePath(parsedUrl.searchParams.get('path') || '/', auth.linuxUser);
+      let requestedPath = parsedUrl.searchParams.get('path') || '';
+      let targetDir: string;
+      if (!requestedPath) {
+        // Resolve to PTY session CWD
+        const sid = parsedUrl.searchParams.get('session') || 'default';
+        try {
+          const cwdResp = await ptyFetch(`/sessions/${encodeURIComponent(sid)}/cwd`);
+          if (cwdResp.ok) {
+            const cwdData = await cwdResp.json() as { cwd: string };
+            targetDir = resolveSafePath(cwdData.cwd, auth.linuxUser);
+          } else {
+            targetDir = resolveSafePath('/', auth.linuxUser);
+          }
+        } catch {
+          targetDir = resolveSafePath('/', auth.linuxUser);
+        }
+      } else {
+        targetDir = resolveSafePath(requestedPath, auth.linuxUser);
+      }
       const rawFilename = req.headers['x-filename'] as string;
       let filename: string;
       try { filename = decodeURIComponent(rawFilename); } catch { filename = rawFilename; }
@@ -5010,7 +7728,7 @@ const server = http.createServer(async (req, res) => {
       const fileName = path.basename(filePath);
       res.writeHead(200, {
         'Content-Type': mime,
-        'Content-Disposition': 'attachment; filename="' + fileName.replace(/"/g, '\\"') + '"',
+        'Content-Disposition': "attachment; filename*=UTF-8''" + encodeURIComponent(fileName),
         'Content-Length': stat.size.toString(),
       });
       const stream = fs.createReadStream(filePath);
@@ -5022,7 +7740,52 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Static file serving for Easy Mode projects: /serve/<project>/<path>
+  // Replaces python3 http.server — no orphaned processes, survives session close
+  const serveMatch = pathname.match(/^\/(terminal\/)?serve\/([^/]+)(\/.*)?$/);
+  if (serveMatch && (req.method === 'GET' || req.method === 'HEAD')) {
+    // Allow embedding in iframe (preview panel)
+    res.removeHeader('X-Frame-Options');
+    res.removeHeader('Content-Security-Policy');
+    const project = serveMatch[2]!;
+    const filePart = serveMatch[3] || '/index.html';
+    const homeDir = (!auth.linuxUser || auth.linuxUser === 'root') ? (process.env.HOME || '/root') : `/home/${auth.linuxUser}`;
+    const projectRoot = path.join(homeDir, 'coding', project);
+    const filePath = path.resolve(projectRoot, '.' + filePart);
+
+    // Security: must stay within project directory
+    if (!filePath.startsWith(projectRoot + '/') && filePath !== projectRoot) {
+      res.writeHead(403); res.end('Forbidden'); return;
+    }
+
+    try {
+      const stat = await fs.promises.stat(filePath);
+      if (stat.isDirectory()) {
+        // Try index.html in directory
+        const indexPath = path.join(filePath, 'index.html');
+        try {
+          await fs.promises.access(indexPath);
+          res.writeHead(302, { 'Location': pathname + (pathname.endsWith('/') ? '' : '/') + 'index.html' });
+          res.end(); return;
+        } catch {
+          res.writeHead(404); res.end('Not found'); return;
+        }
+      }
+      const mime = getMimeType(filePath);
+      res.writeHead(200, {
+        'Content-Type': mime + (mime.startsWith('text/') ? '; charset=utf-8' : ''),
+        'Cache-Control': 'no-cache',
+      });
+      fs.createReadStream(filePath).pipe(res);
+    } catch {
+      res.writeHead(404); res.end('Not found');
+    }
+    return;
+  }
+
   if ((pathname === '/terminal/preview' || pathname === '/preview') && req.method === 'GET') {
+    res.removeHeader('X-Frame-Options');
+    res.removeHeader('Content-Security-Policy');
     try {
       const requestedPath = parsedUrl.searchParams.get('path') || '';
       if (!requestedPath) { res.writeHead(400); res.end('Path required'); return; }
@@ -5076,6 +7839,31 @@ const server = http.createServer(async (req, res) => {
     } catch (e: any) {
       res.writeHead(500); res.end(e.message || 'Preview failed');
     }
+    return;
+  }
+
+  // --- TTS endpoint ---
+  if ((pathname === '/terminal/tts' || pathname === '/tts') && req.method === 'POST') {
+    let body = '';
+    req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+    req.on('end', async () => {
+      try {
+        const { text } = JSON.parse(body);
+        if (!text) { res.writeHead(400); res.end('Missing text'); return; }
+        const pcm = await synthesizeTts(text);
+        const wav = pcmToWav(pcm);
+        res.writeHead(200, {
+          'Content-Type': 'audio/wav',
+          'Content-Length': wav.length.toString(),
+          'Cache-Control': 'no-cache',
+        });
+        res.end(wav);
+      } catch (e: any) {
+        console.error('TTS error:', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
     return;
   }
 
@@ -5145,6 +7933,57 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Easy Mode: /terminal/easy, /easy, or any path with session=easy_*
+  const easyUrlCheck = new URL(req.url || '/', `http://${req.headers.host}`);
+  const easySessionCheck = easyUrlCheck.searchParams.get('session');
+  const isProForced = easyUrlCheck.searchParams.get('mode') === 'pro';
+  const isEasyRoute = !isProForced && (pathname === '/terminal/easy' || pathname === '/easy' ||
+    (easySessionCheck && easySessionCheck.startsWith('easy_') && pathname !== '/terminal'));
+  if (isEasyRoute) {
+    if (auth.username !== 'root' && auth.username !== 'pony') {
+      res.writeHead(302, { 'Location': '/terminal' });
+      res.end();
+      return;
+    }
+    if (!easySessionCheck) {
+      // Check session limit before auto-creating
+      if (!(await checkSessionLimit(auth.username))) {
+        const limitHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Session Limit</title><style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f5f5f7;color:#1d1d1f}.card{background:#fff;border-radius:16px;padding:40px;max-width:400px;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.08)}h2{margin:0 0 12px;font-size:20px}p{margin:0 0 24px;color:#86868b;font-size:15px;line-height:1.5}a{display:inline-block;padding:10px 24px;background:#007aff;color:#fff;border-radius:8px;text-decoration:none;font-size:15px}a:hover{background:#0066d6}</style></head><body><div class="card"><h2>Session Limit Reached</h2><p>You can have up to ${MAX_SESSIONS_PER_USER} sessions at the same time. Please close an existing session before creating a new one.</p><a href="/terminal">Back to Sessions</a></div></body></html>`;
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(limitHtml);
+        return;
+      }
+      // Auto-create easy session — no PTY needed, just project folder + ClaudeProcess
+      const id = 'easy_' + randomBytes(12).toString('hex');
+      const now = new Date();
+      const dateSuffix = String(now.getMonth() + 1).padStart(2, '0') + String(now.getDate()).padStart(2, '0')
+        + '-' + String(now.getHours()).padStart(2, '0') + String(now.getMinutes()).padStart(2, '0');
+      const projectName = 'project-' + dateSuffix + randomBytes(1).toString('hex').charAt(0);
+      try {
+        const homeDir = (!auth.linuxUser || auth.linuxUser === 'root') ? (process.env.HOME || '/root') : `/home/${auth.linuxUser}`;
+        const projectDir = `${homeDir}/coding/${projectName}`;
+        try {
+          setupProjectTemplate(projectDir, auth.linuxUser || auth.username, projectName);
+          console.log(`[easy] Project template created: ${projectDir}/CLAUDE.md`);
+        } catch (e) {
+          console.error('[easy] Failed to setup project template:', e);
+        }
+      } catch (e) {
+        console.error('Failed to create easy session:', e);
+      }
+      res.writeHead(302, { 'Location': '/terminal/easy?session=' + encodeURIComponent(id) + '&project=' + encodeURIComponent(projectName) });
+      res.end();
+      return;
+    }
+    const cacheKey = auth.username || '_default';
+    const easyHtml = getEasyModeHtml(auth);
+    if (!easyHtmlGzCache.has(cacheKey)) {
+      easyHtmlGzCache.set(cacheKey, zlib.gzipSync(easyHtml));
+    }
+    sendHtml(req, res, easyHtml, easyHtmlGzCache.get(cacheKey));
+    return;
+  }
+
   // Recordings page: /terminal/recordings (root/admin only)
   if (pathname === '/terminal/recordings' || pathname === '/recordings') {
     if (auth.username !== 'root' && auth.username !== 'admin') {
@@ -5163,9 +8002,18 @@ const server = http.createServer(async (req, res) => {
 
   // Create new session: /terminal?action=new — proxy to PTY service
   if (action === 'new') {
+    if (!(await checkSessionLimit(auth.username))) {
+      const limitHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Session Limit</title><style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f5f5f7;color:#1d1d1f}.card{background:#fff;border-radius:16px;padding:40px;max-width:400px;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.08)}h2{margin:0 0 12px;font-size:20px}p{margin:0 0 24px;color:#86868b;font-size:15px;line-height:1.5}a{display:inline-block;padding:10px 24px;background:#007aff;color:#fff;border-radius:8px;text-decoration:none;font-size:15px}a:hover{background:#0066d6}</style></head><body><div class="card"><h2>Session Limit Reached</h2><p>You can have up to ${MAX_SESSIONS_PER_USER} sessions at the same time. Please close an existing session before creating a new one.</p><a href="/terminal">Back to Sessions</a></div></body></html>`;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(limitHtml);
+      return;
+    }
     const id = 'sess_' + randomBytes(12).toString('hex');
+    const proNow = new Date();
+    const proSessionName = 'session-' + String(proNow.getMonth() + 1).padStart(2, '0') + String(proNow.getDate()).padStart(2, '0')
+      + '-' + String(proNow.getHours()).padStart(2, '0') + String(proNow.getMinutes()).padStart(2, '0');
     try {
-      const sessionBody: Record<string, string> = { id, owner: auth.username };
+      const sessionBody: Record<string, string> = { id, name: proSessionName, owner: auth.username };
       if (auth.linuxUser) sessionBody.linuxUser = auth.linuxUser;
       const resp = await ptyFetch('/sessions', {
         method: 'POST',
@@ -5200,7 +8048,6 @@ terminalWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) =>
   const url = new URL(req.url!, `http://${req.headers.host}`);
   const sessionId = url.searchParams.get('session') || 'default';
   const wsAuth = getAuthInfo(req);
-
   // Connect to PTY service WebSocket, include owner for verification (root bypasses)
   const ownerQuery = isMultiUser && wsAuth.username !== 'root' ? `?owner=${encodeURIComponent(wsAuth.username)}` : '';
   const ptyWsUrl = `ws://127.0.0.1:${PTY_SERVICE_PORT}/ws/${encodeURIComponent(sessionId)}${ownerQuery}`;
@@ -5221,14 +8068,14 @@ terminalWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) =>
     console.log(`Terminal proxy connected: ${sessionId}`);
   });
 
-  // PTY service -> browser: transparent forward (preserve text/binary frame type)
+  // PTY service -> browser: transparent forward + feed to easy processor
   ptyWs.on('message', (data: Buffer | string, isBinary: boolean) => {
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.send(data, { binary: isBinary });
     }
   });
 
-  // Browser -> PTY service: transparent forward
+  // Browser -> PTY service: transparent forward + notify easy processor
   clientWs.on('message', (data: Buffer | string, isBinary: boolean) => {
     if (ptyReady && ptyWs.readyState === WebSocket.OPEN) {
       ptyWs.send(data, { binary: isBinary });
@@ -5263,6 +8110,83 @@ terminalWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) =>
     if (ptyWs.readyState === WebSocket.OPEN) {
       ptyWs.close();
     }
+  });
+});
+
+// Easy Mode WebSocket server — claude -p structured JSON protocol
+const easyWss = new WebSocketServer({ noServer: true });
+easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
+  const url = new URL(req.url!, `http://${req.headers.host}`);
+  const sessionId = url.searchParams.get('session') || 'default';
+  const projectParam = url.searchParams.get('project') || '';
+  const wsAuth = getAuthInfo(req);
+
+  // Determine project directory
+  const homeDir = (!wsAuth.linuxUser || wsAuth.linuxUser === 'root')
+    ? (process.env.HOME || '/root')
+    : `/home/${wsAuth.linuxUser}`;
+  const projectDir = projectParam
+    ? `${homeDir}/coding/${projectParam}`
+    : `${homeDir}`;
+
+  // Get or create ClaudeProcess for this session
+  let info = easySessions.get(sessionId);
+  let cp: ClaudeProcess;
+  // Per-client message sender
+  const sendToClient = (msg: EasyServerMessage) => {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send(JSON.stringify(msg));
+    }
+  };
+
+  if (!info) {
+    cp = new ClaudeProcess(sessionId, projectDir, sendToClient);
+    info = { cp, owner: wsAuth.username, project: projectParam, name: projectParam || sessionId, createdAt: Date.now() };
+    easySessions.set(sessionId, info);
+    console.log(`[easy] Created ClaudeProcess for ${sessionId} in ${projectDir}`);
+  } else {
+    // Add this client as an additional listener (supports multiple browser tabs)
+    cp = info.cp;
+    cp.addListener(sendToClient);
+    console.log(`[easy] Reconnected to ClaudeProcess for ${sessionId}`);
+  }
+
+  // Send current state + history on connect
+  const history = cp.getHistory();
+  if (history.length > 0) {
+    clientWs.send(JSON.stringify({ type: 'history', messages: history }));
+  }
+  // Send current state
+  clientWs.send(JSON.stringify({
+    type: 'state',
+    state: cp.isActive() ? 'thinking' : 'ready',
+  }));
+
+  // Client messages
+  clientWs.on('message', (data: Buffer | string) => {
+    try {
+      const raw = data.toString();
+      console.log(`[easy] ${sessionId} recv: ${raw.substring(0, 200)}`);
+      const msg: EasyClientMessage = JSON.parse(raw);
+      if (msg.type === 'send') {
+        console.log(`[easy] ${sessionId} sendMessage: ${msg.text.substring(0, 100)}`);
+        cp!.sendMessage(msg.text);
+      } else if (msg.type === 'cancel') {
+        cp!.cancel();
+      }
+    } catch (e) {
+      console.error(`[easy] ${sessionId} message parse error:`, (e as Error).message);
+    }
+  });
+
+  clientWs.on('close', () => {
+    console.log(`[easy] Client disconnected: ${sessionId}`);
+    cp!.removeListener(sendToClient);
+    // Don't dispose ClaudeProcess — keep it alive for reconnect
+  });
+
+  clientWs.on('error', (err) => {
+    console.error(`[easy] Client error for ${sessionId}:`, err.message);
   });
 });
 
@@ -5345,6 +8269,10 @@ server.on('upgrade', (request, socket, head) => {
   if (p === '/ws' || p === '/terminal/ws' || p === '/ws/terminal') {
     terminalWss.handleUpgrade(request, socket, head, (ws) => {
       terminalWss.emit('connection', ws, request);
+    });
+  } else if (p === '/ws-easy' || p === '/terminal/ws-easy') {
+    easyWss.handleUpgrade(request, socket, head, (ws) => {
+      easyWss.emit('connection', ws, request);
     });
   } else if (p === '/ws-voice' || p === '/terminal/ws-voice' || p === '/ws/voice') {
     voiceWss.handleUpgrade(request, socket, head, (ws) => {
