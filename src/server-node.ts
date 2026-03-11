@@ -1673,7 +1673,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     <button class="input-btn" id="voice-toggle" title="Voice/Keyboard"><svg id="vt-mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg><svg id="vt-kb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display:none"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="6" y1="8" x2="6" y2="8.01"/><line x1="10" y1="8" x2="10" y2="8.01"/><line x1="14" y1="8" x2="14" y2="8.01"/><line x1="18" y1="8" x2="18" y2="8.01"/><line x1="6" y1="12" x2="6" y2="12.01"/><line x1="10" y1="12" x2="10" y2="12.01"/><line x1="14" y1="12" x2="14" y2="12.01"/><line x1="18" y1="12" x2="18" y2="12.01"/><line x1="8" y1="16" x2="16" y2="16"/></svg></button>
     <button class="input-btn" id="cancel-btn" title="Stop"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>
     <button id="hold-speak">Hold to speak</button>
-    <textarea id="msg-input" rows="1" placeholder="Message..." autocomplete="off"></textarea>
+    <textarea id="msg-input" rows="1" placeholder="" autocomplete="off"></textarea>
     <button class="input-btn" id="upload-btn" title="Upload file"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M12 16V8m0 0l-3 3m3-3l3 3"/></svg></button>
     <button class="input-btn" id="send-btn" title="Send"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg></button>
   </div>
@@ -1735,7 +1735,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   <div class="menu-divider"></div>
   <div class="menu-section">
     <div class="menu-item" id="menu-home"><span class="mi-icon">&#x1F3E0;</span><span class="mi-label" data-i18n="easy.menu.home">Home</span><span class="mi-arrow">&#x203A;</span></div>
-    <div class="menu-item" id="menu-files"><span class="mi-icon">&#x1F4C1;</span><span class="mi-label" data-i18n="easy.menu.files">Files</span><span class="mi-arrow">&#x203A;</span></div>
+    <div class="menu-item" id="menu-files"><span class="mi-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="#60a5fa"><path d="M2 6a2 2 0 012-2h5l2 2h9a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg></span><span class="mi-label" data-i18n="easy.menu.files">Files</span><span class="mi-arrow">&#x203A;</span></div>
     <div class="menu-item" id="menu-apps"><span class="mi-icon">&#x2B50;</span><span class="mi-label" data-i18n="easy.menu.apps">Apps</span><span class="mi-arrow">&#x203A;</span></div>
   </div>
   <div class="menu-divider"></div>
@@ -2320,7 +2320,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     var canInput = (newState === 'ready');
     msgInput.disabled = !canInput;
     if (newState === 'ready') {
-      msgInput.placeholder = _t('easy.input.placeholder');
+      msgInput.placeholder = (('ontouchstart' in window || navigator.maxTouchPoints > 0) && window.innerWidth < 768) ? _t('easy.input.placeholder_mobile') : _t('easy.input.placeholder', {key: /Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Option' : 'Alt'});
     } else if (newState === 'thinking') {
       msgInput.placeholder = _t('easy.input.thinking');
     } else {
@@ -2912,7 +2912,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         items.forEach(function(item) {
           var row = document.createElement('div');
           row.className = 'fp-item';
-          var icon = item.isDirectory ? '&#128193;' : fileIcon(item.name);
+          var icon = item.isDirectory ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="#60a5fa"><path d="M2 6a2 2 0 012-2h5l2 2h9a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg>' : fileIcon(item.name);
           var dateStr = item.modified ? fmtDate(item.modified) : '';
           row.innerHTML = '<span class="icon">' + icon + '</span><span class="name">' + escHtml(item.name) + '</span><span class="date">' + dateStr + '</span>';
           row.addEventListener('click', function() {
@@ -3075,6 +3075,25 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   var voiceSent = false;
   var voiceTriggered = false; // true when user sent via voice → auto-TTS reply
 
+  function fillInputFromVoice(text) {
+    // Switch to keyboard mode if in voice mode
+    if (voiceMode) {
+      voiceMode = false;
+      holdSpeak.classList.remove('show');
+      msgInput.style.display = '';
+      vtMicIcon.style.display = '';
+      vtKbIcon.style.display = 'none';
+      voiceToggle.classList.remove('active');
+    }
+    // Fill input and show send button
+    msgInput.value = text;
+    updateSendBtn();
+    msgInput.style.height = 'auto';
+    msgInput.style.height = Math.min(msgInput.scrollHeight, 120) + 'px';
+    msgInput.focus();
+    msgInput.selectionStart = msgInput.selectionEnd = text.length;
+  }
+
   function connectVoice() {
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     voiceWs = new WebSocket(proto + '//' + location.host + '/terminal/ws-voice');
@@ -3086,12 +3105,10 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         pendingAsrText = d.text;
         voText.textContent = d.text;
         if (!isRecording && !voiceSent) {
-          // Final result after release — auto-send in Easy Mode
+          // Final result after release — fill textbox for user to review/edit
           voiceSent = true;
-          voiceTriggered = true;
           voiceOverlay.classList.remove('show');
-          msgInput.value = d.text;
-          sendMessage();
+          fillInputFromVoice(d.text);
         }
       } else if (d.type === 'asr_partial' && d.text) {
         pendingAsrText = d.text;
@@ -3099,10 +3116,8 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       } else if (d.type === 'error') {
         if (pendingAsrText && !voiceSent) {
           voiceSent = true;
-          voiceTriggered = true;
           voiceOverlay.classList.remove('show');
-          msgInput.value = pendingAsrText;
-          sendMessage();
+          fillInputFromVoice(pendingAsrText);
         } else {
           voStatus.textContent = _t('easy.voice.error');
           setTimeout(function() { voiceOverlay.classList.remove('show'); }, 1500);
@@ -3176,10 +3191,8 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     setTimeout(function() {
       if (pendingAsrText && !voiceSent && voiceOverlay.classList.contains('show')) {
         voiceSent = true;
-        voiceTriggered = true;
         voiceOverlay.classList.remove('show');
-        msgInput.value = pendingAsrText;
-        sendMessage();
+        fillInputFromVoice(pendingAsrText);
       }
     }, 3000);
   }
@@ -3242,11 +3255,54 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     stopRec(true);
   });
   holdSpeak.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+  // Mouse events for desktop
+  holdSpeak.addEventListener('mousedown', function(e) {
+    e.preventDefault();
+    micDown = true;
+    holdSwipedCancel = false;
+    holdSpeak.textContent = _t('easy.btn.release_to_send');
+    startRec();
+  });
+  document.addEventListener('mouseup', function() {
+    if (!micDown) return;
+    micDown = false;
+    holdSpeak.textContent = _t('easy.btn.hold_to_speak');
+    stopRec(holdSwipedCancel);
+  });
   voCancel.addEventListener('click', function() {
     micDown = false;
     holdSpeak.textContent = _t('easy.btn.hold_to_speak');
     stopRec(true);
   });
+
+  // ---- Option/Alt hold-to-speak ----
+  var altDown = false, altDownTime = 0, altCombined = false;
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Alt' && !altDown) {
+      altDown = true;
+      altDownTime = Date.now();
+      altCombined = false;
+      startRec();
+      e.preventDefault();
+      e.stopPropagation();
+    } else if (altDown && e.key !== 'Alt') {
+      altCombined = true;
+      if (isRecording) stopRec(true);
+    }
+  }, true);
+  document.addEventListener('keyup', function(e) {
+    if (e.key === 'Alt' && altDown) {
+      altDown = false;
+      var holdDuration = Date.now() - altDownTime;
+      e.preventDefault();
+      e.stopPropagation();
+      if (altCombined || holdDuration < 800) {
+        if (isRecording) stopRec(true);
+      } else {
+        stopRec(false);
+      }
+    }
+  }, true);
 
   // ---- Drag & drop upload ----
   document.addEventListener('dragover', function(e) { e.preventDefault(); });
@@ -3261,6 +3317,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   });
 
   // ---- Init ----
+  msgInput.placeholder = (('ontouchstart' in window || navigator.maxTouchPoints > 0) && window.innerWidth < 768) ? _t('easy.input.placeholder_mobile') : _t('easy.input.placeholder', {key: /Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Option' : 'Alt'});
   restoreChatHistory();
   connectWs();
   connectVoice();
@@ -3816,7 +3873,7 @@ const indexHtml = `<!DOCTYPE html>
       <span id="fb-title" data-i18n="pro.fb.title">Files</span>
       <button id="fb-upload-btn" class="key-btn" data-i18n-title="pro.fb.upload" title="Upload files" style="font-size:14px;">&#x2191;</button>
       <input type="file" id="fb-upload-input" multiple style="display:none;">
-      <button id="fb-mkdir-btn" class="key-btn" data-i18n-title="pro.fb.mkdir" title="New folder" style="font-size:12px;">+&#x1F4C1;</button>
+      <button id="fb-mkdir-btn" class="key-btn" data-i18n-title="pro.fb.mkdir" title="New folder" style="font-size:12px;">+<svg width="12" height="12" viewBox="0 0 24 24" fill="#60a5fa"><path d="M2 6a2 2 0 012-2h5l2 2h9a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg></button>
       <button id="fb-hidden-btn" class="key-btn" data-i18n-title="pro.fb.hidden" title="Toggle hidden files" style="font-size:10px;opacity:0.5">.*</button>
       <button id="fb-cwd-btn" class="key-btn" data-i18n-title="pro.fb.cwd" title="Go to PTY working directory" data-i18n="pro.fb.cwd">CWD</button>
     </div>
@@ -3879,7 +3936,7 @@ const indexHtml = `<!DOCTYPE html>
         </div>
       </div>
       <div class="app-menu-sep"></div>
-      <div class="app-menu-item" id="menu-files" data-i18n="pro.menu.files">&#x1F4C1; Files</div>
+      <div class="app-menu-item" id="menu-files" data-i18n="pro.menu.files"><svg width="14" height="14" viewBox="0 0 24 24" fill="#60a5fa" style="vertical-align:-2px"><path d="M2 6a2 2 0 012-2h5l2 2h9a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg> Files</div>
       <a class="app-menu-item" href="/terminal" style="text-decoration:none;" data-i18n="pro.menu.home">&#x1F3E0; Home</a>
       <div class="app-menu-item" id="menu-easy-mode" style="color:#60a5fa;" data-i18n="pro.menu.easy_mode">&#x1F438; Easy Mode</div>
       <div class="app-menu-sep"></div>
@@ -4553,7 +4610,7 @@ const indexHtml = `<!DOCTYPE html>
       + '<div id="uc-file-list" style="color:#86868b;font-size:12px;font-family:monospace;max-height:80px;overflow-y:auto;padding:8px;background:#f5f5f7;border-radius:6px;border:1px solid #d2d2d7;"></div>'
       + '<div style="display:flex;flex-direction:column;gap:8px;">'
       + '<button id="uc-terminal" style="padding:10px 16px;background:#f0f0f2;color:#1d1d1f;border:1px solid #d2d2d7;border-radius:6px;font-size:14px;cursor:pointer;text-align:left;" data-i18n="pro.upload.to_terminal">&#x1F4CB; Paste to Terminal<span style="display:block;font-size:11px;color:#86868b;margin-top:2px;" data-i18n="pro.upload.to_terminal_sub">Upload to ~/.hopcode/uploads/, paste path into terminal</span></button>'
-      + '<button id="uc-files" style="padding:10px 16px;background:#f0f0f2;color:#1d1d1f;border:1px solid #d2d2d7;border-radius:6px;font-size:14px;cursor:pointer;text-align:left;" data-i18n="pro.upload.to_files">&#x1F4C1; Save to Files<span style="display:block;font-size:11px;color:#86868b;margin-top:2px;" data-i18n="pro.upload.to_files_sub">Browse and choose a folder in the file browser</span></button>'
+      + '<button id="uc-files" style="padding:10px 16px;background:#f0f0f2;color:#1d1d1f;border:1px solid #d2d2d7;border-radius:6px;font-size:14px;cursor:pointer;text-align:left;" data-i18n="pro.upload.to_files"><svg width="14" height="14" viewBox="0 0 24 24" fill="#60a5fa" style="vertical-align:-2px"><path d="M2 6a2 2 0 012-2h5l2 2h9a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg> Save to Files<span style="display:block;font-size:11px;color:#86868b;margin-top:2px;" data-i18n="pro.upload.to_files_sub">Browse and choose a folder in the file browser</span></button>'
       + '</div>'
       + '<div style="display:flex;justify-content:flex-end;">'
       + '<button id="uc-cancel" style="padding:8px 16px;background:#e5e5ea;color:#1d1d1f;border:none;border-radius:6px;font-size:14px;cursor:pointer;" data-i18n="cancel">Cancel</button>'
