@@ -975,20 +975,28 @@ async function buildSessionsHtml(username?: string): Promise<string> {
     .container { max-width: 600px; margin: 0 auto; padding: 20px 16px; }
 
     /* Header */
-    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-    .header-left { display: flex; align-items: center; gap: 10px; }
-    .header-left h1 { color: #4ade80; font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
-    .header-right { display: flex; align-items: center; gap: 8px; }
+    .header { margin-bottom: 16px; }
+    .header-row1 { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .header-brand { display: flex; align-items: center; gap: 8px; }
+    .header-brand img { width: 28px; height: 28px; border-radius: 6px; }
+    .header-brand h1 { color: #4ade80; font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
+    .header-meta { display: flex; align-items: center; gap: 8px; }
     .user-info { color: #6b7280; font-size: 12px; }
+    .logout-btn { color: #6b7280; font-size: 12px; text-decoration: none; padding: 4px 8px; border-radius: 6px; transition: all 0.15s; }
+    .logout-btn:hover { color: #f87171; background: rgba(248,113,113,0.1); }
+    .header-row2 { display: flex; align-items: center; justify-content: center; gap: 8px; }
+    .mode-toggle { display: flex; background: #1f2937; border-radius: 8px; overflow: hidden; border: 1px solid #374151; flex-shrink: 0; }
+    .mode-btn { padding: 6px 14px; font-size: 13px; font-weight: 600; cursor: pointer; border: none; background: none; color: #6b7280; transition: all 0.15s; text-decoration: none; display: inline-block; -webkit-tap-highlight-color: transparent; white-space: nowrap; }
+    .mode-btn.active { background: #3b82f6; color: #fff; }
+    .mode-btn:not(.active):hover { color: #d1d5db; }
     .new-btn {
       padding: 6px 14px; background: #4ade80; color: #000; border: none;
-      border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer;
-      text-decoration: none; display: inline-block;
+      border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer;
+      text-decoration: none; display: inline-block; white-space: nowrap;
       -webkit-tap-highlight-color: transparent; transition: background 0.15s;
     }
     .new-btn:hover { background: #22c55e; }
-    .logout-btn { color: #6b7280; font-size: 12px; text-decoration: none; padding: 4px 8px; border-radius: 6px; transition: all 0.15s; }
-    .logout-btn:hover { color: #f87171; background: rgba(248,113,113,0.1); }
+    .lang-btn { background: #1f2937; border: 1px solid #374151; color: #9ca3af; font-size: 12px; cursor: pointer; padding: 6px 10px; border-radius: 8px; font-weight: 600; white-space: nowrap; }
 
     /* Session list */
     .session-list { display: flex; flex-direction: column; gap: 6px; }
@@ -1093,10 +1101,12 @@ async function buildSessionsHtml(username?: string): Promise<string> {
     /* Mobile */
     @media (max-width: 500px) {
       .container { padding: 14px 12px; }
-      .header-left h1 { font-size: 18px; }
+      .header-brand h1 { font-size: 18px; }
+      .header-row2 { flex-wrap: wrap; }
+      .mode-btn { padding: 6px 10px; font-size: 12px; }
+      .new-btn { padding: 6px 10px; font-size: 12px; }
       .session-info { padding: 12px 10px; }
       .session-name-text { font-size: 14px; }
-      .new-btn { padding: 6px 12px; font-size: 12px; }
       .delete-btn { opacity: 0.7; }
     }
   </style>
@@ -1104,15 +1114,23 @@ async function buildSessionsHtml(username?: string): Promise<string> {
 <body>
   <div class="container">
     <div class="header">
-      <div class="header-left">
-        <h1>Hopcode</h1>
+      <div class="header-row1">
+        <div class="header-brand">
+          <img src="./icons/favicon.svg" alt="">
+          <h1>Hopcode</h1>
+        </div>
+        <div class="header-meta">
+          ${isMultiUser && username ? `<span class="user-info">${esc(username)}</span>` : ''}
+          <button class="lang-btn" id="lang-toggle" onclick="_setLang(_lang==='en'?'zh':'en')">EN/中</button>
+          <a class="logout-btn" href="/terminal/logout" data-i18n="portal.btn_logout">Logout</a>
+        </div>
       </div>
-      <div class="header-right">
-        ${isMultiUser && username ? `<span class="user-info">${esc(username)}</span>` : ''}
-        ${isRoot ? '<a class="new-btn" href="/terminal/easy" style="background:#3b82f6;color:#fff;" data-i18n="portal.btn_easy">Easy</a>' : ''}
-        <a class="new-btn" href="/terminal?action=new" data-i18n="portal.btn_new">+ New</a>
-        <button class="new-btn" id="lang-toggle" onclick="_setLang(_lang==='en'?'zh':'en')" style="background:#374151;color:#9ca3af;font-size:12px;cursor:pointer;border:none;padding:4px 10px;border-radius:6px;">EN/中</button>
-        <a class="logout-btn" href="/terminal/logout" data-i18n="portal.btn_logout">Logout</a>
+      <div class="header-row2">
+        ${isRoot ? `<div class="mode-toggle">
+          <a class="mode-btn" id="mode-easy" href="/terminal/easy" data-i18n="portal.mode_easy">Easy Mode</a>
+          <a class="mode-btn" id="mode-pro" href="/terminal?action=new" data-i18n="portal.mode_pro">Pro Mode</a>
+        </div>` : ''}
+        <a class="new-btn" id="new-project-btn" href="/terminal/easy" data-i18n="portal.btn_new_project">+ New Project</a>
       </div>
     </div>
     <div class="session-list">${cardsHtml}</div>
@@ -1120,6 +1138,27 @@ async function buildSessionsHtml(username?: string): Promise<string> {
 
   <script>
   (function() {
+    // --- Mode toggle with localStorage ---
+    var modeEasy = document.getElementById('mode-easy');
+    var modePro = document.getElementById('mode-pro');
+    var newBtn = document.getElementById('new-project-btn');
+    var savedMode = localStorage.getItem('hopcode-mode') || 'easy';
+
+    function setMode(mode) {
+      savedMode = mode;
+      localStorage.setItem('hopcode-mode', mode);
+      if (modeEasy && modePro) {
+        modeEasy.classList.toggle('active', mode === 'easy');
+        modePro.classList.toggle('active', mode === 'pro');
+      }
+      if (newBtn) {
+        newBtn.href = mode === 'easy' ? '/terminal/easy' : '/terminal?action=new';
+      }
+    }
+    setMode(savedMode);
+    if (modeEasy) modeEasy.addEventListener('click', function(e) { e.preventDefault(); setMode('easy'); });
+    if (modePro) modePro.addEventListener('click', function(e) { e.preventDefault(); setMode('pro'); });
+
     // --- Double-click to rename ---
     function startRename(nameEl) {
       if (nameEl.querySelector('input')) return;
