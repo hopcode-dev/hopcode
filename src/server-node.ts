@@ -901,7 +901,8 @@ function getLoginHtml(): string {
         .then(r => r.json())
         .then(d => {
           if (d.success) {
-            location.reload();
+            var ret = new URLSearchParams(location.search).get('return');
+            if (ret && ret.startsWith('/')) { location.href = ret; } else { location.reload(); }
           } else {
             document.getElementById('error').textContent = d.error || _t('login.error_incorrect');
             document.getElementById('error').style.display = 'block';
@@ -1494,6 +1495,47 @@ function getGuestErrorHtml(message: string): string {
 <script>${getI18nScript()}</script>
 <style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f5f5f7;color:#1d1d1f}.card{background:#fff;border-radius:16px;padding:40px;max-width:400px;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.08)}h2{margin:0 0 12px;font-size:20px}p{margin:0 0 24px;color:#86868b;font-size:15px;line-height:1.5}a{display:inline-block;padding:10px 24px;background:#007aff;color:#fff;border-radius:8px;text-decoration:none;font-size:15px}a:hover{background:#0066d6}</style></head>
 <body><div class="card"><h2>${message}</h2><p></p><a href="/">${t('en', 'login.btn')}</a></div></body></html>`;
+}
+
+function getGuestLandingHtml(lang: string, sessionName: string, ownerName: string, guestUrl: string, loginReturnUrl: string): string {
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Hopcode - ${esc(t(lang, 'guest.landing_title'))}</title>
+<script>${getI18nScript()}</script>
+<link rel="icon" type="image/svg+xml" href="./icons/favicon.svg">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,system-ui,'Segoe UI',sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);padding:20px}
+.landing{background:#fff;border-radius:20px;padding:36px 28px;max-width:380px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.2);text-align:center}
+.landing-icon{font-size:48px;margin-bottom:16px}
+.landing h2{font-size:20px;color:#1d1d1f;margin-bottom:6px;font-weight:700}
+.landing .session-name{font-size:15px;color:#86868b;margin-bottom:4px}
+.landing .owner-name{font-size:13px;color:#aeaeb2;margin-bottom:20px}
+.landing .desc{font-size:14px;color:#636366;margin-bottom:24px;line-height:1.5}
+.choice-btn{display:block;width:100%;padding:14px 20px;border-radius:12px;border:none;font-size:16px;font-weight:600;cursor:pointer;text-decoration:none;text-align:center;transition:all .15s ease;margin-bottom:12px}
+.choice-btn:active{transform:scale(.97)}
+.btn-login{background:#007aff;color:#fff}
+.btn-login:hover{background:#0066d6}
+.btn-guest{background:#f5f5f7;color:#1d1d1f;border:1px solid #d2d2d7}
+.btn-guest:hover{background:#e8e8ed}
+.choice-sub{font-size:12px;color:#aeaeb2;margin-top:-6px;margin-bottom:14px}
+.divider{display:flex;align-items:center;gap:12px;margin:16px 0;color:#aeaeb2;font-size:13px}
+.divider::before,.divider::after{content:'';flex:1;height:1px;background:#e5e5ea}
+</style></head>
+<body>
+<div class="landing">
+  <div class="landing-icon">&#x1F91D;</div>
+  <h2>${esc(t(lang, 'guest.landing_title'))}</h2>
+  <div class="session-name">${esc(sessionName)}</div>
+  ${ownerName ? `<div class="owner-name">by ${esc(ownerName)}</div>` : ''}
+  <div class="desc">${esc(t(lang, 'guest.landing_desc'))}</div>
+  <a class="choice-btn btn-login" href="/?return=${encodeURIComponent(loginReturnUrl)}">${esc(t(lang, 'guest.login'))}</a>
+  <div class="choice-sub">${esc(t(lang, 'guest.login_desc'))}</div>
+  <div class="divider">${esc(t(lang, 'guest.or'))}</div>
+  <a class="choice-btn btn-guest" href="${esc(guestUrl)}">${esc(t(lang, 'guest.join_as_guest'))}</a>
+  <div class="choice-sub">${esc(t(lang, 'guest.join_guest_desc'))}</div>
+</div>
+</body></html>`;
 }
 
 interface GuestOptions {
@@ -2152,6 +2194,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   <div class="invite-box">
     <h3>&#x1F91D; <span data-i18n="easy.invite.title">Invite to Collaborate</span></h3>
     <div class="invite-desc" data-i18n="easy.invite.desc">Share this link — anyone who opens it can join this session in real time, chat together, and work on the same project with Claude.</div>
+    <div id="invite-qr" style="text-align:center;margin-bottom:16px;"></div>
     <div class="invite-link-wrap">
       <div class="invite-link-label" data-i18n="easy.invite.link_label">Invite link</div>
       <div class="invite-link-row">
@@ -2479,11 +2522,57 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     }
   });
 
+  var _inviteUrl = '';
+  function renderInviteQR(url) {
+    var qrEl = document.getElementById('invite-qr');
+    if (!qrEl) return;
+    function doRender() {
+      try {
+        var qr = qrcode(0, 'M');
+        qr.addData(url);
+        qr.make();
+        qrEl.innerHTML = qr.createSvgTag(4, 6);
+        var svg = qrEl.querySelector('svg');
+        if (svg) { svg.style.borderRadius = '12px'; svg.style.background = '#fff'; svg.style.padding = '8px'; svg.style.maxWidth = '200px'; svg.style.height = 'auto'; }
+      } catch(e) { qrEl.innerHTML = ''; }
+    }
+    if (window.qrcode) { doRender(); } else {
+      var sc = document.createElement('script');
+      sc.src = 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js';
+      sc.onload = doRender;
+      sc.onerror = function() { qrEl.innerHTML = ''; };
+      document.head.appendChild(sc);
+    }
+  }
   document.getElementById('menu-invite').addEventListener('click', function() {
     menuHide();
-    inviteUrlEl.textContent = location.href;
     renderInviteUsers();
     inviteModal.classList.add('show');
+    // Fetch guest link from API
+    var qrEl = document.getElementById('invite-qr');
+    if (qrEl) qrEl.innerHTML = '<div style="color:#86868b;padding:12px;font-size:13px;">Loading...</div>';
+    inviteUrlEl.textContent = '...';
+    _inviteUrl = '';
+    fetch('/terminal/api/guest-link', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ sessionId: sessionId })
+    }).then(function(r) { return r.json(); }).then(function(data) {
+      if (data.url) {
+        _inviteUrl = data.url;
+        inviteUrlEl.textContent = data.url;
+        renderInviteQR(data.url);
+      } else {
+        inviteUrlEl.textContent = location.href;
+        _inviteUrl = location.href;
+        renderInviteQR(location.href);
+      }
+    }).catch(function() {
+      inviteUrlEl.textContent = location.href;
+      _inviteUrl = location.href;
+      renderInviteQR(location.href);
+    });
   });
   inviteModal.addEventListener('click', function(e) {
     if (e.target === inviteModal) inviteModal.classList.remove('show');
@@ -2492,7 +2581,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     inviteModal.classList.remove('show');
   });
   inviteCopyBtn.addEventListener('click', function() {
-    var url = location.href;
+    var url = _inviteUrl || location.href;
     var btn = inviteCopyBtn;
     function onCopied() {
       btn.textContent = _t('easy.copied_invite');
@@ -3216,13 +3305,13 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       } else if (d.type === 'participants') {
         updateParticipants(d.users);
       } else if (d.type === 'history') {
-        // Restore history on reconnect — append any new messages
-        var existingMsgs = chatArea.querySelectorAll('.msg.user, .msg.assistant');
-        var existingCount = existingMsgs.length;
-        if (d.messages) {
-          // Skip messages we already have, render the rest
-          var startIdx = existingCount === 0 ? 0 : existingCount;
-          for (var i = startIdx; i < d.messages.length; i++) {
+        // Server history is authoritative — clear chat and re-render from server
+        if (d.messages && d.messages.length > 0) {
+          // Remove all user/assistant messages (keep system messages like join/leave)
+          var oldMsgs = chatArea.querySelectorAll('.msg.user, .msg.assistant, .msg-wrap');
+          for (var k = 0; k < oldMsgs.length; k++) oldMsgs[k].remove();
+          currentAssistantMsg = null;
+          for (var i = 0; i < d.messages.length; i++) {
             var m = d.messages[i];
             if (m.role === 'user') {
               var isSelf = !m.sender || m.sender === username;
@@ -3253,7 +3342,8 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
             }
             currentAssistantMsg = null;
           }
-          if (startIdx < d.messages.length) autoScroll();
+          autoScroll();
+          saveChatHistory();
         }
       } else if (d.type === 'session_info') {
         _sessionOwner = d.owner;
@@ -3261,10 +3351,14 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         _isOwner = d.isOwner;
         _hasFileAccess = d.hasFileAccess;
         updateFileAccessUI();
-        // Set page title to project name
-        var projName = d.projectDir ? d.projectDir.split('/').pop() : '';
-        if (projName) {
-          document.title = projName + ' - Hopcode';
+        // Set page title to session name
+        var titleName = d.sessionName || '';
+        if (!titleName && d.projectDir) {
+          var parts = d.projectDir.split('/').filter(Boolean);
+          titleName = (parts[parts.length - 1] === 'workspace' && parts.length >= 2) ? parts[parts.length - 2] : parts[parts.length - 1];
+        }
+        if (titleName) {
+          document.title = titleName + ' - Hopcode';
           _originalTitle = document.title;
         }
       } else if (d.type === 'file_access_request') {
@@ -9615,9 +9709,43 @@ const server = http.createServer(async (req, res) => {
       res.end(getGuestErrorHtml(t(lang, isExpired ? 'guest.expired' : 'guest.invalid')));
       return;
     }
-    // Valid guest token — serve guest Easy Mode page (can chat, no menu/files/voice)
-    const guestAuth: AuthInfo = { authenticated: true, username: 'guest_' + randomBytes(4).toString('hex'), linuxUser: '' };
-    const guestHtml = getEasyModeHtml(guestAuth, { guestMode: true, guestSessionId: guestSession, guestToken, guestExpires });
+
+    // If user is already authenticated, redirect to the session as logged-in user
+    const guestAuth = getAuthInfo(req);
+    if (guestAuth.authenticated && guestAuth.username && !guestAuth.username.startsWith('guest_')) {
+      // Add user to session's sharedWith so they have access
+      const easySession = easySessions.get(guestSession);
+      if (easySession) {
+        easySession.sharedWith.add(guestAuth.username);
+        easySession._fileAccessUsers.add(guestAuth.username);
+      }
+      const sessionProject = easySession?.project || '';
+      const redirectUrl = `/terminal/easy?session=${encodeURIComponent(guestSession)}${sessionProject ? '&project=' + encodeURIComponent(sessionProject) : ''}`;
+      res.writeHead(302, { 'Location': redirectUrl });
+      res.end();
+      return;
+    }
+
+    // Show landing page with login vs guest choice (unless ?join=guest)
+    const joinMode = parsedUrl.searchParams.get('join');
+    if (joinMode !== 'guest') {
+      // Get session name for display
+      const easySession = easySessions.get(guestSession);
+      const sessionName = easySession?.name || guestSession;
+      const ownerName = easySession?.owner || '';
+
+      // Build the guest URL (same URL + join=guest)
+      const guestUrl = `${pathname}?session=${encodeURIComponent(guestSession)}&token=${encodeURIComponent(guestToken)}&expires=${encodeURIComponent(guestExpires)}&join=guest`;
+      // Build login URL that returns to the session after auth
+      const returnUrl = `/terminal/easy?session=${encodeURIComponent(guestSession)}${easySession?.project ? '&project=' + encodeURIComponent(easySession.project) : ''}`;
+
+      sendHtml(req, res, getGuestLandingHtml(lang, sessionName, ownerName, guestUrl, returnUrl));
+      return;
+    }
+
+    // join=guest — serve guest Easy Mode page (can chat, no menu/files/voice)
+    const guestAuthInfo: AuthInfo = { authenticated: true, username: 'guest_' + randomBytes(4).toString('hex'), linuxUser: '' };
+    const guestHtml = getEasyModeHtml(guestAuthInfo, { guestMode: true, guestSessionId: guestSession, guestToken, guestExpires });
     sendHtml(req, res, guestHtml);
     return;
   }
@@ -9641,6 +9769,134 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     // Invalid token — fall through to normal auth check
+  }
+
+  // --- /serve/ route (public, no auth required) ---
+  // Static file serving for Easy Mode projects — moved before auth so guests/anonymous can access previews
+  const serveMatchPre = pathname.match(/^\/(terminal\/)?serve\/([^/]+)(\/.*)?$/);
+  if (serveMatchPre && (req.method === 'GET' || req.method === 'HEAD')) {
+    // Allow embedding in iframe (preview panel)
+    res.removeHeader('X-Frame-Options');
+    res.removeHeader('Content-Security-Policy');
+    const project = decodeURIComponent(serveMatchPre[2]!);
+    const filePart = decodeURIComponent(serveMatchPre[3] || '/index.html');
+
+    // Find project directory: collect all candidates
+    const candidates: string[] = [];
+    // 1. All easy session dirs matching this project name
+    for (const [, eInfo] of easySessions) {
+      if (eInfo.project === project || path.basename(eInfo.cp.projectDir) === project) {
+        if (candidates.indexOf(eInfo.cp.projectDir) === -1) candidates.push(eInfo.cp.projectDir);
+      }
+    }
+    // 2. All users' coding dirs
+    try {
+      for (const u of fs.readdirSync('/home')) {
+        const c = path.join('/home', u, 'coding', project);
+        if (candidates.indexOf(c) === -1) candidates.push(c);
+      }
+    } catch {}
+    // 3. Root's coding dir
+    const rootCandidate = path.join(process.env.HOME || '/root', 'coding', project);
+    if (candidates.indexOf(rootCandidate) === -1) candidates.push(rootCandidate);
+
+    // Find first candidate that has the requested file
+    let projectRoot = candidates[0];
+    if (projectRoot) {
+      for (const c of candidates) {
+        const testPath = path.resolve(c, '.' + filePart);
+        if (testPath.startsWith(c + '/') || testPath === c) {
+          try { fs.accessSync(testPath); projectRoot = c; break; } catch {}
+        }
+      }
+      const filePath = path.resolve(projectRoot, '.' + filePart);
+
+      // Security: if workspace/ exists, restrict serving to workspace/ only
+      const wsExists = (() => { try { fs.statSync(path.join(projectRoot, 'workspace')); return true; } catch { return false; } })();
+      const serveRoot = wsExists ? path.join(projectRoot, 'workspace') : projectRoot;
+      if (!filePath.startsWith(serveRoot + '/') && filePath !== serveRoot) {
+        if (wsExists && filePart && !filePart.startsWith('/workspace/')) {
+          const wsFilePath = path.join(projectRoot, 'workspace', '.' + filePart);
+          try {
+            fs.accessSync(wsFilePath);
+            const newUrl = '/serve/' + encodeURIComponent(project) + '/workspace' + filePart + (parsedUrl.search || '');
+            res.writeHead(302, { 'Location': newUrl }); res.end(); return;
+          } catch {}
+        }
+        res.writeHead(403); res.end('Forbidden'); return;
+      }
+
+      try {
+        const stat = await fs.promises.stat(filePath);
+        if (stat.isDirectory()) {
+          const indexPath = path.join(filePath, 'index.html');
+          try {
+            await fs.promises.access(indexPath);
+            res.writeHead(302, { 'Location': pathname + (pathname.endsWith('/') ? '' : '/') + 'index.html' });
+            res.end(); return;
+          } catch {
+            res.writeHead(404); res.end('Not found'); return;
+          }
+        }
+        const wantRender = parsedUrl.searchParams.get('render') === '1';
+        const ext = path.extname(filePath).toLowerCase();
+        if (wantRender && ext === '.csv') {
+          const raw = await fs.promises.readFile(filePath, 'utf-8');
+          const rows = raw.split('\n').filter(r => r.trim());
+          let table = '<table>';
+          for (let i = 0; i < rows.length; i++) {
+            const cells = rows[i].split(',').map(c => c.replace(/^"|"$/g, '').trim());
+            const tag = i === 0 ? 'th' : 'td';
+            table += '<tr>' + cells.map(c => `<${tag}>${c.replace(/</g,'&lt;')}</${tag}>`).join('') + '</tr>';
+          }
+          table += '</table>';
+          const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font-family:system-ui;margin:16px;color:#1d1d1f}table{border-collapse:collapse;width:100%}th,td{border:1px solid #d2d2d7;padding:8px 12px;text-align:left;font-size:14px}th{background:#f5f5f7;font-weight:600}tr:nth-child(even){background:#fafafa}</style></head><body>${table}</body></html>`;
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+          res.end(html);
+        } else if (wantRender && ext === '.md') {
+          const raw = await fs.promises.readFile(filePath, 'utf-8');
+          const escHtml = (s: string) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+          const lines = raw.split('\n');
+          let html = '';
+          let inList = false;
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) { if (inList) { html += '</ul>'; inList = false; } html += '<br>'; continue; }
+            if (trimmed.startsWith('# ')) { html += `<h1>${escHtml(trimmed.slice(2))}</h1>`; continue; }
+            if (trimmed.startsWith('## ')) { html += `<h2>${escHtml(trimmed.slice(3))}</h2>`; continue; }
+            if (trimmed.startsWith('### ')) { html += `<h3>${escHtml(trimmed.slice(4))}</h3>`; continue; }
+            if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+              if (!inList) { html += '<ul>'; inList = true; }
+              html += `<li>${escHtml(trimmed.slice(2))}</li>`;
+              continue;
+            }
+            if (inList) { html += '</ul>'; inList = false; }
+            let p = escHtml(trimmed);
+            p = p.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+            p = p.replace(/\*(.+?)\*/g, '<em>$1</em>');
+            p = p.replace(/`(.+?)`/g, '<code>$1</code>');
+            p = p.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+            html += `<p>${p}</p>`;
+          }
+          if (inList) html += '</ul>';
+          const page = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font-family:system-ui;margin:16px;color:#1d1d1f;line-height:1.6;max-width:720px}h1,h2,h3{margin:1em 0 .5em}code{background:#f5f5f7;padding:2px 6px;border-radius:4px;font-size:13px}a{color:#007aff}ul{padding-left:20px}li{margin:4px 0}</style></head><body>${html}</body></html>`;
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+          res.end(page);
+        } else {
+          const mime = getMimeType(filePath);
+          res.writeHead(200, {
+            'Content-Type': mime + (mime.startsWith('text/') ? '; charset=utf-8' : ''),
+            'Cache-Control': 'no-cache',
+          });
+          fs.createReadStream(filePath).pipe(res);
+        }
+      } catch {
+        res.writeHead(404); res.end('Not found');
+      }
+      return;
+    }
+    res.writeHead(404); res.end('Not found');
+    return;
   }
 
   // Check authentication
@@ -9977,138 +10233,6 @@ const server = http.createServer(async (req, res) => {
       stream.on('error', () => { try { res.end(); } catch {} });
     } catch (e: any) {
       res.writeHead(500); res.end(e.message || 'Download failed');
-    }
-    return;
-  }
-
-  // Static file serving for Easy Mode projects: /serve/<project>/<path>
-  // Replaces python3 http.server — no orphaned processes, survives session close
-  const serveMatch = pathname.match(/^\/(terminal\/)?serve\/([^/]+)(\/.*)?$/);
-  if (serveMatch && (req.method === 'GET' || req.method === 'HEAD')) {
-    // Allow embedding in iframe (preview panel)
-    res.removeHeader('X-Frame-Options');
-    res.removeHeader('Content-Security-Policy');
-    const project = decodeURIComponent(serveMatch[2]!);
-    const filePart = decodeURIComponent(serveMatch[3] || '/index.html');
-
-    // Find project directory: collect all candidates, pick the one that has the file
-    const homeDir = (!auth.linuxUser || auth.linuxUser === 'root') ? (process.env.HOME || '/root') : `/home/${auth.linuxUser}`;
-    const candidates: string[] = [];
-    // 1. Requester's own dir (highest priority)
-    candidates.push(path.join(homeDir, 'coding', project));
-    // 2. All easy session dirs matching this project name
-    for (const [, eInfo] of easySessions) {
-      if (eInfo.project === project || path.basename(eInfo.cp.projectDir) === project) {
-        if (candidates.indexOf(eInfo.cp.projectDir) === -1) candidates.push(eInfo.cp.projectDir);
-      }
-    }
-    // 3. Other users' coding dirs
-    try {
-      for (const u of fs.readdirSync('/home')) {
-        const c = path.join('/home', u, 'coding', project);
-        if (candidates.indexOf(c) === -1) candidates.push(c);
-      }
-    } catch {}
-    // Also check root's coding dir
-    const rootCandidate = path.join(process.env.HOME || '/root', 'coding', project);
-    if (candidates.indexOf(rootCandidate) === -1) candidates.push(rootCandidate);
-
-    // Find first candidate that has the requested file
-    let projectRoot = candidates[0];
-    for (const c of candidates) {
-      const testPath = path.resolve(c, '.' + filePart);
-      if (testPath.startsWith(c + '/') || testPath === c) {
-        try { fs.accessSync(testPath); projectRoot = c; break; } catch {}
-      }
-    }
-    const filePath = path.resolve(projectRoot, '.' + filePart);
-
-    // Security: if workspace/ exists, restrict serving to workspace/ only
-    // Prevents path traversal from workspace/ HTML accessing project root files
-    const wsExists = (() => { try { fs.statSync(path.join(projectRoot, 'workspace')); return true; } catch { return false; } })();
-    const serveRoot = wsExists ? path.join(projectRoot, 'workspace') : projectRoot;
-    if (!filePath.startsWith(serveRoot + '/') && filePath !== serveRoot) {
-      // If file not in workspace/ but would exist there, redirect with workspace/ prefix
-      if (wsExists && filePart && !filePart.startsWith('/workspace/')) {
-        const wsFilePath = path.join(projectRoot, 'workspace', '.' + filePart);
-        try {
-          fs.accessSync(wsFilePath);
-          const newUrl = '/serve/' + encodeURIComponent(project) + '/workspace' + filePart + (parsedUrl.search || '');
-          res.writeHead(302, { 'Location': newUrl }); res.end(); return;
-        } catch {}
-      }
-      res.writeHead(403); res.end('Forbidden'); return;
-    }
-
-    try {
-      const stat = await fs.promises.stat(filePath);
-      if (stat.isDirectory()) {
-        // Try index.html in directory
-        const indexPath = path.join(filePath, 'index.html');
-        try {
-          await fs.promises.access(indexPath);
-          res.writeHead(302, { 'Location': pathname + (pathname.endsWith('/') ? '' : '/') + 'index.html' });
-          res.end(); return;
-        } catch {
-          res.writeHead(404); res.end('Not found'); return;
-        }
-      }
-      // Render CSV/MD as HTML when ?render=1
-      const wantRender = parsedUrl.searchParams.get('render') === '1';
-      const ext = path.extname(filePath).toLowerCase();
-      if (wantRender && ext === '.csv') {
-        const raw = await fs.promises.readFile(filePath, 'utf-8');
-        const rows = raw.split('\n').filter(r => r.trim());
-        let table = '<table>';
-        for (let i = 0; i < rows.length; i++) {
-          const cells = rows[i].split(',').map(c => c.replace(/^"|"$/g, '').trim());
-          const tag = i === 0 ? 'th' : 'td';
-          table += '<tr>' + cells.map(c => `<${tag}>${c.replace(/</g,'&lt;')}</${tag}>`).join('') + '</tr>';
-        }
-        table += '</table>';
-        const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font-family:system-ui;margin:16px;color:#1d1d1f}table{border-collapse:collapse;width:100%}th,td{border:1px solid #d2d2d7;padding:8px 12px;text-align:left;font-size:14px}th{background:#f5f5f7;font-weight:600}tr:nth-child(even){background:#fafafa}</style></head><body>${table}</body></html>`;
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
-        res.end(html);
-      } else if (wantRender && ext === '.md') {
-        const raw = await fs.promises.readFile(filePath, 'utf-8');
-        // Simple markdown → HTML: headings, bold, italic, code, links, lists, paragraphs
-        const esc = (s: string) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        const lines = raw.split('\n');
-        let html = '';
-        let inList = false;
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) { if (inList) { html += '</ul>'; inList = false; } html += '<br>'; continue; }
-          if (trimmed.startsWith('# ')) { html += `<h1>${esc(trimmed.slice(2))}</h1>`; continue; }
-          if (trimmed.startsWith('## ')) { html += `<h2>${esc(trimmed.slice(3))}</h2>`; continue; }
-          if (trimmed.startsWith('### ')) { html += `<h3>${esc(trimmed.slice(4))}</h3>`; continue; }
-          if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
-            if (!inList) { html += '<ul>'; inList = true; }
-            html += `<li>${esc(trimmed.slice(2))}</li>`;
-            continue;
-          }
-          if (inList) { html += '</ul>'; inList = false; }
-          let p = esc(trimmed);
-          p = p.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-          p = p.replace(/\*(.+?)\*/g, '<em>$1</em>');
-          p = p.replace(/`(.+?)`/g, '<code>$1</code>');
-          p = p.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
-          html += `<p>${p}</p>`;
-        }
-        if (inList) html += '</ul>';
-        const page = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font-family:system-ui;margin:16px;color:#1d1d1f;line-height:1.6;max-width:720px}h1,h2,h3{margin:1em 0 .5em}code{background:#f5f5f7;padding:2px 6px;border-radius:4px;font-size:13px}a{color:#007aff}ul{padding-left:20px}li{margin:4px 0}</style></head><body>${html}</body></html>`;
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
-        res.end(page);
-      } else {
-        const mime = getMimeType(filePath);
-        res.writeHead(200, {
-          'Content-Type': mime + (mime.startsWith('text/') ? '; charset=utf-8' : ''),
-          'Cache-Control': 'no-cache',
-        });
-        fs.createReadStream(filePath).pipe(res);
-      }
-    } catch {
-      res.writeHead(404); res.end('Not found');
     }
     return;
   }
@@ -10517,7 +10641,7 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
     clearTimeout(pendingLeave);
     info._leaveTimers.delete(connUser);
   }
-  const wasConnected = info.connectedUsers.has(connUser) && info.connectedUsers.get(connUser)!.size > 0;
+  const wasConnected = !!pendingLeave || (info.connectedUsers.has(connUser) && info.connectedUsers.get(connUser)!.size > 0);
   if (!info.connectedUsers.has(connUser)) {
     info.connectedUsers.set(connUser, new Set());
   }
@@ -10565,6 +10689,7 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
     type: 'session_info',
     owner: info.owner,
     projectDir: visibleDir,
+    sessionName: info.name || '',
     isOwner,
     hasFileAccess,
   }));
@@ -10653,12 +10778,14 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
       // If user has no more connections, debounce the leave broadcast
       // so reconnects don't trigger false join/leave notifications
       if (wsSet.size === 0 && info) {
-        info.connectedUsers.delete(connUser);
+        // DON'T delete from connectedUsers yet — keep the entry so reconnect
+        // sees wasConnected=true and doesn't broadcast a spurious "joined"
         // Wait 60s before broadcasting leave — gives time to reconnect
         const timer = setTimeout(() => {
           info!._leaveTimers.delete(connUser);
           // Check they haven't reconnected in the meantime
-          if (!info!.connectedUsers.has(connUser) || info!.connectedUsers.get(connUser)!.size === 0) {
+          const currentSet = info!.connectedUsers.get(connUser);
+          if (!currentSet || currentSet.size === 0) {
             info!.connectedUsers.delete(connUser);
             broadcastParticipants();
           }
