@@ -1645,7 +1645,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 /* Preview frame */
 #preview-container { display:none; flex:1; flex-direction:column; overflow:hidden; background:#ffffff; }
 #preview-container.show { display:flex; }
-#preview-bar { display:flex; align-items:center; padding:4px 10px; background:#f5f5f7; gap:6px; flex-shrink:0; border-bottom:1px solid #e5e5ea; flex-wrap:wrap; }
+#preview-bar { display:flex; align-items:center; padding:4px 10px; background:#f5f5f7; gap:6px; flex-shrink:0; border-bottom:1px solid #e5e5ea; flex-wrap:nowrap; }
 #preview-bar-actions { display:flex; align-items:center; gap:6px; margin-left:auto; flex-shrink:0; }
 #preview-nav { display:flex; gap:4px; overflow:hidden; min-width:0; flex:1; align-items:center; transition:all 0.2s; }
 #preview-nav.collapsed { display:none; }
@@ -1667,6 +1667,21 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 .preview-pill.welcome-pill { background:#fef3c7; color:#92400e; border-color:#fbbf24; font-family:system-ui; }
 .preview-pill.welcome-pill:hover { background:#fde68a; border-color:#f59e0b; }
 .preview-pill.welcome-pill.active { background:#f59e0b; color:#fff; border-color:#f59e0b; }
+/* Mobile preview dropdown */
+.preview-dropdown-wrap { position:relative; min-width:0; flex:1; }
+.preview-dropdown-btn { display:flex; align-items:center; gap:4px; background:#e8f0fe; border:1px solid #d2d2d7; border-radius:8px; padding:5px 10px; font-size:13px; color:#1a73e8; cursor:pointer; min-width:0; max-width:100%; font-family:'SF Mono',Monaco,monospace; }
+.preview-dropdown-btn:active { background:#d2e3fc; }
+.pdd-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0; }
+.pdd-arrow { font-size:8px; color:#86868b; flex-shrink:0; transition:transform 0.2s; }
+.preview-dropdown-menu { display:none; position:absolute; top:100%; left:0; right:0; margin-top:4px; background:#fff; border:1px solid #d2d2d7; border-radius:10px; box-shadow:0 4px 16px rgba(0,0,0,0.12); padding:4px 0; z-index:50; max-height:240px; overflow-y:auto; }
+.preview-dropdown-menu.show { display:block; }
+.pdd-item { display:flex; align-items:center; padding:10px 12px; font-size:13px; cursor:pointer; gap:8px; }
+.pdd-item:active { background:#f5f5f7; }
+.pdd-item.active { background:#e8f0fe; font-weight:600; color:#1a73e8; }
+.pdd-item-label { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:'SF Mono',Monaco,monospace; }
+.pdd-item-del { color:#ff3b30; font-size:18px; line-height:1; padding:0 4px; flex-shrink:0; opacity:0.6; }
+.pdd-item-del:active { opacity:1; }
+
 .preview-action { background:#ffffff; border:1px solid #d2d2d7; color:#86868b; border-radius:6px; padding:3px 10px; font-size:11px; cursor:pointer; white-space:nowrap; }
 .preview-action:active { background:#e5e5ea; }
 #preview-guide { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:20px; overflow-y:auto; }
@@ -1751,7 +1766,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 .qa-btn.always { border-color:#007aff; color:#007aff; font-size:12px; }
 
 /* Input bar */
-#input-bar { display:flex; align-items:flex-end; padding:8px 10px; background:#ffffff; border-top:1px solid #e5e5ea; flex-shrink:0; gap:8px; padding-bottom:max(20px, env(safe-area-inset-bottom, 20px)); }
+#input-bar { display:flex; align-items:flex-end; padding:8px 10px; background:#ffffff; border-top:1px solid #e5e5ea; flex-shrink:0; gap:8px; padding-bottom:max(8px, env(safe-area-inset-bottom, 8px)); }
 #msg-input { flex:1; background:#f0f0f2; color:#1d1d1f; border:1px solid #d2d2d7; border-radius:20px; padding:9px 16px; font-size:var(--easy-font-size, 15px); min-height:40px; max-height:120px; resize:none; outline:none; font-family:inherit; line-height:1.4; overflow-y:auto; scrollbar-width:none; }
 #msg-input::-webkit-scrollbar { display:none; }
 #msg-input::-webkit-resizer { display:none; }
@@ -1786,9 +1801,10 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   #tab-bar { display:none !important; }
   #input-bar { display:flex !important; padding-bottom:12px; }
   #quick-actions.show { display:flex !important; }
-  /* Finder file browser — inline on desktop */
-  #files-panel { position:static !important; width:100% !important; transform:none !important; border-left:none !important; border-right:none !important; z-index:auto !important; border-bottom:none; height:40%; flex-shrink:0; min-height:80px; overflow:hidden; }
+  /* Finder file browser — inline on desktop (always visible in left-panel) */
+  #files-panel { display:flex !important; position:static !important; width:100% !important; border-left:none !important; border-right:none !important; z-index:auto !important; border-bottom:none; height:40%; flex-shrink:0; min-height:80px; overflow:hidden; }
   #files-panel .fp-close { display:none; }
+  #files-panel .fp-collapse { display:block !important; }
   #files-overlay { display:none !important; }
   /* Chat area fills remaining space */
   #chat-area { flex:1; min-height:100px; }
@@ -1833,11 +1849,13 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   .welcome-greeting { font-size:24px; }
 }
 
-/* Files panel (mobile: slide-in overlay) */
-#files-panel { position:fixed; right:0; top:0; bottom:0; width:min(320px,85vw); background:#ffffff; border-left:1px solid #e5e5ea; transform:translateX(100%); transition:transform 0.25s ease; z-index:100; display:flex; flex-direction:column; }
-#files-panel.open { transform:translateX(0); }
-#files-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.3); z-index:99; display:none; }
-#files-overlay.show { display:block; }
+/* Files panel (mobile: tab content, fills main area) */
+#files-panel { display:none; flex-direction:column; flex:1; background:#ffffff; overflow:hidden; min-height:0; }
+#files-panel.open { display:flex; }
+#files-overlay { display:none; }
+/* Hide close/collapse buttons on mobile when used as tab */
+#files-panel .fp-close { display:none; }
+#files-panel .fp-collapse { display:none; }
 .fp-header { display:flex; align-items:center; padding:8px 12px; border-bottom:1px solid #e5e5ea; gap:8px; background:#f5f5f7; }
 .fp-header .fp-title { flex:1; font-size:13px; font-weight:600; color:#1d1d1f; }
 .fp-close { background:none; border:none; color:#86868b; font-size:20px; cursor:pointer; padding:4px; }
@@ -2033,6 +2051,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   <div id="tab-bar">
     <span id="guest-badge" style="display:none; background:#ff9500; color:#fff; font-size:11px; font-weight:600; padding:2px 8px; border-radius:10px; margin-right:8px;" data-i18n="guest.badge">Guest</span>
     <div class="tab-item active" id="tab-chat"><span data-i18n="easy.tab.chat">Chat</span><span class="tab-badge" id="chat-badge"></span></div>
+    <div class="tab-item" id="tab-files"><span data-i18n="easy.menu.files">Files</span><span class="tab-badge" id="files-badge"></span></div>
     <div class="tab-item" id="tab-preview"><span data-i18n="easy.tab.preview">Preview</span><span class="tab-badge" id="preview-badge"></span></div>
   </div>
 
@@ -2401,7 +2420,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   });
   document.getElementById('menu-files').addEventListener('click', function() {
     menuHide();
-    if (filesPanel) filesPanel.classList.toggle('open');
+    showTab('files');
   });
   document.getElementById('menu-apps').addEventListener('click', function() {
     menuHide();
@@ -2706,8 +2725,10 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   // Preview tab refs
   var tabBar = document.getElementById('tab-bar');
   var tabChat = document.getElementById('tab-chat');
+  var tabFiles = document.getElementById('tab-files');
   var tabPreview = document.getElementById('tab-preview');
   var chatBadge = document.getElementById('chat-badge');
+  var filesBadge = document.getElementById('files-badge');
   var previewBadge = document.getElementById('preview-badge');
   var previewContainer = document.getElementById('preview-container');
   var previewFrame = document.getElementById('preview-frame');
@@ -2715,7 +2736,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   var previewOpenBtn = document.getElementById('preview-open');
   var currentPreviewUrl = '';
   var previewUrls = []; // all detected URLs, newest first
-  var activeTab = 'chat'; // 'chat' | 'preview'
+  var activeTab = 'chat'; // 'chat' | 'files' | 'preview'
 
   function isDesktop() { return window.innerWidth >= 768; }
 
@@ -2726,21 +2747,52 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       chatArea.style.display = 'flex';
       previewContainer.classList.add('show');
       tabChat.classList.toggle('active', tab === 'chat');
+      if (tabFiles) tabFiles.classList.toggle('active', tab === 'files');
       tabPreview.classList.toggle('active', tab === 'preview');
+      if (tab === 'chat') autoScroll();
       return;
     }
     var leftPanel = document.getElementById('left-panel');
+    var participantsBar = document.getElementById('participants-bar');
+    var quickActions = document.getElementById('quick-actions');
+    var inputBar = document.getElementById('input-bar');
+    var resizeFilesChat = document.getElementById('resize-files-chat');
+    // Reset all
+    tabChat.classList.remove('active');
+    if (tabFiles) tabFiles.classList.remove('active');
+    tabPreview.classList.remove('active');
+    leftPanel.style.display = 'none';
+    previewContainer.classList.remove('show');
+    if (filesPanel) { filesPanel.classList.remove('open'); filesPanel.style.display = 'none'; }
+
     if (tab === 'chat') {
       leftPanel.style.display = 'flex';
-      previewContainer.classList.remove('show');
+      chatArea.style.display = 'flex';
+      if (participantsBar) participantsBar.style.display = '';
+      if (quickActions) quickActions.style.display = '';
+      if (inputBar) inputBar.style.display = '';
+      if (resizeFilesChat) resizeFilesChat.style.display = 'none';
       tabChat.classList.add('active');
-      tabPreview.classList.remove('active');
       chatBadge.classList.remove('show');
-    } else {
-      leftPanel.style.display = 'none';
+      autoScroll();
+    } else if (tab === 'files') {
+      if (tabFiles) tabFiles.classList.add('active');
+      // Show left-panel but hide chat elements, show only files
+      leftPanel.style.display = 'flex';
+      chatArea.style.display = 'none';
+      if (participantsBar) participantsBar.style.display = 'none';
+      if (quickActions) quickActions.style.display = 'none';
+      if (inputBar) inputBar.style.display = 'none';
+      if (resizeFilesChat) resizeFilesChat.style.display = 'none';
+      if (filesPanel) {
+        filesPanel.style.display = 'flex';
+        filesPanel.classList.add('open');
+        if (typeof loadFiles === 'function') loadFiles(filePath);
+      }
+      if (filesBadge) filesBadge.classList.remove('show');
+    } else if (tab === 'preview') {
       previewContainer.classList.add('show');
       tabPreview.classList.add('active');
-      tabChat.classList.remove('active');
       previewBadge.classList.remove('show');
     }
   }
@@ -2754,7 +2806,12 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     newFrame.id = 'preview-frame';
     newFrame.className = previewFrame.className;
     var sep = url.indexOf('?') >= 0 ? '&' : '?';
-    newFrame.src = url + sep + '_t=' + Date.now();
+    var finalUrl = url + sep + '_t=' + Date.now();
+    // PDF: mobile browsers can't render PDF in iframe — use server-side PDF viewer page
+    if (/\\.pdf(\\?|$)/i.test(url)) {
+      finalUrl = '/terminal/pdf-viewer?url=' + encodeURIComponent(url);
+    }
+    newFrame.src = finalUrl;
     parent.replaceChild(newFrame, previewFrame);
     previewFrame = newFrame;
   }
@@ -2814,93 +2871,146 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       document.getElementById('preview-bar-actions').style.display = 'none';
       return;
     }
-    // Measure available width
-    var barEl = document.getElementById('preview-bar');
-    var actionsEl = document.getElementById('preview-bar-actions');
-    var availWidth = (barEl ? barEl.offsetWidth : 300) - (actionsEl ? actionsEl.offsetWidth : 0) - 24;
+
     var isMob = !isDesktop();
-    var pillW = isMob ? 72 : 90;
-    var moreW = 38;
-    var gapW = 4;
 
-    var fitAll = Math.floor((availWidth + gapW) / (pillW + gapW));
-    var maxVisible;
-    if (previewUrls.length <= fitAll) {
-      maxVisible = previewUrls.length;
-    } else {
-      maxVisible = Math.max(1, Math.floor((availWidth - moreW + gapW) / (pillW + gapW)));
-    }
+    if (isMob) {
+      // Mobile: dropdown selector
+      var wrap = document.createElement('div');
+      wrap.className = 'preview-dropdown-wrap';
+      var btn = document.createElement('button');
+      btn.className = 'preview-dropdown-btn';
+      var btnLabel = document.createElement('span');
+      btnLabel.className = 'pdd-label';
+      btnLabel.textContent = currentPreviewUrl ? pillLabel(currentPreviewUrl) : pillLabel(previewUrls[0]);
+      btn.appendChild(btnLabel);
+      var arrow = document.createElement('span');
+      arrow.className = 'pdd-arrow';
+      arrow.textContent = '\u25BC';
+      btn.appendChild(arrow);
+      wrap.appendChild(btn);
 
-    var shown = previewUrls.slice(0, maxVisible);
-    var overflow = previewUrls.slice(maxVisible);
-
-    for (var i = 0; i < shown.length; i++) {
-      (function(url) {
-        var pill = document.createElement('span');
-        pill.className = 'preview-pill' + (url === currentPreviewUrl ? ' active' : '');
-        var label = document.createElement('span');
-        label.textContent = pillLabel(url);
-        pill.appendChild(label);
-        pill.title = url;
-        label.addEventListener('click', function() { selectPreviewPill(url); });
-        // Delete button
-        var del = document.createElement('span');
-        del.className = 'pill-del';
-        del.textContent = '×';
-        del.addEventListener('click', function(e) {
-          e.stopPropagation();
-          removePreviewUrl(url);
-        });
-        pill.appendChild(del);
-        previewNav.appendChild(pill);
-      })(shown[i]);
-    }
-
-    if (overflow.length > 0) {
-      var moreBtn = document.createElement('span');
-      moreBtn.className = 'preview-pill more-pill';
-      moreBtn.textContent = '+' + overflow.length;
       var menu = document.createElement('div');
-      menu.className = 'preview-more-menu';
-      for (var j = 0; j < overflow.length; j++) {
+      menu.className = 'preview-dropdown-menu';
+      for (var i = 0; i < previewUrls.length; i++) {
         (function(url) {
           var item = document.createElement('div');
-          item.className = 'preview-more-item' + (url === currentPreviewUrl ? ' active' : '');
-          var itemLabel = document.createElement('span');
-          itemLabel.textContent = pillLabel(url);
-          itemLabel.style.flex = '1';
-          item.appendChild(itemLabel);
-          item.title = url;
-          var itemDel = document.createElement('span');
-          itemDel.className = 'pill-del';
-          itemDel.textContent = '×';
-          itemDel.style.display = 'inline';
-          itemDel.addEventListener('click', function(e) {
+          item.className = 'pdd-item' + (url === currentPreviewUrl ? ' active' : '');
+          var label = document.createElement('span');
+          label.className = 'pdd-item-label';
+          label.textContent = pillLabel(url);
+          item.appendChild(label);
+          var del = document.createElement('span');
+          del.className = 'pdd-item-del';
+          del.textContent = '\u00D7';
+          del.addEventListener('click', function(e) {
             e.stopPropagation();
             menu.classList.remove('show');
             removePreviewUrl(url);
           });
-          item.appendChild(itemDel);
-          itemLabel.addEventListener('click', function(e) {
+          item.appendChild(del);
+          label.addEventListener('click', function(e) {
             e.stopPropagation();
             menu.classList.remove('show');
             selectPreviewPill(url);
           });
           menu.appendChild(item);
-        })(overflow[j]);
+        })(previewUrls[i]);
       }
-      moreBtn.appendChild(menu);
-      moreBtn.addEventListener('click', function(e) {
+      wrap.appendChild(menu);
+      btn.addEventListener('click', function(e) {
         e.stopPropagation();
         menu.classList.toggle('show');
       });
       document.addEventListener('click', function() { menu.classList.remove('show'); });
-      previewNav.appendChild(moreBtn);
+      previewNav.appendChild(wrap);
+    } else {
+      // Desktop: horizontal pills
+      var barEl = document.getElementById('preview-bar');
+      var actionsEl = document.getElementById('preview-bar-actions');
+      var availWidth = (barEl ? barEl.offsetWidth : 300) - (actionsEl ? actionsEl.offsetWidth : 0) - 24;
+      var pillW = 90;
+      var moreW = 38;
+      var gapW = 4;
+
+      var fitAll = Math.floor((availWidth + gapW) / (pillW + gapW));
+      var maxVisible;
+      if (previewUrls.length <= fitAll) {
+        maxVisible = previewUrls.length;
+      } else {
+        maxVisible = Math.max(1, Math.floor((availWidth - moreW + gapW) / (pillW + gapW)));
+      }
+
+      var shown = previewUrls.slice(0, maxVisible);
+      var overflow = previewUrls.slice(maxVisible);
+
+      for (var i = 0; i < shown.length; i++) {
+        (function(url) {
+          var pill = document.createElement('span');
+          pill.className = 'preview-pill' + (url === currentPreviewUrl ? ' active' : '');
+          var label = document.createElement('span');
+          label.textContent = pillLabel(url);
+          pill.appendChild(label);
+          pill.title = url;
+          label.addEventListener('click', function() { selectPreviewPill(url); });
+          var del = document.createElement('span');
+          del.className = 'pill-del';
+          del.textContent = '\u00D7';
+          del.addEventListener('click', function(e) {
+            e.stopPropagation();
+            removePreviewUrl(url);
+          });
+          pill.appendChild(del);
+          previewNav.appendChild(pill);
+        })(shown[i]);
+      }
+
+      if (overflow.length > 0) {
+        var moreBtn = document.createElement('span');
+        moreBtn.className = 'preview-pill more-pill';
+        moreBtn.textContent = '+' + overflow.length;
+        var menu = document.createElement('div');
+        menu.className = 'preview-more-menu';
+        for (var j = 0; j < overflow.length; j++) {
+          (function(url) {
+            var item = document.createElement('div');
+            item.className = 'preview-more-item' + (url === currentPreviewUrl ? ' active' : '');
+            var itemLabel = document.createElement('span');
+            itemLabel.textContent = pillLabel(url);
+            itemLabel.style.flex = '1';
+            item.appendChild(itemLabel);
+            item.title = url;
+            var itemDel = document.createElement('span');
+            itemDel.className = 'pill-del';
+            itemDel.textContent = '\u00D7';
+            itemDel.style.display = 'inline';
+            itemDel.addEventListener('click', function(e) {
+              e.stopPropagation();
+              menu.classList.remove('show');
+              removePreviewUrl(url);
+            });
+            item.appendChild(itemDel);
+            itemLabel.addEventListener('click', function(e) {
+              e.stopPropagation();
+              menu.classList.remove('show');
+              selectPreviewPill(url);
+            });
+            menu.appendChild(item);
+          })(overflow[j]);
+        }
+        moreBtn.appendChild(menu);
+        moreBtn.addEventListener('click', function(e) {
+          e.stopPropagation();
+          menu.classList.toggle('show');
+        });
+        document.addEventListener('click', function() { menu.classList.remove('show'); });
+        previewNav.appendChild(moreBtn);
+      }
     }
 
     document.getElementById('preview-bar-actions').style.display = 'flex';
     var toggleBtn = document.getElementById('preview-nav-toggle');
-    if (toggleBtn) toggleBtn.style.display = previewUrls.length > 1 ? '' : 'none';
+    if (toggleBtn) toggleBtn.style.display = (!isMob && previewUrls.length > 1) ? '' : 'none';
   }
 
   // Re-render on resize to adapt pill count
@@ -2978,6 +3088,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   }
 
   tabChat.addEventListener('click', function() { showTab('chat'); });
+  if (tabFiles) tabFiles.addEventListener('click', function() { showTab('files'); });
   tabPreview.addEventListener('click', function() { showTab('preview'); });
 
   // On new session (welcome active), start on preview tab (mobile) so cards are visible
@@ -3195,7 +3306,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     if (_filesRefreshTimer) return; // already scheduled
     _filesRefreshTimer = setTimeout(function() {
       _filesRefreshTimer = null;
-      if (isDesktop() || filesPanel.classList.contains('open')) {
+      if (isDesktop() || activeTab === 'files' || filesPanel.classList.contains('open')) {
         loadFiles(filePath);
       }
     }, 500);
@@ -5008,6 +5119,29 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   restoreChatHistory();
   connectWs();
   connectVoice();
+
+  // Mobile keyboard: resize #app to visual viewport so top bar stays visible
+  var appEl = document.getElementById('app');
+  if (window.visualViewport && appEl) {
+    var _vvRaf = false;
+    function syncAppHeight() {
+      if (_vvRaf) return;
+      _vvRaf = true;
+      requestAnimationFrame(function() {
+        _vvRaf = false;
+        appEl.style.height = window.visualViewport.height + 'px';
+        // Reset any page scroll caused by keyboard
+        window.scrollTo(0, 0);
+        document.documentElement.scrollTop = 0;
+      });
+    }
+    window.visualViewport.addEventListener('resize', syncAppHeight);
+    window.visualViewport.addEventListener('scroll', function() {
+      window.scrollTo(0, 0);
+      document.documentElement.scrollTop = 0;
+    });
+    syncAppHeight();
+  }
 
   // Set initial file path to project dir
   if (activeProject) {
@@ -9769,6 +9903,64 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     // Invalid token — fall through to normal auth check
+  }
+
+  // --- PDF viewer (public, wraps PDF in PDF.js for mobile browser support) ---
+  if ((pathname === '/terminal/pdf-viewer' || pathname === '/pdf-viewer') && req.method === 'GET') {
+    const pdfUrl = parsedUrl.searchParams.get('url') || '';
+    if (!pdfUrl) { res.writeHead(400); res.end('Missing url param'); return; }
+    res.removeHeader('X-Frame-Options');
+    res.removeHeader('Content-Security-Policy');
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#525659;overflow:hidden;font-family:-apple-system,system-ui,sans-serif}
+#page-container{overflow:auto;height:100vh;padding:8px 0 56px;-webkit-overflow-scrolling:touch}
+canvas{display:block;margin:4px auto;box-shadow:0 2px 8px rgba(0,0,0,.3)}
+.bar{position:fixed;bottom:0;left:0;right:0;background:rgba(50,54,57,.97);padding:8px 12px;display:flex;align-items:center;justify-content:center;gap:8px;z-index:10}
+.bar button{background:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:14px;cursor:pointer;min-width:36px}
+.bar button:active{background:#ddd}
+.bar span{color:#fff;font-size:13px;white-space:nowrap}
+</style></head><body>
+<div id="page-container"></div>
+<div class="bar">
+  <button id="prev">&#8592;</button>
+  <span id="info">Loading...</span>
+  <button id="next">&#8594;</button>
+  <button id="zout">&minus;</button>
+  <span id="zlabel">fit</span>
+  <button id="zin">+</button>
+</div>
+<script type="module">
+import{getDocument,GlobalWorkerOptions}from"https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.min.mjs";
+GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.worker.min.mjs";
+var pdfUrl=${JSON.stringify(pdfUrl)};
+var container=document.getElementById("page-container");
+var pdf=null,pageNum=1,scale=0,fitScale=1;
+async function load(){
+  pdf=await getDocument(pdfUrl).promise;
+  // fit-width scale
+  var p=await pdf.getPage(1);
+  var vp=p.getViewport({scale:1});
+  fitScale=Math.min((window.innerWidth-16)/vp.width,3);
+  scale=fitScale;
+  render();
+}
+async function render(){
+  var page=await pdf.getPage(pageNum);
+  var vp=page.getViewport({scale:scale});
+  var c=document.createElement("canvas");c.width=vp.width;c.height=vp.height;
+  container.innerHTML="";container.appendChild(c);
+  await page.render({canvasContext:c.getContext("2d"),viewport:vp}).promise;
+  document.getElementById("info").textContent=pageNum+"/"+pdf.numPages;
+  document.getElementById("zlabel").textContent=Math.round(scale/fitScale*100)+"%";
+}
+document.getElementById("prev").onclick=function(){if(pageNum>1){pageNum--;render()}};
+document.getElementById("next").onclick=function(){if(pdf&&pageNum<pdf.numPages){pageNum++;render()}};
+document.getElementById("zin").onclick=function(){scale=Math.min(scale*1.25,fitScale*5);render()};
+document.getElementById("zout").onclick=function(){scale=Math.max(scale/1.25,fitScale*0.25);render()};
+load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:center;padding:40px">Failed to load PDF: '+e.message+'</p>'});
+<\/script></body></html>`);
+    return;
   }
 
   // --- /serve/ route (public, no auth required) ---
