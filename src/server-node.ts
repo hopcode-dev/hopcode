@@ -1673,7 +1673,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 .preview-dropdown-btn:active { background:#d2e3fc; }
 .pdd-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0; }
 .pdd-arrow { font-size:8px; color:#86868b; flex-shrink:0; transition:transform 0.2s; }
-.preview-dropdown-menu { display:none; position:absolute; top:100%; left:0; right:0; margin-top:4px; background:#fff; border:1px solid #d2d2d7; border-radius:10px; box-shadow:0 4px 16px rgba(0,0,0,0.12); padding:4px 0; z-index:50; max-height:240px; overflow-y:auto; }
+.preview-dropdown-menu { display:none; position:fixed; left:8px; right:8px; background:#fff; border:1px solid #d2d2d7; border-radius:10px; box-shadow:0 4px 16px rgba(0,0,0,0.12); padding:4px 0; z-index:200; max-height:240px; overflow-y:auto; }
 .preview-dropdown-menu.show { display:block; }
 .pdd-item { display:flex; align-items:center; padding:10px 12px; font-size:13px; cursor:pointer; gap:8px; }
 .pdd-item:active { background:#f5f5f7; }
@@ -2867,6 +2867,9 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 
   function renderPreviewNav() {
     previewNav.innerHTML = '';
+    // Clean up any previous dropdown menus appended to body
+    var oldMenus = document.querySelectorAll('body > .preview-dropdown-menu');
+    for (var m = 0; m < oldMenus.length; m++) oldMenus[m].remove();
     if (previewUrls.length === 0) {
       document.getElementById('preview-bar-actions').style.display = 'none';
       return;
@@ -2917,9 +2920,14 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
           menu.appendChild(item);
         })(previewUrls[i]);
       }
-      wrap.appendChild(menu);
+      // Append menu to body so it's not clipped by overflow:hidden containers
+      document.body.appendChild(menu);
       btn.addEventListener('click', function(e) {
         e.stopPropagation();
+        if (!menu.classList.contains('show')) {
+          var rect = btn.getBoundingClientRect();
+          menu.style.top = (rect.bottom + 4) + 'px';
+        }
         menu.classList.toggle('show');
       });
       document.addEventListener('click', function() { menu.classList.remove('show'); });
@@ -3027,6 +3035,8 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 
   function setPreviewUrl(url, forceReload) {
     if (!url) return;
+    // Skip localhost/127.0.0.1 URLs — not reachable from client browser
+    if (/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:|\\/)/.test(url)) return;
     // Skip URLs the user has explicitly deleted
     if (_deletedPreviews[url]) return;
     // Remove duplicate if exists, then add to front (newest first)
@@ -3078,13 +3088,19 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     if (!urlMatch) return null;
     for (var i = 0; i < urlMatch.length; i++) {
       var u = urlMatch[i].replace(/[.,;:!?)]+$/, '');
-      // Match localhost, *.trycloudflare.com, *.ngrok.io, or similar tunnel/dev URLs
-      if (/localhost|127\\.0\\.0\\.1|trycloudflare|ngrok|loca\\.lt|\\d+\\.\\d+\\.\\d+\\.\\d+:\\d+/.test(u)) {
+      // Skip localhost/127.0.0.1 — not reachable from client browser in Easy Mode
+      if (/localhost|127\\.0\\.0\\.1/.test(u)) continue;
+      // Match tunnel/dev URLs
+      if (/trycloudflare|ngrok|loca\\.lt|\\d+\\.\\d+\\.\\d+\\.\\d+:\\d+/.test(u)) {
         return u;
       }
     }
-    // If none matched known patterns, return last URL (likely the one Claude just generated)
-    return urlMatch[urlMatch.length - 1].replace(/[.,;:!?)]+$/, '');
+    // Return last non-localhost URL if any
+    for (var j = urlMatch.length - 1; j >= 0; j--) {
+      var uu = urlMatch[j].replace(/[.,;:!?)]+$/, '');
+      if (!/localhost|127\\.0\\.0\\.1/.test(uu)) return uu;
+    }
+    return null;
   }
 
   tabChat.addEventListener('click', function() { showTab('chat'); });
@@ -3422,6 +3438,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
           var oldMsgs = chatArea.querySelectorAll('.msg.user, .msg.assistant, .msg-wrap');
           for (var k = 0; k < oldMsgs.length; k++) oldMsgs[k].remove();
           currentAssistantMsg = null;
+          _suppressUrlDetection = true; // Don't detect URLs from history replay
           for (var i = 0; i < d.messages.length; i++) {
             var m = d.messages[i];
             if (m.role === 'user') {
@@ -3453,6 +3470,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
             }
             currentAssistantMsg = null;
           }
+          _suppressUrlDetection = false;
           autoScroll();
           saveChatHistory();
         }
@@ -3640,6 +3658,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       if (!raw) return;
       var msgs = JSON.parse(raw);
       if (!Array.isArray(msgs) || msgs.length === 0) return;
+      _suppressUrlDetection = true;
       for (var i = 0; i < msgs.length; i++) {
         var m = msgs[i];
         if (m.role === 'assistant') {
@@ -3671,8 +3690,9 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
           }
         }
       }
+      _suppressUrlDetection = false;
       autoScroll();
-    } catch(e) {}
+    } catch(e) { _suppressUrlDetection = false; }
   }
 
   // ---- Linkify URLs in text (XSS-safe) ----
@@ -3861,6 +3881,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   }
 
   var _lastDetectedUrl = '';
+  var _suppressUrlDetection = false;
   function appendAssistantText(text, isThinking) {
     // Reuse thinking placeholder bubble if it exists (smooth transition, no flicker)
     if (currentAssistantMsg && currentAssistantMsg._isThinkingPlaceholder) {
@@ -3888,13 +3909,16 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       chatArea.appendChild(wrap);
     }
     // Auto-detect preview URL — only trigger reload if URL changed
-    var detectedUrl = detectPreviewUrl(text);
-    if (detectedUrl && detectedUrl !== _lastDetectedUrl) {
-      _lastDetectedUrl = detectedUrl;
-      setPreviewUrl(detectedUrl, true);
+    // Skip during history replay to avoid re-adding old URLs
+    if (!_suppressUrlDetection) {
+      var detectedUrl = detectPreviewUrl(text);
+      if (detectedUrl && detectedUrl !== _lastDetectedUrl) {
+        _lastDetectedUrl = detectedUrl;
+        setPreviewUrl(detectedUrl, true);
+      }
+      // Badge on chat tab if user is on preview
+      if (activeTab === 'preview') chatBadge.classList.add('show');
     }
-    // Badge on chat tab if user is on preview
-    if (activeTab === 'preview') chatBadge.classList.add('show');
     saveChatHistory();
   }
 
@@ -5966,6 +5990,7 @@ const indexHtml = `<!DOCTYPE html>
     var termWs = null;
     var isReconnect = false;
     var outputRefocusTimer = null;
+    var reconnectDelay = 2000;
     function connectTerminal() {
       setStatus(isReconnect ? _t('pro.status.reconnecting') : _t('pro.status.connecting'));
       termWs = new WebSocket(wsUrl);
@@ -6011,6 +6036,7 @@ const indexHtml = `<!DOCTYPE html>
       };
       termWs.onopen = () => {
         setStatus(defaultStatusText);
+        reconnectDelay = 2000; // reset backoff on successful connection
         lastCols = 0; lastRows = 0; sendResize();
       };
       termWs.onerror = () => {
@@ -6020,7 +6046,8 @@ const indexHtml = `<!DOCTYPE html>
         if (termWs.sessionExited) return;
         setStatus(_t('pro.status.reconnecting'), '#6b7280');
         isReconnect = true;
-        setTimeout(connectTerminal, 2000);
+        setTimeout(connectTerminal, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 1.5, 30000); // backoff up to 30s
       };
     }
     connectTerminal();
@@ -10757,8 +10784,12 @@ terminalWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) =>
     }
   });
 
-  ptyWs.on('close', () => {
+  ptyWs.on('close', (code) => {
     if (clientWs.readyState === WebSocket.OPEN) {
+      // If PTY closed unexpectedly (not from client disconnect), tell client session is gone
+      if (code !== 1000) {
+        try { clientWs.send(JSON.stringify({ type: 'session_exit' })); } catch {}
+      }
       clientWs.close();
     }
   });
@@ -10766,6 +10797,8 @@ terminalWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) =>
   ptyWs.on('error', (err) => {
     console.error(`PTY proxy error for ${sessionId}:`, err.message);
     if (clientWs.readyState === WebSocket.OPEN) {
+      // Tell client session is gone so it stops retrying
+      try { clientWs.send(JSON.stringify({ type: 'session_exit' })); } catch {}
       clientWs.close();
     }
   });
