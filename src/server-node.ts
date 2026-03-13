@@ -1609,7 +1609,8 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 #preview-nav.collapsed { display:none; }
 #preview-nav-toggle { font-size:10px; padding:3px 6px; transition:transform 0.2s; }
 #preview-nav-toggle.collapsed { transform:rotate(-90deg); }
-.preview-pill { padding:4px 8px; border-radius:12px; font-size:11px; cursor:pointer; border:1px solid #d2d2d7; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:120px; background:#e8f0fe; color:#1a73e8; font-family:'SF Mono',Monaco,monospace; transition:all 0.15s; flex-shrink:0; }
+.preview-pill { display:inline-flex; align-items:center; padding:4px 8px; border-radius:12px; font-size:11px; cursor:pointer; border:1px solid #d2d2d7; max-width:120px; background:#e8f0fe; color:#1a73e8; font-family:'SF Mono',Monaco,monospace; transition:all 0.15s; flex-shrink:0; }
+.preview-pill > span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .preview-pill.more-pill { background:#f5f5f7; color:#86868b; border-color:#d2d2d7; font-family:system-ui; max-width:none; position:relative; }
 .preview-more-menu { position:absolute; bottom:100%; left:0; background:#fff; border:1px solid #d2d2d7; border-radius:10px; box-shadow:0 4px 16px rgba(0,0,0,0.12); padding:4px 0; z-index:50; min-width:160px; display:none; }
 .preview-more-menu.show { display:block; }
@@ -1617,6 +1618,9 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 .preview-more-item:hover { background:#f5f5f7; }
 .preview-more-item.active { font-weight:600; }
 .preview-pill:hover { background:#d2e3fc; border-color:#1a73e8; }
+.preview-pill .pill-del { display:none; margin-left:2px; font-size:13px; line-height:1; color:inherit; opacity:0.5; cursor:pointer; }
+.preview-pill:hover .pill-del { display:inline; }
+.preview-pill .pill-del:hover { opacity:1; }
 .preview-pill.active { background:#1a73e8; color:#fff; border-color:#1a73e8; }
 .preview-pill.welcome-pill { background:#fef3c7; color:#92400e; border-color:#fbbf24; font-family:system-ui; }
 .preview-pill.welcome-pill:hover { background:#fde68a; border-color:#f59e0b; }
@@ -1657,6 +1661,12 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 #participants-bar .p-chip .p-role { font-size:10px; color:#86868b; }
 #participants-bar .p-chip.offline { opacity:0.5; }
 #participants-bar .p-chip .p-dot.offline { background:#c7c7cc; }
+#participants-bar .p-chip.ai-chip { background:#f3e8ff; border-color:#c084fc; }
+#participants-bar .p-chip.ai-chip:hover { background:#ede4ff; border-color:#a855f7; }
+#participants-bar .p-dot.busy { background:#007aff; animation:pulse 1.5s infinite; }
+#participants-bar .p-dot.queued { background:#ff9f0a; animation:pulse 1.5s infinite; }
+#participants-bar .p-dot.error { background:#ff3b30; }
+#participants-bar .p-dot.initializing { background:#ff9f0a; animation:pulse 1.5s infinite; }
 .mention { color:#007aff; font-weight:500; }
 .msg.mentioned { border-left:3px solid #007aff; padding-left:9px; }
 #mention-dropdown { display:none; position:absolute; bottom:100%; left:0; right:0; background:#fff; border:1px solid #e0e0e0; border-radius:10px; max-height:200px; overflow-y:auto; z-index:1000; margin-bottom:4px; box-shadow:0 -4px 16px rgba(0,0,0,.12); }
@@ -1810,6 +1820,9 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 .fp-item .icon { font-size:14px; width:16px; text-align:center; flex-shrink:0; }
 .fp-item .name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .fp-item .date { font-size:11px; color:#86868b; flex-shrink:0; width:90px; text-align:right; white-space:nowrap; }
+.fp-item .fp-actions { display:flex; gap:4px; flex-shrink:0; margin-left:4px; }
+.fp-item .fp-act { width:24px; height:24px; border:none; background:none; cursor:pointer; font-size:14px; padding:0; line-height:24px; text-align:center; border-radius:6px; color:#86868b; }
+.fp-item .fp-act:hover { background:#e0e0e5; color:#1d1d1f; }
 .fp-actions { display:flex; padding:6px 8px; gap:6px; border-top:1px solid #e5e5ea; background:#f5f5f7; }
 .fp-actions button { flex:1; padding:5px; border-radius:6px; border:1px solid #d2d2d7; background:#ffffff; color:#1d1d1f; font-size:12px; cursor:pointer; }
 .fp-actions button:active { background:#e5e5ea; }
@@ -2080,10 +2093,6 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 <div id="menu-overlay"></div>
 <div id="menu-sheet">
   <div class="menu-handle"></div>
-  <div class="menu-status">
-    <span class="status-dot yellow" id="menu-status-dot"></span>
-    <span class="menu-status-label" id="menu-status-text">Starting...</span>
-  </div>
   <div class="menu-divider"></div>
   <div class="menu-section">
     <div class="menu-item" id="menu-home"><span class="mi-icon">&#x1F3E0;</span><span class="mi-label" data-i18n="easy.menu.home">Home</span><span class="mi-arrow">&#x203A;</span></div>
@@ -2687,6 +2696,23 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     renderPreviewNav();
   }
 
+  function removePreviewUrl(url) {
+    var idx = previewUrls.indexOf(url);
+    if (idx >= 0) previewUrls.splice(idx, 1);
+    // If removing the active preview, switch to next available or clear
+    if (url === currentPreviewUrl) {
+      if (previewUrls.length > 0) {
+        selectPreviewPill(previewUrls[0]);
+      } else {
+        currentPreviewUrl = '';
+        previewFrame.src = 'about:blank';
+        previewFrame.classList.remove('loaded');
+        document.getElementById('preview-guide').style.display = '';
+      }
+    }
+    renderPreviewNav();
+  }
+
   function renderPreviewNav() {
     previewNav.innerHTML = '';
     if (previewUrls.length === 0) {
@@ -2717,9 +2743,20 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       (function(url) {
         var pill = document.createElement('span');
         pill.className = 'preview-pill' + (url === currentPreviewUrl ? ' active' : '');
-        pill.textContent = pillLabel(url);
+        var label = document.createElement('span');
+        label.textContent = pillLabel(url);
+        pill.appendChild(label);
         pill.title = url;
-        pill.addEventListener('click', function() { selectPreviewPill(url); });
+        label.addEventListener('click', function() { selectPreviewPill(url); });
+        // Delete button
+        var del = document.createElement('span');
+        del.className = 'pill-del';
+        del.textContent = '×';
+        del.addEventListener('click', function(e) {
+          e.stopPropagation();
+          removePreviewUrl(url);
+        });
+        pill.appendChild(del);
         previewNav.appendChild(pill);
       })(shown[i]);
     }
@@ -2734,9 +2771,22 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         (function(url) {
           var item = document.createElement('div');
           item.className = 'preview-more-item' + (url === currentPreviewUrl ? ' active' : '');
-          item.textContent = pillLabel(url);
+          var itemLabel = document.createElement('span');
+          itemLabel.textContent = pillLabel(url);
+          itemLabel.style.flex = '1';
+          item.appendChild(itemLabel);
           item.title = url;
-          item.addEventListener('click', function(e) {
+          var itemDel = document.createElement('span');
+          itemDel.className = 'pill-del';
+          itemDel.textContent = '×';
+          itemDel.style.display = 'inline';
+          itemDel.addEventListener('click', function(e) {
+            e.stopPropagation();
+            menu.classList.remove('show');
+            removePreviewUrl(url);
+          });
+          item.appendChild(itemDel);
+          itemLabel.addEventListener('click', function(e) {
             e.stopPropagation();
             menu.classList.remove('show');
             selectPreviewPill(url);
@@ -2982,18 +3032,28 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     }
     statusDot.className = dotCls;
     statusText.textContent = text;
-    if (menuStatusDot) menuStatusDot.className = dotCls;
-    if (menuStatusText) menuStatusText.textContent = text;
 
-    // Update input placeholder & disabled state — allow input when queued so users can keep sending
-    var canInput = (newState === 'ready' || newState === 'queued');
-    msgInput.disabled = !canInput;
-    if (newState === 'ready' || newState === 'queued') {
+    // Update 小码 chip dot in participants bar
+    var aiDot = document.getElementById('ai-chip-dot');
+    if (aiDot) {
+      aiDot.className = 'p-dot';
+      switch (newState) {
+        case 'ready': break; // green by default
+        case 'thinking': case 'tool_running': aiDot.className = 'p-dot busy'; break;
+        case 'queued': aiDot.className = 'p-dot queued'; break;
+        case 'error': aiDot.className = 'p-dot error'; break;
+        case 'initializing': aiDot.className = 'p-dot initializing'; break;
+      }
+    }
+
+    // Update input placeholder & disabled state — always allow input (messages queue)
+    msgInput.disabled = (newState === 'initializing' || newState === 'exited');
+    if (newState === 'ready') {
       msgInput.placeholder = (('ontouchstart' in window || navigator.maxTouchPoints > 0) || window.innerWidth < 768 || msgInput.offsetWidth < 300) ? _t('easy.input.placeholder_mobile') : _t('easy.input.placeholder', {key: /Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Option' : 'Alt'});
-    } else if (newState === 'thinking') {
-      msgInput.placeholder = _t('easy.input.thinking');
+    } else if (newState === 'thinking' || newState === 'tool_running' || newState === 'queued') {
+      msgInput.placeholder = _t('easy.input.placeholder_busy');
     } else {
-      msgInput.placeholder = _t('easy.input.working');
+      msgInput.placeholder = _t('easy.input.placeholder_mobile');
     }
 
     // Show/hide cancel (stop) button
@@ -3027,7 +3087,20 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     if (newState === 'ready' && prev !== 'ready' && prev !== 'initializing') {
       currentAssistantMsg = null;
       _lastDetectedUrl = '';
+      // Refresh files panel if visible
+      refreshFilesDebounced();
     }
+  }
+
+  var _filesRefreshTimer = null;
+  function refreshFilesDebounced() {
+    if (_filesRefreshTimer) return; // already scheduled
+    _filesRefreshTimer = setTimeout(function() {
+      _filesRefreshTimer = null;
+      if (isDesktop() || filesPanel.classList.contains('open')) {
+        loadFiles(filePath);
+      }
+    }, 500);
   }
 
   // ---- WebSocket (connects to /ws-easy for structured JSON messaging) ----
@@ -3088,6 +3161,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       } else if (d.type === 'tool') {
         if (d.status === 'done') {
           clearToolIndicator();
+          refreshFilesDebounced();
         } else {
           showToolActivity(d.name, d.detail);
         }
@@ -3481,50 +3555,74 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       }
     }
 
-    // Participants bar with clickable chips
+    // Participants bar — always visible, 小码 first then users
     var bar = document.getElementById('participants-bar');
     if (bar) {
-      if (users.length <= 1) {
-        bar.style.display = 'none';
-      } else {
-        bar.style.display = 'block';
-        bar.innerHTML = '';
-        for (var i = 0; i < users.length; i++) {
-          var u = users[i];
-          var chip = document.createElement('span');
-          chip.className = 'p-chip' + (u.online ? '' : ' offline');
-          var dot = document.createElement('span');
-          dot.className = 'p-dot' + (u.online ? '' : ' offline');
-          chip.appendChild(dot);
-          var nameSpan = document.createElement('span');
-          nameSpan.textContent = displayName(u.name);
-          chip.appendChild(nameSpan);
-          // Role tag
-          var roleText = '';
-          if (_sessionOwner && u.name === _sessionOwner) roleText = _t('easy.participant.owner');
-          else if (u.name === username) roleText = _t('easy.participant.you');
-          if (roleText) {
-            var role = document.createElement('span');
-            role.className = 'p-role';
-            role.textContent = '(' + roleText + ')';
-            chip.appendChild(role);
-          }
-          // Click to @mention (skip self)
-          if (u.name !== username) {
-            chip.dataset.user = u.name;
-            chip.addEventListener('click', function() {
-              var uName = this.dataset.user;
-              var dn = displayName(uName);
-              var cur = msgInput.value;
-              var mention = '@' + dn + ' ';
-              if (cur && !cur.endsWith(' ')) mention = ' ' + mention;
-              msgInput.value = cur + mention;
-              msgInput.focus();
-              updateSendBtn();
-            });
-          }
-          bar.appendChild(chip);
+      bar.style.display = 'block';
+      bar.innerHTML = '';
+
+      // 小码 AI chip — always first
+      var aiChip = document.createElement('span');
+      aiChip.className = 'p-chip ai-chip';
+      var aiDot = document.createElement('span');
+      aiDot.className = 'p-dot';
+      aiDot.id = 'ai-chip-dot';
+      // Apply current state color
+      if (state === 'thinking' || state === 'tool_running') aiDot.className = 'p-dot busy';
+      else if (state === 'queued') aiDot.className = 'p-dot queued';
+      else if (state === 'error') aiDot.className = 'p-dot error';
+      else if (state === 'initializing') aiDot.className = 'p-dot initializing';
+      aiChip.appendChild(aiDot);
+      var aiName = document.createElement('span');
+      aiName.textContent = _t('easy.assistant_name');
+      aiChip.appendChild(aiName);
+      // Click to @小码
+      aiChip.addEventListener('click', function() {
+        var cur = msgInput.value;
+        var mention = '@' + _t('easy.assistant_name') + ' ';
+        if (cur && !cur.endsWith(' ')) mention = ' ' + mention;
+        msgInput.value = cur + mention;
+        msgInput.focus();
+        updateSendBtn();
+      });
+      bar.appendChild(aiChip);
+
+      // Human users
+      for (var i = 0; i < users.length; i++) {
+        var u = users[i];
+        var chip = document.createElement('span');
+        chip.className = 'p-chip' + (u.online ? '' : ' offline');
+        var dot = document.createElement('span');
+        dot.className = 'p-dot' + (u.online ? '' : ' offline');
+        chip.appendChild(dot);
+        var nameSpan = document.createElement('span');
+        nameSpan.textContent = displayName(u.name);
+        chip.appendChild(nameSpan);
+        // Role tag
+        var roleText = '';
+        if (_sessionOwner && u.name === _sessionOwner) roleText = _t('easy.participant.owner');
+        else if (u.name === username) roleText = _t('easy.participant.you');
+        if (roleText) {
+          var role = document.createElement('span');
+          role.className = 'p-role';
+          role.textContent = '(' + roleText + ')';
+          chip.appendChild(role);
         }
+        // Click to @mention (skip self)
+        if (u.name !== username) {
+          chip.dataset.user = u.name;
+          chip.addEventListener('click', function() {
+            var uName = this.dataset.user;
+            var dn = displayName(uName);
+            var cur = msgInput.value;
+            var mention = '@' + dn + ' ';
+            if (cur && !cur.endsWith(' ')) mention = ' ' + mention;
+            msgInput.value = cur + mention;
+            msgInput.focus();
+            updateSendBtn();
+          });
+        }
+        bar.appendChild(chip);
       }
     }
 
@@ -3533,6 +3631,9 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       renderInviteUsers();
     }
   }
+
+  // Initial render: show 小码 chip before server sends participants
+  updateParticipants([]);
 
   // ---- Chat messages ----
   function addUserMsg(text) {
@@ -3756,7 +3857,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     var text = msgInput.value.trim();
     dbg('sendMessage: text=' + (text ? text.substring(0, 30) : '(empty)') + ' state=' + state + ' ws=' + (ws ? ws.readyState : 'null'));
     if (!text) return;
-    if (state !== 'ready' && state !== 'queued') return;
+    if (state === 'initializing' || state === 'exited') return;
 
     // Extract @mentions from text
     var mentionMatches = text.match(/@([\w\u4e00-\u9fff]+)/g);
@@ -4185,18 +4286,60 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
           var icon = item.isDirectory ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="#60a5fa"><path d="M2 6a2 2 0 012-2h5l2 2h9a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg>' : fileIcon(item.name);
           var dateStr = item.modified ? fmtDate(item.modified) : '';
           row.innerHTML = '<span class="icon">' + icon + '</span><span class="name">' + escHtml(item.name) + '</span><span class="date">' + dateStr + '</span>';
-          row.addEventListener('click', function() {
-            if (item.isDirectory) {
-              loadFiles(dir + '/' + item.name);
-            } else {
+
+          if (item.isDirectory) {
+            row.addEventListener('click', function() { loadFiles(dir + '/' + item.name); });
+          } else {
+            var preview = !item.isDirectory && canPreview(item.name);
+            var acts = document.createElement('span');
+            acts.className = 'fp-actions';
+
+            if (preview) {
+              // Preview button
+              var pvBtn = document.createElement('button');
+              pvBtn.className = 'fp-act';
+              pvBtn.title = 'Preview';
+              pvBtn.innerHTML = '&#9654;';  // ▶
+              pvBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                var url = makeServeUrl(dir, item.name);
+                if (url) { setPreviewUrl(url, true); if (!isDesktop()) showTab('preview'); }
+              });
+              acts.appendChild(pvBtn);
+            }
+
+            // Download button
+            var dlBtn = document.createElement('button');
+            dlBtn.className = 'fp-act';
+            dlBtn.title = 'Download';
+            dlBtn.innerHTML = '&#8615;';  // ⇩
+            dlBtn.addEventListener('click', function(e) {
+              e.stopPropagation();
               var a = document.createElement('a');
               a.href = '/terminal/download?session=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(dir + '/' + item.name);
               a.download = item.name;
               document.body.appendChild(a);
               a.click();
               document.body.removeChild(a);
-            }
-          });
+            });
+            acts.appendChild(dlBtn);
+            row.appendChild(acts);
+
+            // Row click: preview if possible, else download
+            row.addEventListener('click', function() {
+              if (preview) {
+                var url = makeServeUrl(dir, item.name);
+                if (url) { setPreviewUrl(url, true); if (!isDesktop()) showTab('preview'); }
+              } else {
+                var a = document.createElement('a');
+                a.href = '/terminal/download?session=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(dir + '/' + item.name);
+                a.download = item.name;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+              }
+            });
+          }
           fpList.appendChild(row);
         });
       })
@@ -4208,6 +4351,21 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   // Desktop: auto-load files panel (deferred to session_info for access control)
   window._loadFiles = loadFiles;
   if (isDesktop()) { desktopFilesLoaded = true; loadFiles(''); }
+
+  var _previewExts = ['html','htm','svg','csv','md','png','jpg','jpeg','gif','webp','pdf'];
+  function canPreview(name) {
+    var ext = (name.split('.').pop() || '').toLowerCase();
+    return _previewExts.indexOf(ext) >= 0;
+  }
+  function makeServeUrl(dir, name) {
+    var project = _projectDir ? _projectDir.split('/').pop() : '';
+    if (!project) return '';
+    var relPath = (dir + '/' + name).replace(_projectDir + '/', '');
+    var ext = (name.split('.').pop() || '').toLowerCase();
+    var url = '/serve/' + project + '/' + relPath;
+    if (ext === 'csv' || ext === 'md') url += '?render=1';
+    return url;
+  }
 
   function fileIcon(name) {
     var ext = (name.split('.').pop() || '').toLowerCase();
