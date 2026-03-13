@@ -20,9 +20,11 @@ export type EasyServerMessage =
   | { type: 'state'; state: EasyState }
   | { type: 'message'; id: number; role: 'assistant'; text: string; thinking?: boolean }
   | { type: 'message_delta'; id: number; delta: string }
+  | { type: 'user_message'; id: number; sender: string; text: string }
   | { type: 'tool'; name: string; detail: string; status: 'running' | 'done' }
   | { type: 'preview_hint'; url: string }
-  | { type: 'history'; messages: { role: 'user' | 'assistant'; text: string; id: number }[] }
+  | { type: 'participants'; users: string[] }
+  | { type: 'history'; messages: { role: 'user' | 'assistant'; text: string; id: number; sender?: string }[] }
   | { type: 'error'; message: string };
 
 // --- Client → Server Messages ---

@@ -13,6 +13,7 @@ interface HistoryEntry {
   role: 'user' | 'assistant';
   text: string;
   id: number;
+  sender?: string;
 }
 
 export class ClaudeProcess {
@@ -28,6 +29,7 @@ export class ClaudeProcess {
   private _toolJsonBuf = '';
   private _knownPreviewFiles = new Map<string, number>(); // name -> mtime
   private static PREVIEW_EXTS = new Set(['.html', '.htm', '.svg', '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf']);
+  lastPreviewUrl: string | null = null;
 
   private stateFile: string;
 
@@ -62,16 +64,61 @@ export class ClaudeProcess {
     try {
       const data = JSON.parse(readFileSync(this.stateFile, 'utf-8'));
       if (data.claudeSessionId) this.claudeSessionId = data.claudeSessionId;
+      if (Array.isArray(data.history)) {
+        this.history = data.history;
+        // Restore nextMsgId to be higher than any existing id
+        for (const h of this.history) {
+          if (h.id >= this.nextMsgId) this.nextMsgId = h.id + 1;
+        }
+      }
+      if (data.lastPreviewUrl) this.lastPreviewUrl = data.lastPreviewUrl;
     } catch {}
+
+    // If no saved preview URL, scan for existing previewable files
+    if (!this.lastPreviewUrl) {
+      this.snapshotPreviewFiles();
+      // Find the best existing previewable file (prefer HTML, newest mtime)
+      try {
+        const files = readdirSync(this.projectDir);
+        const candidates: { name: string; mtime: number; ext: string }[] = [];
+        for (const f of files) {
+          if (!this.isPreviewable(f)) continue;
+          try {
+            const st = statSync(path.join(this.projectDir, f));
+            candidates.push({ name: f, mtime: st.mtimeMs, ext: path.extname(f).toLowerCase() });
+          } catch {}
+        }
+        if (candidates.length > 0) {
+          candidates.sort((a, b) => {
+            const aHtml = (a.ext === '.html' || a.ext === '.htm') ? 1 : 0;
+            const bHtml = (b.ext === '.html' || b.ext === '.htm') ? 1 : 0;
+            if (aHtml !== bHtml) return bHtml - aHtml;
+            return b.mtime - a.mtime;
+          });
+          const best = candidates[0];
+          const project = path.basename(this.projectDir);
+          if (best.ext === '.csv' || best.ext === '.md') {
+            this.lastPreviewUrl = '/serve/' + project + '/' + best.name + '?render=1';
+          } else {
+            this.lastPreviewUrl = '/serve/' + project + '/' + best.name;
+          }
+          this.saveState();
+        }
+      } catch {}
+    }
   }
 
   private saveState(): void {
     try {
-      writeFileSync(this.stateFile, JSON.stringify({ claudeSessionId: this.claudeSessionId }), 'utf-8');
+      writeFileSync(this.stateFile, JSON.stringify({
+        claudeSessionId: this.claudeSessionId,
+        history: this.history,
+        lastPreviewUrl: this.lastPreviewUrl,
+      }), 'utf-8');
     } catch {}
   }
 
-  sendMessage(text: string): void {
+  sendMessage(text: string, sender?: string): void {
     if (this.disposed) return;
 
     // Cancel any active child before starting new one
@@ -81,22 +128,29 @@ export class ClaudeProcess {
       try { old.kill('SIGKILL'); } catch {}
     }
 
-    // Record user message in history
-    const userEntry: HistoryEntry = { role: 'user', text, id: this.nextMsgId++ };
+    // Record user message in history and persist
+    const userEntry: HistoryEntry = { role: 'user', text, id: this.nextMsgId++, sender };
     this.history.push(userEntry);
+    this.saveState();
+
+    // Broadcast user_message to all listeners (including sender — client waits for echo)
+    this.broadcast({ type: 'user_message', id: userEntry.id, sender: sender || 'user', text });
 
     // Notify client: thinking state
     this.broadcast({ type: 'state', state: 'thinking' });
 
+    // Prepend [sender] for Claude context in multi-user scenarios
+    const promptText = sender ? `[${sender}]: ${text}` : text;
+
     // Build command args
     const args = [
-      '-p', text,
+      '-p', promptText,
       '--output-format', 'stream-json',
       '--verbose',
       '--model', 'sonnet',
       '--include-partial-messages',
       '--append-system-prompt',
-      'You are action-oriented. When the user confirms, agrees, or says things like "好的"/"试试"/"做吧"/"go ahead"/"ok", treat it as a request to START DOING THE WORK immediately — write code, create files, build the thing. Never respond with just "ok let me know if you need help". Always take concrete action. Reply in the same language as the user.',
+      'You are 小码 (Xiaoma), a friendly action-oriented AI assistant in Hopcode Easy Mode. When users confirm or agree (好的/试试/做吧/go ahead/ok), START DOING THE WORK immediately — write code, create files. Never just say "ok let me know". Be concise — this is a mobile chat UI. Reply in the same language as the user. Messages prefixed with [username]: indicate who sent it in this collaborative multi-user session.',
     ];
 
     if (this.claudeSessionId) {
@@ -189,19 +243,22 @@ export class ClaudeProcess {
         } catch {}
       }
 
-      // If we have response text, record in history
+      // If we have response text, record in history and persist
       if (fullResponseText) {
         this.history.push({
           role: 'assistant',
           text: fullResponseText,
           id: this.nextMsgId++,
         });
+        this.saveState();
       }
 
       // Check for new/modified previewable files and hint preview
       if (isCurrentChild) {
         const previewUrl = this.checkForNewPreviewFile();
         if (previewUrl) {
+          this.lastPreviewUrl = previewUrl;
+          this.saveState();
           this.broadcast({ type: 'preview_hint', url: previewUrl });
         }
         this.broadcast({ type: 'state', state: 'ready' });

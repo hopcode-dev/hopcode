@@ -1412,8 +1412,14 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 #preview-container.show { display:flex; }
 #preview-bar { display:flex; align-items:center; padding:4px 10px; background:#f5f5f7; gap:6px; flex-shrink:0; border-bottom:1px solid #e5e5ea; flex-wrap:wrap; }
 #preview-bar-actions { display:flex; align-items:center; gap:6px; margin-left:auto; flex-shrink:0; }
-#preview-nav { display:flex; flex-wrap:wrap; gap:4px; overflow:hidden; min-width:0; }
-.preview-pill { padding:4px 10px; border-radius:12px; font-size:11px; cursor:pointer; border:1px solid #d2d2d7; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:160px; background:#e8f0fe; color:#1a73e8; font-family:'SF Mono',Monaco,monospace; transition:all 0.15s; }
+#preview-nav { display:flex; gap:4px; overflow:hidden; min-width:0; flex:1; align-items:center; }
+.preview-pill { padding:4px 8px; border-radius:12px; font-size:11px; cursor:pointer; border:1px solid #d2d2d7; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:120px; background:#e8f0fe; color:#1a73e8; font-family:'SF Mono',Monaco,monospace; transition:all 0.15s; flex-shrink:0; }
+.preview-pill.more-pill { background:#f5f5f7; color:#86868b; border-color:#d2d2d7; font-family:system-ui; max-width:none; position:relative; }
+.preview-more-menu { position:absolute; bottom:100%; left:0; background:#fff; border:1px solid #d2d2d7; border-radius:10px; box-shadow:0 4px 16px rgba(0,0,0,0.12); padding:4px 0; z-index:50; min-width:160px; display:none; }
+.preview-more-menu.show { display:block; }
+.preview-more-item { padding:8px 14px; font-size:13px; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#1a73e8; }
+.preview-more-item:hover { background:#f5f5f7; }
+.preview-more-item.active { font-weight:600; }
 .preview-pill:hover { background:#d2e3fc; border-color:#1a73e8; }
 .preview-pill.active { background:#1a73e8; color:#fff; border-color:#1a73e8; }
 .preview-pill.welcome-pill { background:#fef3c7; color:#92400e; border-color:#fbbf24; font-family:system-ui; }
@@ -1441,7 +1447,13 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 #chat-area { flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:8px; }
 .msg { max-width:92%; padding:10px 14px; border-radius:18px; font-size:var(--easy-font-size, 15px); line-height:1.5; word-wrap:break-word; white-space:pre-wrap; animation:fadeIn 0.15s ease; }
 @keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
-.msg.user { align-self:flex-end; background:#007aff; color:#ffffff; border-bottom-right-radius:6px; }
+.msg.user { align-self:flex-end; background:#95ec69; color:#1d1d1f; border-bottom-right-radius:6px; }
+.msg-wrap { display:flex; flex-direction:column; max-width:92%; align-self:flex-start; }
+.msg-wrap .msg { max-width:100%; }
+.msg-wrap .msg-sender { font-size:12px; color:#999; margin-bottom:2px; padding-left:4px; }
+.msg-wrap .msg.user { background:#e9e9eb; color:#1d1d1f; border-bottom-right-radius:18px; border-bottom-left-radius:6px; }
+#participants-indicator { font-size:11px; color:#86868b; margin-left:8px; cursor:default; }
+.msg-wrap.assistant-wrap .msg-sender { color:#8e44ad; }
 .msg.assistant { align-self:flex-start; background:#e9e9eb; color:#1d1d1f; border-bottom-left-radius:6px; font-family:'SF Mono',Monaco,Consolas,monospace; font-size:var(--easy-font-size, 15px); max-width:98%; }
 .msg.assistant.thinking-msg { background:#f5f5f5; color:#8e8e93; font-size:calc(var(--easy-font-size, 15px) - 1px); font-style:italic; }
 .msg.system { align-self:center; background:none; color:#86868b; font-size:12px; text-align:center; padding:4px 8px; }
@@ -1597,6 +1609,27 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 .modal-box .modal-btns button { padding:8px 20px; border-radius:8px; border:none; font-size:14px; cursor:pointer; }
 .modal-cancel { background:#e5e5ea; color:#1d1d1f; }
 .modal-ok { background:#007aff; color:white; }
+#invite-modal { position:fixed; inset:0; background:rgba(0,0,0,0.3); z-index:200; display:none; align-items:center; justify-content:center; padding:20px; }
+#invite-modal.show { display:flex; }
+.invite-box { background:#ffffff; border-radius:14px; padding:24px; width:min(400px,100%); box-shadow:0 10px 40px rgba(0,0,0,0.15); }
+.invite-box h3 { font-size:17px; margin:0 0 8px; color:#1d1d1f; display:flex; align-items:center; gap:8px; }
+.invite-desc { font-size:13px; color:#86868b; line-height:1.5; margin-bottom:16px; }
+.invite-link-wrap { background:#f5f5f7; border:1px solid #d2d2d7; border-radius:10px; padding:10px 12px; margin-bottom:16px; }
+.invite-link-label { font-size:11px; color:#86868b; margin-bottom:6px; }
+.invite-link-row { display:flex; gap:8px; align-items:center; }
+.invite-link-url { flex:1; font-size:13px; color:#1d1d1f; word-break:break-all; font-family:'SF Mono',Monaco,Consolas,monospace; background:white; padding:6px 10px; border-radius:6px; border:1px solid #e5e5ea; max-height:40px; overflow:hidden; }
+.invite-copy-btn { background:#007aff; color:white; border:none; border-radius:8px; padding:8px 16px; font-size:13px; cursor:pointer; white-space:nowrap; flex-shrink:0; }
+.invite-copy-btn:active { background:#0062cc; }
+.invite-copy-btn.copied { background:#34c759; }
+.invite-online { margin-bottom:16px; }
+.invite-online-label { font-size:12px; color:#86868b; margin-bottom:8px; }
+.invite-users { display:flex; flex-wrap:wrap; gap:6px; }
+.invite-user-tag { display:inline-flex; align-items:center; gap:4px; background:#e8f5e9; color:#2e7d32; padding:4px 10px; border-radius:12px; font-size:12px; font-weight:500; }
+.invite-user-tag::before { content:''; width:6px; height:6px; border-radius:50%; background:#34c759; }
+.invite-user-tag.is-you { background:#e3f2fd; color:#1565c0; }
+.invite-close { background:#e5e5ea; color:#1d1d1f; border:none; border-radius:8px; padding:8px 20px; font-size:14px; cursor:pointer; float:right; }
+#collab-toast { position:fixed; top:60px; left:50%; transform:translateX(-50%); background:#1d1d1f; color:white; padding:8px 20px; border-radius:20px; font-size:13px; z-index:300; opacity:0; transition:opacity 0.3s; pointer-events:none; }
+#collab-toast.show { opacity:1; }
 
 /* Voice popup (Pro-style) */
 #voice-popup {
@@ -1701,6 +1734,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   <div id="status-bar">
     <span class="status-dot yellow" id="status-dot"></span>
     <span id="status-text">Starting Claude...</span>
+    <span id="participants-indicator" style="display:none"></span>
   </div>
 
   <!-- Tab bar (shown when preview URL exists) -->
@@ -1804,6 +1838,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     <div class="menu-item" id="menu-home"><span class="mi-icon">&#x1F3E0;</span><span class="mi-label" data-i18n="easy.menu.home">Home</span><span class="mi-arrow">&#x203A;</span></div>
     <div class="menu-item" id="menu-files"><span class="mi-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="#60a5fa"><path d="M2 6a2 2 0 012-2h5l2 2h9a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg></span><span class="mi-label" data-i18n="easy.menu.files">Files</span><span class="mi-arrow">&#x203A;</span></div>
     <div class="menu-item" id="menu-apps"><span class="mi-icon">&#x2B50;</span><span class="mi-label" data-i18n="easy.menu.apps">Apps</span><span class="mi-arrow">&#x203A;</span></div>
+    <div class="menu-item" id="menu-invite"><span class="mi-icon">&#x1F91D;</span><span class="mi-label" data-i18n="easy.copy_invite">Invite to collaborate</span></div>
   </div>
   <div class="menu-divider"></div>
   <div class="menu-section">
@@ -1852,6 +1887,26 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     </div>
   </div>
 </div>
+
+<div id="invite-modal">
+  <div class="invite-box">
+    <h3>&#x1F91D; <span data-i18n="easy.invite.title">Invite to Collaborate</span></h3>
+    <div class="invite-desc" data-i18n="easy.invite.desc">Share this link — anyone who opens it can join this session in real time, chat together, and work on the same project with Claude.</div>
+    <div class="invite-link-wrap">
+      <div class="invite-link-label" data-i18n="easy.invite.link_label">Invite link</div>
+      <div class="invite-link-row">
+        <div class="invite-link-url" id="invite-url"></div>
+        <button class="invite-copy-btn" id="invite-copy-btn" data-i18n="easy.invite.copy">Copy Link</button>
+      </div>
+    </div>
+    <div class="invite-online">
+      <div class="invite-online-label" data-i18n="easy.invite.online">Currently online</div>
+      <div class="invite-users" id="invite-users"></div>
+    </div>
+    <button class="invite-close" id="invite-close" data-i18n="close">Close</button>
+  </div>
+</div>
+<div id="collab-toast"></div>
 
 <!-- Voice popup -->
 <div id="voice-popup" class="hidden">
@@ -1986,6 +2041,71 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     menuHide();
     if (newProjectModal) newProjectModal.classList.add('show');
   });
+  // Invite modal
+  var inviteModal = document.getElementById('invite-modal');
+  var inviteCopyBtn = document.getElementById('invite-copy-btn');
+  var inviteUrlEl = document.getElementById('invite-url');
+  var inviteUsersEl = document.getElementById('invite-users');
+  var collabToast = document.getElementById('collab-toast');
+  var _currentParticipants = [];
+  var _collabToastTimer = null;
+
+  document.getElementById('menu-invite').addEventListener('click', function() {
+    menuHide();
+    inviteUrlEl.textContent = location.href;
+    renderInviteUsers();
+    inviteModal.classList.add('show');
+  });
+  inviteModal.addEventListener('click', function(e) {
+    if (e.target === inviteModal) inviteModal.classList.remove('show');
+  });
+  document.getElementById('invite-close').addEventListener('click', function() {
+    inviteModal.classList.remove('show');
+  });
+  inviteCopyBtn.addEventListener('click', function() {
+    var url = location.href;
+    var btn = inviteCopyBtn;
+    function onCopied() {
+      btn.textContent = _t('easy.copied_invite');
+      btn.classList.add('copied');
+      setTimeout(function() {
+        btn.textContent = _t('easy.invite.copy');
+        btn.classList.remove('copied');
+      }, 2000);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(onCopied);
+    } else {
+      var ta = document.createElement('textarea');
+      ta.value = url; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy');
+      document.body.removeChild(ta);
+      onCopied();
+    }
+  });
+
+  function renderInviteUsers() {
+    if (!inviteUsersEl) return;
+    inviteUsersEl.innerHTML = '';
+    if (_currentParticipants.length <= 1) {
+      inviteUsersEl.innerHTML = '<span style="font-size:12px;color:#86868b;">' + _t('easy.invite.only_you') + '</span>';
+      return;
+    }
+    for (var i = 0; i < _currentParticipants.length; i++) {
+      var tag = document.createElement('span');
+      tag.className = 'invite-user-tag' + (_currentParticipants[i] === username ? ' is-you' : '');
+      tag.textContent = _currentParticipants[i] + (_currentParticipants[i] === username ? ' (you)' : '');
+      inviteUsersEl.appendChild(tag);
+    }
+  }
+
+  function showCollabToast(text) {
+    if (!collabToast) return;
+    collabToast.textContent = text;
+    collabToast.classList.add('show');
+    if (_collabToastTimer) clearTimeout(_collabToastTimer);
+    _collabToastTimer = setTimeout(function() { collabToast.classList.remove('show'); }, 3000);
+  }
 
   // Font size controls — shared localStorage key with Pro Mode
   var easyFontKey = 'hopcode-font-size';
@@ -2046,7 +2166,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         if (!attempts) attempts = 0;
         if (attempts > 30) { dbg('trySend gave up after 30 attempts'); return; }
         if (state === 'ready' && ws && ws.readyState === 1) {
-          addUserMsg(prompt);
+          // Don't render locally — server echoes user_message for multi-user consistency
           currentAssistantMsg = null;
           ws.send(JSON.stringify({ type: 'send', text: prompt }));
           dbg('trySend sent prompt: ' + prompt.substring(0, 40));
@@ -2122,59 +2242,102 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   }
 
   var previewNav = document.getElementById('preview-nav');
-  var MAX_PREVIEW_PILLS = 6;
+  var MAX_PREVIEW_PILLS = 20;
 
   var previewTitles = {}; // url -> page title
   function pillLabel(url) {
     if (previewTitles[url]) return previewTitles[url];
     try {
-      var u = new URL(url);
-      var port = u.port || (u.protocol === 'https:' ? '443' : '80');
-      var p = u.pathname.replace(/\\/+$/, '');
-      if (p && p !== '' && p !== '/index.html') return p.replace(/^.*\\//, '');
-      return ':' + port;
+      var p = url.split('?')[0].replace(/\\/+$/, '');
+      var name = p.split('/').pop() || url;
+      if (name === 'index.html') {
+        var parts = p.split('/');
+        name = parts.length >= 2 ? parts[parts.length - 2] : name;
+      }
+      return name.replace(/\\.(html|htm)$/, '') || url.substring(0, 20);
     } catch(e) { return url.substring(0, 20); }
+  }
+
+  function selectPreviewPill(url) {
+    currentPreviewUrl = url;
+    hardRefreshPreview(url);
+    previewFrame.classList.add('loaded');
+    document.getElementById('preview-guide').style.display = 'none';
+    if (welcomeActive) dismissWelcome();
+    renderPreviewNav();
   }
 
   function renderPreviewNav() {
     previewNav.innerHTML = '';
-    var shown = previewUrls.slice(0, MAX_PREVIEW_PILLS);
+    if (previewUrls.length === 0) {
+      document.getElementById('preview-bar-actions').style.display = 'none';
+      return;
+    }
+    // Measure available width
+    var barEl = document.getElementById('preview-bar');
+    var actionsEl = document.getElementById('preview-bar-actions');
+    var availWidth = (barEl ? barEl.offsetWidth : 300) - (actionsEl ? actionsEl.offsetWidth : 0) - 24;
+    var isMob = !isDesktop();
+    var pillW = isMob ? 72 : 90;
+    var moreW = 38;
+    var gapW = 4;
+
+    var fitAll = Math.floor((availWidth + gapW) / (pillW + gapW));
+    var maxVisible;
+    if (previewUrls.length <= fitAll) {
+      maxVisible = previewUrls.length;
+    } else {
+      maxVisible = Math.max(1, Math.floor((availWidth - moreW + gapW) / (pillW + gapW)));
+    }
+
+    var shown = previewUrls.slice(0, maxVisible);
+    var overflow = previewUrls.slice(maxVisible);
+
     for (var i = 0; i < shown.length; i++) {
       (function(url) {
         var pill = document.createElement('span');
         pill.className = 'preview-pill' + (url === currentPreviewUrl ? ' active' : '');
         pill.textContent = pillLabel(url);
         pill.title = url;
-        pill.addEventListener('click', function() {
-          currentPreviewUrl = url;
-          hardRefreshPreview(url);
-          previewFrame.classList.add('loaded');
-          document.getElementById('preview-guide').style.display = 'none';
-          if (welcomeActive) dismissWelcome();
-          renderPreviewNav();
-        });
+        pill.addEventListener('click', function() { selectPreviewPill(url); });
         previewNav.appendChild(pill);
       })(shown[i]);
     }
-    // Welcome pill (always shown when there are link pills, so user can switch back)
-    if (previewUrls.length > 0 || !currentPreviewUrl) {
-      var wp = document.createElement('span');
-      wp.className = 'preview-pill welcome-pill' + (!currentPreviewUrl ? ' active' : '');
-      wp.textContent = '\\u2728 Get Started';
-      wp.addEventListener('click', function() {
-        previewFrame.classList.remove('loaded');
-        document.getElementById('preview-guide').style.display = '';
-        // Restore welcome cards if they were dismissed
-        welcomeEl.style.display = '';
-        welcomeActive = true;
-        currentPreviewUrl = '';
-        renderPreviewNav();
+
+    if (overflow.length > 0) {
+      var moreBtn = document.createElement('span');
+      moreBtn.className = 'preview-pill more-pill';
+      moreBtn.textContent = '+' + overflow.length;
+      var menu = document.createElement('div');
+      menu.className = 'preview-more-menu';
+      for (var j = 0; j < overflow.length; j++) {
+        (function(url) {
+          var item = document.createElement('div');
+          item.className = 'preview-more-item' + (url === currentPreviewUrl ? ' active' : '');
+          item.textContent = pillLabel(url);
+          item.title = url;
+          item.addEventListener('click', function(e) {
+            e.stopPropagation();
+            menu.classList.remove('show');
+            selectPreviewPill(url);
+          });
+          menu.appendChild(item);
+        })(overflow[j]);
+      }
+      moreBtn.appendChild(menu);
+      moreBtn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        menu.classList.toggle('show');
       });
-      previewNav.appendChild(wp);
+      document.addEventListener('click', function() { menu.classList.remove('show'); });
+      previewNav.appendChild(moreBtn);
     }
-    // Show/hide action buttons based on whether there are URLs
-    document.getElementById('preview-bar-actions').style.display = previewUrls.length > 0 ? 'flex' : 'none';
+
+    document.getElementById('preview-bar-actions').style.display = 'flex';
   }
+
+  // Re-render on resize to adapt pill count
+  window.addEventListener('resize', function() { if (previewUrls.length > 0) renderPreviewNav(); });
 
   function setPreviewUrl(url, forceReload) {
     if (!url) return;
@@ -2496,6 +2659,32 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         if (d.url) {
           setPreviewUrl(d.url, true);
         }
+      } else if (d.type === 'user_message') {
+        // Server echo of user message — WeChat group style
+        var isSelf = d.sender === username;
+        if (isSelf) {
+          var div = document.createElement('div');
+          div.className = 'msg user';
+          div.textContent = d.text;
+          chatArea.appendChild(div);
+        } else {
+          var wrap = document.createElement('div');
+          wrap.className = 'msg-wrap';
+          var nameTag = document.createElement('div');
+          nameTag.className = 'msg-sender';
+          nameTag.textContent = d.sender;
+          wrap.appendChild(nameTag);
+          var bubble = document.createElement('div');
+          bubble.className = 'msg user';
+          bubble.textContent = d.text;
+          wrap.appendChild(bubble);
+          chatArea.appendChild(wrap);
+        }
+        currentAssistantMsg = null;
+        autoScroll();
+        saveChatHistory();
+      } else if (d.type === 'participants') {
+        updateParticipants(d.users);
       } else if (d.type === 'history') {
         // Restore history on reconnect — append any new messages
         var existingMsgs = chatArea.querySelectorAll('.msg.user, .msg.assistant');
@@ -2505,8 +2694,29 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
           var startIdx = existingCount === 0 ? 0 : existingCount;
           for (var i = startIdx; i < d.messages.length; i++) {
             var m = d.messages[i];
-            if (m.role === 'user') addUserMsg(m.text);
-            else appendAssistantText(m.text);
+            if (m.role === 'user') {
+              var isSelf = !m.sender || m.sender === username;
+              if (isSelf) {
+                var div = document.createElement('div');
+                div.className = 'msg user';
+                div.textContent = m.text;
+                chatArea.appendChild(div);
+              } else {
+                var wrap = document.createElement('div');
+                wrap.className = 'msg-wrap';
+                var nameTag = document.createElement('div');
+                nameTag.className = 'msg-sender';
+                nameTag.textContent = m.sender;
+                wrap.appendChild(nameTag);
+                var bubble = document.createElement('div');
+                bubble.className = 'msg user';
+                bubble.textContent = m.text;
+                wrap.appendChild(bubble);
+                chatArea.appendChild(wrap);
+              }
+            } else {
+              appendAssistantText(m.text);
+            }
             currentAssistantMsg = null;
           }
           if (startIdx < d.messages.length) autoScroll();
@@ -2731,6 +2941,41 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     if (!isDesktop()) showTab('preview');
   });
 
+  // ---- Participants ----
+  function updateParticipants(users) {
+    // Detect joins and leaves (skip first update)
+    if (_currentParticipants.length > 0) {
+      for (var i = 0; i < users.length; i++) {
+        if (_currentParticipants.indexOf(users[i]) === -1 && users[i] !== username) {
+          showCollabToast(_t('easy.participant.joined', { name: users[i] }));
+        }
+      }
+      for (var i = 0; i < _currentParticipants.length; i++) {
+        if (users.indexOf(_currentParticipants[i]) === -1 && _currentParticipants[i] !== username) {
+          showCollabToast(_t('easy.participant.left', { name: _currentParticipants[i] }));
+        }
+      }
+    }
+    _currentParticipants = users;
+
+    // Status bar indicator
+    var el = document.getElementById('participants-indicator');
+    if (el) {
+      if (users.length <= 1) {
+        el.style.display = 'none';
+      } else {
+        el.style.display = 'inline';
+        el.textContent = users.length + ' ' + _t('easy.participants');
+        el.title = users.join(', ');
+      }
+    }
+
+    // Update invite modal if open
+    if (inviteModal && inviteModal.classList.contains('show')) {
+      renderInviteUsers();
+    }
+  }
+
   // ---- Chat messages ----
   function addUserMsg(text) {
     currentAssistantMsg = null;
@@ -2755,11 +3000,19 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       currentAssistantMsg._rawText = text;
       currentAssistantMsg.innerHTML = linkify(text);
     } else {
+      // Wrap in msg-wrap with "小码" sender label
+      var wrap = document.createElement('div');
+      wrap.className = 'msg-wrap assistant-wrap';
+      var nameTag = document.createElement('div');
+      nameTag.className = 'msg-sender';
+      nameTag.textContent = _t('easy.assistant_name');
+      wrap.appendChild(nameTag);
       currentAssistantMsg = document.createElement('div');
       currentAssistantMsg.className = 'msg assistant' + (isThinking ? ' thinking-msg' : '');
       currentAssistantMsg._rawText = text;
       currentAssistantMsg.innerHTML = linkify(text);
-      chatArea.appendChild(currentAssistantMsg);
+      wrap.appendChild(currentAssistantMsg);
+      chatArea.appendChild(wrap);
     }
     // Auto-detect preview URL — only trigger reload if URL changed
     var detectedUrl = detectPreviewUrl(text);
@@ -2845,11 +3098,18 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     // Create a placeholder assistant bubble with spinner inside
     // When the first message arrives, it replaces the spinner content in-place
     if (currentAssistantMsg && currentAssistantMsg._isThinkingPlaceholder) return;
+    var wrap = document.createElement('div');
+    wrap.className = 'msg-wrap assistant-wrap';
+    var nameTag = document.createElement('div');
+    nameTag.className = 'msg-sender';
+    nameTag.textContent = _t('easy.assistant_name');
+    wrap.appendChild(nameTag);
     var div = document.createElement('div');
     div.className = 'msg assistant thinking-placeholder';
     div.innerHTML = '<span class="dot-spinner"><span></span><span></span><span></span></span>';
     div._isThinkingPlaceholder = true;
-    chatArea.appendChild(div);
+    wrap.appendChild(div);
+    chatArea.appendChild(wrap);
     currentAssistantMsg = div;
     autoScroll();
   }
@@ -2901,7 +3161,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     if (!text) return;
     if (state !== 'ready') return;
 
-    addUserMsg(text);
+    // Don't render locally — wait for server echo (user_message) for multi-user consistency
     currentAssistantMsg = null;
     wsSend({ type: 'send', text: text });
     msgInput.value = '';
@@ -3211,7 +3471,6 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
           var paths = pendingUploads.slice();
           pendingUploads = [];
           var msg = _t('easy.msg.uploaded') + paths.join(', ');
-          addUserMsg(msg);
           currentAssistantMsg = null;
           wsSend({ type: 'send', text: msg });
         }, 500);
@@ -3323,7 +3582,6 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     var finalText = (vpText.textContent || '').trim();
     if (finalText && state === 'ready') {
       asrFlushed = true;
-      addUserMsg(finalText);
       currentAssistantMsg = null;
       wsSend({ type: 'send', text: finalText });
     }
@@ -7251,8 +7509,127 @@ interface EasySessionInfo {
   name: string;
   createdAt: number;
   lastActivity: number;
+  connectedUsers: Map<string, Set<WebSocket>>;  // username -> set of WS connections
 }
 const easySessions = new Map<string, EasySessionInfo>();
+
+// Persist easy session registry so sessions survive server restarts
+const EASY_REGISTRY_FILE = path.join(process.env.HOME || '/root', '.hopcode', 'easy-sessions.json');
+
+interface EasyRegistryEntry {
+  id: string;
+  owner: string;
+  project: string;
+  name: string;
+  createdAt: number;
+  lastActivity: number;
+  projectDir: string;
+}
+
+function saveEasyRegistry(): void {
+  try {
+    const entries: EasyRegistryEntry[] = [];
+    for (const [id, info] of easySessions) {
+      entries.push({
+        id,
+        owner: info.owner,
+        project: info.project,
+        name: info.name,
+        createdAt: info.createdAt,
+        lastActivity: info.lastActivity,
+        projectDir: info.cp.projectDir,
+      });
+    }
+    fs.mkdirSync(path.dirname(EASY_REGISTRY_FILE), { recursive: true });
+    fs.writeFileSync(EASY_REGISTRY_FILE, JSON.stringify(entries), 'utf-8');
+  } catch (e) {
+    console.error('[easy] Failed to save registry:', (e as Error).message);
+  }
+}
+
+function loadEasyRegistry(): void {
+  try {
+    const data = JSON.parse(fs.readFileSync(EASY_REGISTRY_FILE, 'utf-8'));
+    if (!Array.isArray(data)) return;
+    for (const entry of data as EasyRegistryEntry[]) {
+      if (easySessions.has(entry.id)) continue;
+      // Create a ClaudeProcess — it will load history from .easy-state.json
+      const noop = () => {};
+      const cp = new ClaudeProcess(entry.id, entry.projectDir, noop);
+      cp.removeListener(noop);
+      const info: EasySessionInfo = {
+        cp,
+        owner: entry.owner,
+        project: entry.project,
+        name: entry.name,
+        createdAt: entry.createdAt,
+        lastActivity: entry.lastActivity,
+        connectedUsers: new Map(),
+      };
+      easySessions.set(entry.id, info);
+    }
+    if (data.length > 0) {
+      console.log(`[easy] Restored ${data.length} session(s) from registry`);
+    }
+  } catch {}
+
+  // Also scan for orphan sessions (created before registry was added)
+  scanOrphanEasySessions();
+}
+
+function scanOrphanEasySessions(): void {
+  // Collect known projectDirs from existing sessions
+  const knownDirs = new Set<string>();
+  for (const [, info] of easySessions) knownDirs.add(info.cp.projectDir);
+
+  // Scan all users' coding directories
+  const homeDirs = [process.env.HOME || '/root'];
+  try {
+    const homeBase = '/home';
+    for (const u of fs.readdirSync(homeBase)) {
+      const p = path.join(homeBase, u);
+      try { if (fs.statSync(p).isDirectory()) homeDirs.push(p); } catch {}
+    }
+  } catch {}
+
+  let recovered = 0;
+  for (const home of homeDirs) {
+    const codingDir = path.join(home, 'coding');
+    try {
+      for (const proj of fs.readdirSync(codingDir)) {
+        const projDir = path.join(codingDir, proj);
+        if (knownDirs.has(projDir)) continue;
+        const stateFile = path.join(projDir, '.easy-state.json');
+        try {
+          const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+          if (!state.claudeSessionId) continue;
+          // Generate a session ID for this orphan
+          const id = 'easy_' + randomBytes(12).toString('hex');
+          const owner = home === (process.env.HOME || '/root') ? 'root' : path.basename(home);
+          const noop = () => {};
+          const cp = new ClaudeProcess(id, projDir, noop);
+          cp.removeListener(noop);
+          const stat = fs.statSync(stateFile);
+          easySessions.set(id, {
+            cp, owner, project: proj, name: proj,
+            createdAt: stat.birthtimeMs || stat.mtimeMs,
+            lastActivity: stat.mtimeMs,
+            connectedUsers: new Map(),
+          });
+          knownDirs.add(projDir);
+          recovered++;
+        } catch {}
+      }
+    } catch {}
+  }
+  if (recovered > 0) {
+    console.log(`[easy] Recovered ${recovered} orphan session(s) from disk`);
+    saveEasyRegistry();
+  }
+}
+
+// Load on startup
+loadEasyRegistry();
 
 function sendHtml(req: http.IncomingMessage, res: http.ServerResponse, html: string, precompressed?: Buffer): void {
   const noCacheHeaders = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', 'Pragma': 'no-cache', 'Expires': '0', 'Vary': 'Accept-Encoding' };
@@ -7481,30 +7858,45 @@ const server = http.createServer(async (req, res) => {
     req.on('end', async () => {
       try {
         const { session, name, oldName: clientOldName } = JSON.parse(Buffer.concat(chunks).toString());
+
+        // Easy sessions: handle locally, skip PTY service
+        if (easySessions.has(session)) {
+          const easyInfo = easySessions.get(session);
+          if (easyInfo) {
+            const oldName = easyInfo.name;
+            easyInfo.name = name;
+            // Rename project folder if name changed
+            if (clientOldName && name !== clientOldName) {
+              const safeName = name.replace(/[^a-zA-Z0-9_\-\u4e00-\u9fff]/g, '-');
+              const oldDir = easyInfo.cp.projectDir;
+              const newDir = path.join(path.dirname(oldDir), safeName);
+              try {
+                if (fs.existsSync(oldDir) && !fs.existsSync(newDir)) {
+                  fs.renameSync(oldDir, newDir);
+                  easyInfo.cp.projectDir = newDir;
+                  easyInfo.project = safeName;
+                  setupProjectTemplate(newDir, easyInfo.owner, safeName);
+                }
+              } catch (e) {
+                console.error('Failed to rename project folder:', e);
+              }
+            }
+            saveEasyRegistry();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true }));
+          } else {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'Session not found' }));
+          }
+          return;
+        }
+
         const resp = await ptyFetch(`/sessions/${encodeURIComponent(session)}/rename`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name }),
         });
         const data = await resp.json();
-        // For easy sessions: rename the project folder too
-        if (session.startsWith('easy_') && clientOldName && name !== clientOldName) {
-          const renameAuth = getAuthInfo(req);
-          const rHomeDir = (!renameAuth.linuxUser || renameAuth.linuxUser === 'root') ? (process.env.HOME || '/root') : `/home/${renameAuth.linuxUser}`;
-          const safeName = name.replace(/[^a-zA-Z0-9_\-\u4e00-\u9fff]/g, '-');
-          const oldDir = `${rHomeDir}/coding/${clientOldName}`;
-          const newDir = `${rHomeDir}/coding/${safeName}`;
-          try {
-            const fs = await import('fs');
-            if (fs.existsSync(oldDir) && !fs.existsSync(newDir)) {
-              fs.renameSync(oldDir, newDir);
-              // Regenerate CLAUDE.md with new project name
-              setupProjectTemplate(newDir, renameAuth.linuxUser || renameAuth.username, safeName);
-            }
-          } catch (e) {
-            console.error('Failed to rename project folder:', e);
-          }
-        }
         res.writeHead(resp.status, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(data));
       } catch {
@@ -7576,8 +7968,28 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const sessionId = decodeURIComponent(deleteSessionMatch[1]!);
-    // Check ownership (non-root can only delete own sessions)
     const auth = getAuthInfo(req);
+
+    // Easy sessions: handle locally, skip PTY service
+    if (easySessions.has(sessionId)) {
+      const easyInfo = easySessions.get(sessionId);
+      if (easyInfo) {
+        // Check ownership
+        if (auth.username !== 'root' && easyInfo.owner !== auth.username) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Forbidden' }));
+          return;
+        }
+        easyInfo.cp.dispose();
+        easySessions.delete(sessionId);
+        saveEasyRegistry();
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true }));
+      return;
+    }
+
+    // PTY sessions: check ownership and proxy to PTY service
     if (auth.username !== 'root') {
       try {
         const listResp = await ptyFetch(`/sessions?owner=${encodeURIComponent(auth.username!)}`);
@@ -8097,8 +8509,37 @@ const server = http.createServer(async (req, res) => {
     res.removeHeader('Content-Security-Policy');
     const project = serveMatch[2]!;
     const filePart = serveMatch[3] || '/index.html';
+
+    // Find project directory: collect all candidates, pick the one that has the file
     const homeDir = (!auth.linuxUser || auth.linuxUser === 'root') ? (process.env.HOME || '/root') : `/home/${auth.linuxUser}`;
-    const projectRoot = path.join(homeDir, 'coding', project);
+    const candidates: string[] = [];
+    // 1. Requester's own dir (highest priority)
+    candidates.push(path.join(homeDir, 'coding', project));
+    // 2. All easy session dirs matching this project name
+    for (const [, eInfo] of easySessions) {
+      if (eInfo.project === project || path.basename(eInfo.cp.projectDir) === project) {
+        if (candidates.indexOf(eInfo.cp.projectDir) === -1) candidates.push(eInfo.cp.projectDir);
+      }
+    }
+    // 3. Other users' coding dirs
+    try {
+      for (const u of fs.readdirSync('/home')) {
+        const c = path.join('/home', u, 'coding', project);
+        if (candidates.indexOf(c) === -1) candidates.push(c);
+      }
+    } catch {}
+    // Also check root's coding dir
+    const rootCandidate = path.join(process.env.HOME || '/root', 'coding', project);
+    if (candidates.indexOf(rootCandidate) === -1) candidates.push(rootCandidate);
+
+    // Find first candidate that has the requested file
+    let projectRoot = candidates[0];
+    for (const c of candidates) {
+      const testPath = path.resolve(c, '.' + filePart);
+      if (testPath.startsWith(c + '/') || testPath === c) {
+        try { fs.accessSync(testPath); projectRoot = c; break; } catch {}
+      }
+    }
     const filePath = path.resolve(projectRoot, '.' + filePart);
 
     // Security: must stay within project directory
@@ -8512,14 +8953,6 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
   const projectParam = url.searchParams.get('project') || '';
   const wsAuth = getAuthInfo(req);
 
-  // Determine project directory
-  const homeDir = (!wsAuth.linuxUser || wsAuth.linuxUser === 'root')
-    ? (process.env.HOME || '/root')
-    : `/home/${wsAuth.linuxUser}`;
-  const projectDir = projectParam
-    ? `${homeDir}/coding/${projectParam}`
-    : `${homeDir}`;
-
   // Get or create ClaudeProcess for this session
   let info = easySessions.get(sessionId);
   let cp: ClaudeProcess;
@@ -8531,9 +8964,17 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
   };
 
   if (!info) {
+    // New session — determine project directory from connecting user
+    const homeDir = (!wsAuth.linuxUser || wsAuth.linuxUser === 'root')
+      ? (process.env.HOME || '/root')
+      : `/home/${wsAuth.linuxUser}`;
+    const projectDir = projectParam
+      ? `${homeDir}/coding/${projectParam}`
+      : `${homeDir}`;
     cp = new ClaudeProcess(sessionId, projectDir, sendToClient);
-    info = { cp, owner: wsAuth.username, project: projectParam, name: projectParam || sessionId, createdAt: Date.now(), lastActivity: Date.now() };
+    info = { cp, owner: wsAuth.username, project: projectParam, name: projectParam || sessionId, createdAt: Date.now(), lastActivity: Date.now(), connectedUsers: new Map() };
     easySessions.set(sessionId, info);
+    saveEasyRegistry();
     console.log(`[easy] Created ClaudeProcess for ${sessionId} in ${projectDir}`);
   } else {
     // Add this client as an additional listener (supports multiple browser tabs)
@@ -8541,6 +8982,25 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
     cp.addListener(sendToClient);
     console.log(`[easy] Reconnected to ClaudeProcess for ${sessionId}`);
   }
+
+  // Track connected user
+  const connUser = wsAuth.username || 'anonymous';
+  if (!info.connectedUsers.has(connUser)) {
+    info.connectedUsers.set(connUser, new Set());
+  }
+  info.connectedUsers.get(connUser)!.add(clientWs);
+
+  // Broadcast updated participants list to all connected clients
+  const broadcastParticipants = () => {
+    const users = Array.from(info!.connectedUsers.keys());
+    const msg = JSON.stringify({ type: 'participants', users });
+    for (const wsSet of info!.connectedUsers.values()) {
+      for (const ws of wsSet) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+      }
+    }
+  };
+  broadcastParticipants();
 
   // Send current state + history on connect
   const history = cp.getHistory();
@@ -8555,16 +9015,21 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
     state: initialState,
   }));
 
+  // Send last preview URL if any
+  if (cp.lastPreviewUrl) {
+    clientWs.send(JSON.stringify({ type: 'preview_hint', url: cp.lastPreviewUrl }));
+  }
+
   // Client messages
   clientWs.on('message', (data: Buffer | string) => {
     try {
       const raw = data.toString();
-      console.log(`[easy] ${sessionId} recv: ${raw.substring(0, 200)}`);
+      console.log(`[easy] ${sessionId} recv from ${connUser}: ${raw.substring(0, 200)}`);
       const msg: EasyClientMessage = JSON.parse(raw);
       if (msg.type === 'send') {
-        console.log(`[easy] ${sessionId} sendMessage: ${msg.text.substring(0, 100)}`);
-        if (info) info.lastActivity = Date.now();
-        cp!.sendMessage(msg.text);
+        console.log(`[easy] ${sessionId} sendMessage from ${connUser}: ${msg.text.substring(0, 100)}`);
+        if (info) { info.lastActivity = Date.now(); saveEasyRegistry(); }
+        cp!.sendMessage(msg.text, connUser);
       } else if (msg.type === 'cancel') {
         cp!.cancel();
       }
@@ -8574,8 +9039,15 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
   });
 
   clientWs.on('close', () => {
-    console.log(`[easy] Client disconnected: ${sessionId}`);
+    console.log(`[easy] Client disconnected: ${sessionId} user=${connUser}`);
     cp!.removeListener(sendToClient);
+    // Remove from connected users tracking
+    const wsSet = info?.connectedUsers.get(connUser);
+    if (wsSet) {
+      wsSet.delete(clientWs);
+      if (wsSet.size === 0) info!.connectedUsers.delete(connUser);
+    }
+    broadcastParticipants();
     // Don't dispose ClaudeProcess — keep it alive for reconnect
   });
 
