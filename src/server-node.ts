@@ -2840,6 +2840,9 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     document.getElementById('preview-guide').style.display = 'none';
     if (welcomeActive) dismissWelcome();
     renderPreviewNav();
+    // Persist user's selection so it survives page refresh
+    var _persistUrls = previewUrls.filter(function(u) { return !_deletedPreviews[u]; });
+    try { localStorage.setItem('easy_preview_' + sessionId, JSON.stringify({ urls: _persistUrls, current: currentPreviewUrl })); } catch(e) {}
   }
 
   var _deletedPreviews = {};
@@ -3033,29 +3036,38 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     navToggle.classList.toggle('collapsed', navCollapsed);
   });
 
-  function setPreviewUrl(url, forceReload) {
+  // addOnly: add URL to list without switching active preview (used for reconnect hints)
+  function setPreviewUrl(url, forceReload, addOnly) {
     if (!url) return;
     // Skip localhost/127.0.0.1 URLs — not reachable from client browser
     if (/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:|\\/)/.test(url)) return;
     // Skip URLs the user has explicitly deleted
     if (_deletedPreviews[url]) return;
-    // Remove duplicate if exists, then add to front (newest first)
+    // Add to list (dedup)
     var idx = previewUrls.indexOf(url);
-    if (idx >= 0) previewUrls.splice(idx, 1);
-    previewUrls.unshift(url);
-    // Trim to max
-    if (previewUrls.length > MAX_PREVIEW_PILLS) previewUrls.length = MAX_PREVIEW_PILLS;
-    // Load the URL — hard refresh to bypass all caches
-    if (url !== currentPreviewUrl || forceReload) {
-      currentPreviewUrl = url;
-      hardRefreshPreview(url);
+    if (addOnly) {
+      // Just ensure it's in the list, don't reorder or switch
+      if (idx < 0) {
+        previewUrls.push(url);
+        if (previewUrls.length > MAX_PREVIEW_PILLS) previewUrls.length = MAX_PREVIEW_PILLS;
+      }
+    } else {
+      // Remove duplicate if exists, then add to front (newest first)
+      if (idx >= 0) previewUrls.splice(idx, 1);
+      previewUrls.unshift(url);
+      if (previewUrls.length > MAX_PREVIEW_PILLS) previewUrls.length = MAX_PREVIEW_PILLS;
+      // Load the URL — hard refresh to bypass all caches
+      if (url !== currentPreviewUrl || forceReload) {
+        currentPreviewUrl = url;
+        hardRefreshPreview(url);
+      }
     }
     previewFrame.classList.add('loaded');
     document.getElementById('preview-guide').style.display = 'none';
     if (welcomeActive) dismissWelcome();
     renderPreviewNav();
     // Show badge on preview tab if we're on chat
-    if (activeTab === 'chat') {
+    if (activeTab === 'chat' && !addOnly) {
       previewBadge.classList.add('show');
     }
     // Persist preview URLs (exclude deleted)
@@ -3330,6 +3342,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 
   // ---- WebSocket (connects to /ws-easy for structured JSON messaging) ----
   var wsRetryDelay = 1000;
+  var _initialPreviewSync = false; // true during initial WS connect — preview_hints add to list without switching
 
   function connectWs() {
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -3341,6 +3354,9 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     ws = new WebSocket(wsUrl);
     ws.onopen = function() {
       wsRetryDelay = 1000;
+      // If user already has a saved preview, don't let reconnect hints override it
+      _initialPreviewSync = currentPreviewUrl ? true : false;
+      setTimeout(function() { _initialPreviewSync = false; }, 2000);
       dbg('ws connected');
     };
     ws.onmessage = function(e) {
@@ -3392,8 +3408,9 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         }
       } else if (d.type === 'preview_hint') {
         // Server detected new/modified HTML — auto-load preview
+        // During initial reconnect, just add to list without switching active URL
         if (d.url) {
-          setPreviewUrl(d.url, true);
+          setPreviewUrl(d.url, true, _initialPreviewSync);
         }
       } else if (d.type === 'preview_suggest') {
         // Non-previewable file generated — suggest HTML preview
