@@ -862,8 +862,8 @@ function getLoginHtml(): string {
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Hopcode">
   <link rel="manifest" href="./manifest.json">
-  <link rel="icon" type="image/svg+xml" href="./icons/favicon.svg">
-  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
+  <link rel="icon" type="image/png" href="./icons/logo-horse.png?v=4">
+  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png?v=4">
   <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
   <title>Hopcode - Login</title>
   <script>${getI18nScript()}</script>
@@ -1031,8 +1031,8 @@ async function buildSessionsHtml(username?: string): Promise<string> {
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Hopcode">
   <link rel="manifest" href="./manifest.json">
-  <link rel="icon" type="image/svg+xml" href="./icons/favicon.svg">
-  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
+  <link rel="icon" type="image/png" href="./icons/logo-horse.png?v=4">
+  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png?v=4">
   <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
   <title>Hopcode - Sessions</title>
   <script>${getI18nScript()}</script>
@@ -1045,8 +1045,9 @@ async function buildSessionsHtml(username?: string): Promise<string> {
     .header { margin-bottom: 16px; }
     .header-row1 { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
     .header-brand { display: flex; align-items: center; gap: 8px; }
-    .header-brand img { width: 28px; height: 28px; border-radius: 6px; }
-    .header-brand h1 { color: #4ade80; font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
+    .header-brand img { width: 96px; height: 96px; border-radius: 16px; }
+    .header-brand h1 { color: #4ade80; font-size: 40px; font-weight: 700; letter-spacing: -0.3px; }
+    html[lang="zh"] .header-brand h1 { font-size: 52px; }
     .header-meta { display: flex; align-items: center; gap: 8px; }
     .user-info { color: #6b7280; font-size: 12px; }
     .admin-link { color: #60a5fa; font-size: 12px; text-decoration: none; padding: 4px 8px; border-radius: 6px; transition: all 0.15s; }
@@ -1184,7 +1185,8 @@ async function buildSessionsHtml(username?: string): Promise<string> {
     /* Mobile */
     @media (max-width: 500px) {
       .container { padding: 14px 12px; }
-      .header-brand h1 { font-size: 18px; }
+      .header-brand h1 { font-size: 36px; }
+      html[lang="zh"] .header-brand h1 { font-size: 46px; }
       .header-row2 { flex-wrap: wrap; }
       .mode-btn { padding: 6px 10px; font-size: 12px; }
       .new-btn { padding: 6px 10px; font-size: 12px; }
@@ -1199,7 +1201,7 @@ async function buildSessionsHtml(username?: string): Promise<string> {
     <div class="header">
       <div class="header-row1">
         <div class="header-brand">
-          <img src="./icons/favicon.svg" alt="">
+          <img src="./icons/logo-horse.png?v=4" alt="">
           <h1 data-i18n="portal.heading">Hopcode</h1>
         </div>
         <div class="header-meta">
@@ -1502,7 +1504,7 @@ function getGuestLandingHtml(lang: string, sessionName: string, ownerName: strin
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Hopcode - ${esc(t(lang, 'guest.landing_title'))}</title>
 <script>${getI18nScript()}</script>
-<link rel="icon" type="image/svg+xml" href="./icons/favicon.svg">
+<link rel="icon" type="image/png" href="./icons/logo-horse.png?v=4">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,system-ui,'Segoe UI',sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);padding:20px}
@@ -1554,8 +1556,8 @@ function getEasyModeHtml(auth: AuthInfo, guestOpts?: GuestOptions): string {
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Hopcode Easy Mode</title>
 <script>${getI18nScript()}</script>
-<link rel="icon" type="image/svg+xml" href="./icons/favicon.svg">
-<link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
+<link rel="icon" type="image/png" href="./icons/logo-horse.png?v=4">
+<link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png?v=4">
 <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
@@ -2032,7 +2034,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 <div id="app">
   <!-- Top bar -->
   <div id="top-bar">
-    <img class="logo" src="./icons/favicon.svg" alt="Hopcode" style="width:24px;height:24px;">
+    <img class="logo" src="./icons/logo-horse.png?v=4" alt="Hopcode" style="width:28px;height:28px;border-radius:6px;">
     <span class="title">Hopcode<span class="subtitle">Easy</span></span>
     <button class="top-btn" id="apps-btn" title="My Apps">Apps</button>
     <button class="top-btn primary" id="pro-btn" title="Switch to Pro Mode">Pro</button>
@@ -5324,8 +5326,8 @@ const indexHtml = `<!DOCTYPE html>
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Hopcode">
   <link rel="manifest" href="./manifest.json">
-  <link rel="icon" type="image/svg+xml" href="./icons/favicon.svg">
-  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
+  <link rel="icon" type="image/png" href="./icons/logo-horse.png?v=4">
+  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png?v=4">
   <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
   <title>Hopcode</title>
   <script>${getI18nScript()}</script>
@@ -8596,7 +8598,7 @@ function getAdminHtml(): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Admin - Hopcode</title>
-<link rel="icon" type="image/svg+xml" href="./icons/favicon.svg">
+<link rel="icon" type="image/png" href="./icons/logo-horse.png?v=4">
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
 body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:#0f172a; color:#e2e8f0; min-height:100vh; }

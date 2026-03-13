@@ -649,6 +649,7 @@ function _setLang(lang) {
   location.reload();
 }
 function _applyI18n() {
+  document.documentElement.lang = _lang;
   var els = document.querySelectorAll('[data-i18n]');
   for (var i = 0; i < els.length; i++) {
     var el = els[i];
