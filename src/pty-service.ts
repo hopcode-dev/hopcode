@@ -73,8 +73,6 @@ function createSession(id: string, owner: string = 'admin', linuxUser?: string, 
 
   // Handle messages from worker
   worker.on('message', (msg: any) => {
-    session.lastActivity = Date.now();
-
     switch (msg.type) {
       case 'ready':
         session.ready = true;

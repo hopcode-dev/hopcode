@@ -82,6 +82,11 @@ const en: Record<string, string> = {
   'easy.welcome.portfolio.time': '~3 min',
   'easy.welcome.skip': 'Or just start chatting',
 
+  // Welcome prompts (sent to Claude when user clicks a card)
+  'easy.welcome.dashboard.prompt': 'Build me an impressive interactive sales analytics dashboard as a single HTML file. Include: 1) A header with company name and date range selector, 2) KPI cards showing Total Revenue, Orders, Avg Order Value, and Growth % with colored indicators, 3) A revenue trend line chart (use canvas or SVG, no external libs), 4) A pie/donut chart for sales by category, 5) A sortable top-10 products table with sparkline bars, 6) Make it responsive with a professional dark theme and smooth hover animations. Use realistic sample data for a tech accessories store. The file should be completely self-contained with no external dependencies.',
+  'easy.welcome.game.prompt': 'Build me a polished Snake game as a single HTML file. Include: 1) A canvas-based game board with a grid, 2) Smooth snake movement with arrow key and swipe controls (mobile friendly), 3) Score display and high score tracking (localStorage), 4) Speed increases every 5 points, 5) Game over screen with restart button, 6) A clean modern UI with dark theme, subtle grid lines, glowing snake effect, and food animations, 7) Start screen with instructions. Make it completely self-contained, no external dependencies. Make the visual quality impressive with gradients and subtle effects.',
+  'easy.welcome.portfolio.prompt': 'Build me a stunning personal portfolio website as a single HTML file. Include: 1) A hero section with animated gradient background, name "Alex Chen" and title "Creative Developer", with a subtle floating particle effect, 2) An About section with a brief bio and skill tags with hover effects, 3) A Projects section with 3 project cards that have image placeholders, hover lift animations and tech stack badges, 4) A Contact section with social links and a simple contact form (no backend needed), 5) Smooth scroll navigation with a sticky header that changes on scroll, 6) Fully responsive, modern glassmorphism design, dark theme. No external dependencies, all CSS and JS inline.',
+
   // Preview
   'easy.preview.share': 'Share',
   'easy.preview.refresh': 'Refresh',
@@ -123,6 +128,10 @@ const en: Record<string, string> = {
   'easy.voice.processing': 'Processing...',
   'easy.voice.error': 'Voice recognition failed',
   'easy.voice.no_mic': 'Microphone not available',
+  'easy.voice.send': 'Send',
+  'easy.voice.hint_default': 'Swipe up to cancel',
+  'easy.voice.hint_cancel': 'Release to cancel',
+  'easy.voice.hint_confirm': 'Edit and tap Send, or press Enter',
 
   // Messages
   'easy.msg.cancelled': 'Cancelled.',
@@ -141,6 +150,11 @@ const en: Record<string, string> = {
   'tool.Glob': 'Searching files',
   'tool.Grep': 'Searching code',
   'tool.working': 'Working',
+  'tool.Agent': 'Researching',
+  'tool.WebFetch': 'Fetching web',
+  'tool.WebSearch': 'Searching web',
+  'easy.tool.step': 'step {n}',
+  'easy.tool.done': 'Completed {n} steps',
 
   // Pro Mode
   'pro.status.hold_to_speak': 'Hold {key} to speak',
@@ -239,15 +253,15 @@ const zh: Record<string, string> = {
   'error_generic': '发生了错误',
 
   // Login
-  'login.title': 'Hopcode - 登录',
+  'login.title': '立码 - 登录',
   'login.error_incorrect': '密码错误',
   'login.placeholder_username': '用户名',
   'login.placeholder_password': '密码',
   'login.btn': '登录',
 
   // Portal
-  'portal.title': 'Hopcode - 会话列表',
-  'portal.heading': 'Hopcode',
+  'portal.title': '立码 - 会话列表',
+  'portal.heading': '立码',
   'portal.btn_easy': '简单模式',
   'portal.btn_new': '+ 新建',
   'portal.btn_new_project': '+ 新建项目',
@@ -266,7 +280,7 @@ const zh: Record<string, string> = {
   'portal.lang_label': '语言',
 
   // Easy Mode
-  'easy.title': 'Hopcode 简单模式',
+  'easy.title': '立码 简单模式',
   'easy.status.initializing': 'Claude 启动中...',
   'easy.status.ready': '就绪',
   'easy.status.thinking': 'Claude 思考中...',
@@ -290,7 +304,7 @@ const zh: Record<string, string> = {
   'easy.tab.preview': '预览',
 
   // Welcome
-  'easy.welcome.greeting': '欢迎使用 Hopcode',
+  'easy.welcome.greeting': '欢迎使用立码',
   'easy.welcome.sub': '选择一个项目，用 AI 在 5 分钟内构建出令人惊叹的作品。',
   'easy.welcome.dashboard.title': '数据仪表板',
   'easy.welcome.dashboard.desc': '带有交互式图表、KPI 卡片和趋势分析的精美销售分析仪表板。',
@@ -302,6 +316,11 @@ const zh: Record<string, string> = {
   'easy.welcome.portfolio.desc': '精美的个人网站，带流畅滚动动画、响应式设计和现代美感。',
   'easy.welcome.portfolio.time': '约 3 分钟',
   'easy.welcome.skip': '或直接开始对话',
+
+  // 欢迎卡片点击后发送的提示词
+  'easy.welcome.dashboard.prompt': '帮我做一个漂亮的交互式销售数据分析仪表板，用单个 HTML 文件实现。要求：1) 顶部有公司名称和日期选择器，2) KPI 卡片显示总营收、订单数、客单价、增长率，带颜色指示，3) 用 canvas 或 SVG 画营收趋势折线图（不用外部库），4) 饼图/环形图展示各品类销售占比，5) 可排序的 Top 10 产品表格带迷你柱状图，6) 响应式布局，专业深色主题，丝滑的悬停动画。用一家数码配件店的模拟数据。文件完全独立，不依赖任何外部资源。',
+  'easy.welcome.game.prompt': '帮我做一个精致的贪吃蛇游戏，用单个 HTML 文件实现。要求：1) 基于 canvas 的游戏画布带网格，2) 流畅的蛇移动，支持方向键和手势滑动（手机友好），3) 分数显示和最高分记录（用 localStorage），4) 每得 5 分速度提升一级，5) 游戏结束画面带重新开始按钮，6) 干净现代的 UI，深色主题，细微网格线，发光蛇身效果和食物动画，7) 开始画面带操作说明。完全独立，不依赖外部资源。视觉效果要精美，用渐变和细腻特效。',
+  'easy.welcome.portfolio.prompt': '帮我做一个惊艳的个人作品集网站，用单个 HTML 文件实现。要求：1) 首屏区域带动态渐变背景，展示姓名"陈立"和头衔"创意开发者"，有微妙的浮动粒子效果，2) 关于我板块，简短个人介绍加技能标签带悬停效果，3) 项目展示区有 3 张项目卡片，带图片占位、悬停上浮动画和技术栈徽章，4) 联系方式区有社交链接和简单联系表单（不需要后端），5) 平滑滚动导航，固定头部会在滚动时变化，6) 完全响应式，现代毛玻璃风格设计，深色主题。不依赖外部资源，所有 CSS 和 JS 内联。',
 
   // Preview
   'easy.preview.share': '分享',
@@ -344,6 +363,10 @@ const zh: Record<string, string> = {
   'easy.voice.processing': '处理中...',
   'easy.voice.error': '语音识别失败',
   'easy.voice.no_mic': '麦克风不可用',
+  'easy.voice.send': '发送',
+  'easy.voice.hint_default': '上滑取消',
+  'easy.voice.hint_cancel': '松手取消',
+  'easy.voice.hint_confirm': '编辑后点发送，或按回车',
 
   // Messages
   'easy.msg.cancelled': '已取消。',
@@ -362,6 +385,11 @@ const zh: Record<string, string> = {
   'tool.Glob': '搜索文件',
   'tool.Grep': '搜索代码',
   'tool.working': '处理中',
+  'tool.Agent': '调研中',
+  'tool.WebFetch': '抓取网页',
+  'tool.WebSearch': '搜索网页',
+  'easy.tool.step': '第{n}步',
+  'easy.tool.done': '已完成 {n} 步操作',
 
   // Pro Mode
   'pro.status.hold_to_speak': '按住 {key} 说话',
@@ -460,8 +488,8 @@ var _lang = (function() {
   var saved = localStorage.getItem('hopcode-lang');
   if (saved && _i18n[saved]) return saved;
   var nav = (navigator.language || '').toLowerCase();
-  if (nav.startsWith('zh')) return 'zh';
-  return 'en';
+  if (nav.startsWith('en')) return 'en';
+  return 'zh';
 })();
 function _t(key, params) {
   var s = (_i18n[_lang] && _i18n[_lang][key]) || (_i18n['en'] && _i18n['en'][key]) || key;

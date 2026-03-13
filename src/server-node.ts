@@ -836,7 +836,7 @@ function getLoginHtml(): string {
 </head>
 <body>
   <div class="login-box">
-    <h1>Hopcode</h1>
+    <h1 data-i18n="portal.heading">Hopcode</h1>
     <div class="error" id="error" data-i18n="login.error_incorrect">Incorrect password</div>
     <form onsubmit="return login()">
       ${usernameField}
@@ -884,7 +884,7 @@ async function buildSessionsHtml(username?: string): Promise<string> {
   for (const [id, info] of easySessions) {
     if (isMultiUser && username && !isRoot && info.owner !== username) continue;
     if (sessionList.some(s => s.id === id)) continue;
-    sessionList.push({ id, name: info.name, owner: info.owner, createdAt: info.createdAt, lastActivity: info.createdAt, clients: 0, mode: 'easy', project: info.project });
+    sessionList.push({ id, name: info.name, owner: info.owner, createdAt: info.createdAt, lastActivity: info.lastActivity || info.createdAt, clients: 0, mode: 'easy', project: info.project });
   }
   sessionList.sort((a, b) => b.lastActivity - a.lastActivity);
 
@@ -1117,7 +1117,7 @@ async function buildSessionsHtml(username?: string): Promise<string> {
       <div class="header-row1">
         <div class="header-brand">
           <img src="./icons/favicon.svg" alt="">
-          <h1>Hopcode</h1>
+          <h1 data-i18n="portal.heading">Hopcode</h1>
         </div>
         <div class="header-meta">
           ${isMultiUser && username ? `<span class="user-info">${esc(username)}</span>` : ''}
@@ -1126,10 +1126,10 @@ async function buildSessionsHtml(username?: string): Promise<string> {
         </div>
       </div>
       <div class="header-row2">
-        ${isRoot ? `<div class="mode-toggle">
+        <div class="mode-toggle">
           <a class="mode-btn" id="mode-easy" href="/terminal/easy" data-i18n="portal.mode_easy">Easy Mode</a>
           <a class="mode-btn" id="mode-pro" href="/terminal?action=new" data-i18n="portal.mode_pro">Pro Mode</a>
-        </div>` : ''}
+        </div>
         <a class="new-btn" id="new-project-btn" href="/terminal/easy" data-i18n="portal.btn_new_project">+ New Project</a>
       </div>
     </div>
@@ -1142,12 +1142,13 @@ async function buildSessionsHtml(username?: string): Promise<string> {
     var modeEasy = document.getElementById('mode-easy');
     var modePro = document.getElementById('mode-pro');
     var newBtn = document.getElementById('new-project-btn');
-    var savedMode = localStorage.getItem('hopcode-mode') || 'easy';
+    var hasToggle = !!(modeEasy && modePro);
+    var savedMode = hasToggle ? (localStorage.getItem('hopcode-mode') || 'easy') : 'pro';
 
     function setMode(mode) {
       savedMode = mode;
       localStorage.setItem('hopcode-mode', mode);
-      if (modeEasy && modePro) {
+      if (hasToggle) {
         modeEasy.classList.toggle('active', mode === 'easy');
         modePro.classList.toggle('active', mode === 'pro');
       }
@@ -1446,11 +1447,12 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 .msg.system { align-self:center; background:none; color:#86868b; font-size:12px; text-align:center; padding:4px 8px; }
 .msg.error { align-self:center; background:#fff0f0; color:#ff3b30; border:1px solid #ffcdd2; font-size:13px; }
 
-/* Thinking/loading indicator */
-.thinking { display:flex; gap:4px; padding:12px 16px; align-self:flex-start; }
-.thinking span { width:6px; height:6px; background:#c7c7cc; border-radius:50%; animation:bounce 1.2s infinite; }
-.thinking span:nth-child(2) { animation-delay:0.2s; }
-.thinking span:nth-child(3) { animation-delay:0.4s; }
+/* Thinking/loading indicator — inside assistant msg bubble */
+.thinking-placeholder { min-height:36px; display:flex; align-items:center; }
+.dot-spinner { display:flex; gap:4px; }
+.dot-spinner span { width:6px; height:6px; background:#c7c7cc; border-radius:50%; animation:bounce 1.2s infinite; }
+.dot-spinner span:nth-child(2) { animation-delay:0.2s; }
+.dot-spinner span:nth-child(3) { animation-delay:0.4s; }
 @keyframes bounce { 0%,80%,100% { transform:translateY(0); } 40% { transform:translateY(-8px); } }
 
 /* Quick actions */
@@ -1596,12 +1598,33 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 .modal-cancel { background:#e5e5ea; color:#1d1d1f; }
 .modal-ok { background:#007aff; color:white; }
 
-/* Voice overlay */
-#voice-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.4); z-index:300; display:none; align-items:center; justify-content:center; flex-direction:column; gap:16px; }
-#voice-overlay.show { display:flex; }
-#voice-overlay .vo-text { font-size:18px; color:#ffffff; max-width:80%; text-align:center; min-height:28px; }
-#voice-overlay .vo-status { font-size:14px; color:#d2d2d7; }
-#voice-overlay .vo-cancel { padding:8px 24px; border-radius:8px; border:1px solid rgba(255,255,255,0.3); background:rgba(255,255,255,0.15); color:#ffffff; font-size:14px; cursor:pointer; }
+/* Voice popup (Pro-style) */
+#voice-popup {
+  position:fixed; left:50%; top:40%; transform:translate(-50%,-50%);
+  background:rgba(0,0,0,0.85); border:1px solid rgba(255,255,255,0.15); border-radius:16px;
+  padding:16px 20px; min-width:200px; max-width:80vw; z-index:500;
+  color:#fff; text-align:center;
+  box-shadow:0 4px 24px rgba(0,0,0,0.5); transition:opacity 0.15s, transform 0.15s;
+}
+#voice-popup.hidden { display:none; }
+#voice-popup.cancel { background:rgba(80,20,20,0.9); border-color:#ff3b30; }
+#voice-popup.cancel #vp-dot { background:#ff3b30; animation:none; }
+#voice-popup.cancel #vp-hint { color:#ff3b30; font-weight:600; }
+#voice-popup.send-ready { background:rgba(0,60,40,0.9); border-color:#34c759; }
+#voice-popup.send-ready #vp-dot { background:#34c759; }
+#voice-popup.send-ready #vp-hint { color:#34c759; font-weight:600; }
+#vp-indicator { margin-bottom:8px; }
+#vp-dot { display:inline-block; width:12px; height:12px; border-radius:50%; background:#007aff; animation:pulse 1s infinite; }
+#vp-text { font-size:16px; line-height:1.5; color:#fff; min-height:24px; max-height:30vh; overflow-y:auto; word-break:break-word; outline:none; border-radius:6px; padding:4px; }
+#vp-text[contenteditable="true"] { border:1px solid #007aff; background:rgba(0,0,0,0.3); -webkit-user-select:text; user-select:text; cursor:text; }
+#vp-hint { font-size:12px; color:rgba(255,255,255,0.5); margin-top:8px; }
+#vp-actions { display:none; justify-content:center; gap:12px; margin-top:12px; }
+#vp-actions button { border:none; border-radius:8px; padding:8px 20px; font-size:15px; font-weight:600; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+#vp-send { background:#007aff; color:#fff; }
+#vp-send:active { background:#0055d4; }
+#vp-cancel-btn { background:rgba(255,255,255,0.15); color:#fff; }
+#vp-cancel-btn:active { background:rgba(255,255,255,0.25); }
+#vp-text.listening::after { content:''; color:rgba(255,255,255,0.4); animation:pulse 1.2s infinite; }
 
 /* Scrollbar — Mac style */
 ::-webkit-scrollbar { width:6px; }
@@ -1618,8 +1641,13 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 #status-bar .status-dot.blue { background:#007aff; animation:pulse 1.5s infinite; }
 
 /* Tool activity indicator */
-.msg.tool-activity { align-self:flex-start; background:#f5f5f7; color:#86868b; font-size:12px; padding:6px 12px; border:1px solid #e5e5ea; border-radius:8px; display:flex; align-items:center; gap:6px; }
+.msg.tool-activity { align-self:flex-start; background:#f5f5f7; color:#86868b; font-size:12px; padding:6px 12px; border:1px solid #e5e5ea; border-radius:8px; display:flex; align-items:center; gap:4px; flex-wrap:wrap; }
 .msg.tool-activity .tool-icon { font-size:14px; }
+.msg.tool-activity .tool-detail { color:#636366; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.msg.tool-activity .tool-step { color:#aeaeb2; }
+.msg.tool-activity .tool-timer { color:#aeaeb2; font-variant-numeric:tabular-nums; min-width:20px; }
+.msg.tool-activity:not(.done) .tool-timer { animation:pulse-timer 2s infinite; }
+@keyframes pulse-timer { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
 .msg.tool-activity.done { opacity:0.5; transition:opacity 0.5s; }
 .msg.tool-activity.done .tool-icon { color:#34c759; }
 .tool-detail { display:none; font-size:11px; color:#86868b; margin-top:4px; white-space:pre-wrap; max-height:120px; overflow-y:auto; }
@@ -1825,11 +1853,15 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   </div>
 </div>
 
-<!-- Voice overlay -->
-<div id="voice-overlay">
-  <div class="vo-status" id="vo-status">Recording...</div>
-  <div class="vo-text" id="vo-text"></div>
-  <button class="vo-cancel" id="vo-cancel">Cancel</button>
+<!-- Voice popup -->
+<div id="voice-popup" class="hidden">
+  <div id="vp-indicator"><span id="vp-dot"></span></div>
+  <div id="vp-text"></div>
+  <div id="vp-hint"></div>
+  <div id="vp-actions">
+    <button id="vp-cancel-btn" data-i18n="cancel">Cancel</button>
+    <button id="vp-send" data-i18n="easy.voice.send">Send</button>
+  </div>
 </div>
 
 <!-- Hidden file input for uploads -->
@@ -1892,10 +1924,11 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   var projectNameInput = document.getElementById('project-name-input');
   var modalCancel = document.getElementById('modal-cancel');
   var modalOk = document.getElementById('modal-ok');
-  var voiceOverlay = document.getElementById('voice-overlay');
-  var voStatus = document.getElementById('vo-status');
-  var voText = document.getElementById('vo-text');
-  var voCancel = document.getElementById('vo-cancel');
+  var vpEl = document.getElementById('voice-popup');
+  var vpText = document.getElementById('vp-text');
+  var vpHint = document.getElementById('vp-hint');
+  var vpActions = document.getElementById('vp-actions');
+  var vpConfirmVisible = false;
 
   // Menu sheet refs
   var menuOverlay = document.getElementById('menu-overlay');
@@ -1985,9 +2018,9 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   var welcomeSkip = document.getElementById('welcome-skip');
   var welcomeActive = true;
   var welcomeTaskPrompts = {
-    dashboard: 'Build me an impressive interactive sales analytics dashboard as a single HTML file. Include: 1) A header with company name and date range selector, 2) KPI cards showing Total Revenue, Orders, Avg Order Value, and Growth % with colored indicators, 3) A revenue trend line chart (use canvas or SVG, no external libs), 4) A pie/donut chart for sales by category, 5) A sortable top-10 products table with sparkline bars, 6) Make it responsive with a professional dark theme and smooth hover animations. Use realistic sample data for a tech accessories store. The file should be completely self-contained with no external dependencies.',
-    game: 'Build me a polished Snake game as a single HTML file. Include: 1) A canvas-based game board with a grid, 2) Smooth snake movement with arrow key and swipe controls (mobile friendly), 3) Score display and high score tracking (localStorage), 4) Speed increases every 5 points, 5) Game over screen with restart button, 6) A clean modern UI with dark theme, subtle grid lines, glowing snake effect, and food animations, 7) Start screen with instructions. Make it completely self-contained, no external dependencies. Make the visual quality impressive with gradients and subtle effects.',
-    portfolio: 'Build me a stunning personal portfolio website as a single HTML file. Include: 1) A hero section with animated gradient background, name \"Alex Chen\" and title \"Creative Developer\", with a subtle floating particle effect, 2) An About section with a brief bio and skill tags with hover effects, 3) A Projects section with 3 project cards that have image placeholders, hover lift animations and tech stack badges, 4) A Contact section with social links and a simple contact form (no backend needed), 5) Smooth scroll navigation with a sticky header that changes on scroll, 6) Fully responsive, modern glassmorphism design, dark theme. No external dependencies, all CSS and JS inline.'
+    dashboard: _t('easy.welcome.dashboard.prompt'),
+    game: _t('easy.welcome.game.prompt'),
+    portfolio: _t('easy.welcome.portfolio.prompt')
   };
 
   function dismissWelcome() {
@@ -2323,6 +2356,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   // States: 'initializing' | 'ready' | 'thinking' | 'tool_running' | 'error'
   var state = 'initializing';
   var stuckTimer = null;
+  var voiceTriggered = false;
 
   // DOM refs for new elements
   var statusDot = document.getElementById('status-dot');
@@ -2396,9 +2430,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     // On transition to ready, finalize current message
     if (newState === 'ready' && prev !== 'ready' && prev !== 'initializing') {
       currentAssistantMsg = null;
-      if (currentPreviewUrl) {
-        hardRefreshPreview(currentPreviewUrl);
-      }
+      _lastDetectedUrl = '';
     }
   }
 
@@ -2421,10 +2453,37 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       if (d.type === 'state') {
         setState(d.state);
       } else if (d.type === 'message') {
-        // Don't hide thinking here — let setState('ready') handle it
-        // This avoids losing spinner during multi-step tasks
-        appendAssistantText(d.text, d.thinking);
+        // Complete message — create or update bubble
+        if (d.id != null && currentAssistantMsg && currentAssistantMsg._msgId === d.id) {
+          // Same bubble — update with final text (reconcile streaming)
+          currentAssistantMsg._rawText = d.text;
+          currentAssistantMsg.className = 'msg assistant' + (d.thinking ? ' thinking-msg' : '');
+          currentAssistantMsg.innerHTML = linkify(d.text);
+          saveChatHistory();
+        } else {
+          appendAssistantText(d.text, d.thinking);
+          if (currentAssistantMsg && d.id != null) currentAssistantMsg._msgId = d.id;
+        }
         if (voiceTriggered && !d.thinking) { voiceTriggered = false; playTts(d.text); }
+        autoScroll();
+      } else if (d.type === 'message_delta') {
+        // Streaming delta — append text to current bubble
+        if (currentAssistantMsg && currentAssistantMsg._isThinkingPlaceholder) {
+          // First real content — replace spinner with text
+          currentAssistantMsg._isThinkingPlaceholder = false;
+          currentAssistantMsg.className = 'msg assistant';
+          currentAssistantMsg._rawText = d.delta;
+          currentAssistantMsg.innerHTML = linkify(d.delta);
+          if (d.id != null) currentAssistantMsg._msgId = d.id;
+        } else if (d.id != null && currentAssistantMsg && currentAssistantMsg._msgId === d.id) {
+          // Append to existing bubble
+          currentAssistantMsg._rawText = (currentAssistantMsg._rawText || '') + d.delta;
+          currentAssistantMsg.innerHTML = linkify(currentAssistantMsg._rawText);
+        } else {
+          // No placeholder, no matching bubble — create new
+          appendAssistantText(d.delta, false);
+          if (currentAssistantMsg && d.id != null) currentAssistantMsg._msgId = d.id;
+        }
         autoScroll();
       } else if (d.type === 'tool') {
         if (d.status === 'done') {
@@ -2432,16 +2491,25 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         } else {
           showToolActivity(d.name, d.detail);
         }
+      } else if (d.type === 'preview_hint') {
+        // Server detected new/modified HTML — auto-load preview
+        if (d.url) {
+          setPreviewUrl(d.url, true);
+        }
       } else if (d.type === 'history') {
-        // Restore history on reconnect (only if chat is empty)
+        // Restore history on reconnect — append any new messages
         var existingMsgs = chatArea.querySelectorAll('.msg.user, .msg.assistant');
-        if (existingMsgs.length === 0 && d.messages) {
-          for (var i = 0; i < d.messages.length; i++) {
+        var existingCount = existingMsgs.length;
+        if (d.messages) {
+          // Skip messages we already have, render the rest
+          var startIdx = existingCount === 0 ? 0 : existingCount;
+          for (var i = startIdx; i < d.messages.length; i++) {
             var m = d.messages[i];
             if (m.role === 'user') addUserMsg(m.text);
             else appendAssistantText(m.text);
             currentAssistantMsg = null;
           }
+          if (startIdx < d.messages.length) autoScroll();
         }
       } else if (d.type === 'error') {
         addErrorMsg(d.message || _t('error_generic'));
@@ -2464,16 +2532,49 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     }
   }
 
+  var toolIcons = { Read: '\ud83d\udcc4', Write: '\u270f\ufe0f', Edit: '\u270f\ufe0f', Bash: '\u25b6', Glob: '\ud83d\udd0d', Grep: '\ud83d\udd0d', Agent: '\ud83e\udd16', WebFetch: '\ud83c\udf10', WebSearch: '\ud83c\udf10', NotebookEdit: '\ud83d\udcd3' };
+  var toolStepCount = 0;
+
   function showToolActivity(name, detail) {
-    var icons = { Read: '\ud83d\udcc4', Write: '\u270f\ufe0f', Edit: '\u270f\ufe0f', Bash: '\u25b6', Glob: '\ud83d\udd0d', Grep: '\ud83d\udd0d' };
-    var label = _t('tool.' + name) || _t('tool.working');
-    var icon = icons[name] || '\u2699\ufe0f';
-    var content = '<span class="tool-icon">' + icon + '</span> ' + escHtml(label) + (detail ? ': ' + escHtml(detail) : '');
-    // Always create a new persistent tool bubble
+    var label = _t('tool.' + name) || name || _t('tool.working');
+    var icon = toolIcons[name] || '\u2699\ufe0f';
+
+    // Detail-only update for current tool
+    if (detail && toolIndicatorEl && !toolIndicatorEl.classList.contains('done') && toolIndicatorEl._toolName === name) {
+      var detailEl = toolIndicatorEl.querySelector('.tool-detail');
+      if (detailEl) detailEl.textContent = detail;
+      return;
+    }
+
+    // Reuse existing bubble: update content in place
+    if (toolIndicatorEl && !toolIndicatorEl.classList.contains('done')) {
+      // Stop old timer
+      if (toolIndicatorEl._timerInterval) clearInterval(toolIndicatorEl._timerInterval);
+      // Increment step count, update content
+      toolStepCount++;
+      toolIndicatorEl._toolName = name;
+      toolIndicatorEl._startTime = Date.now();
+      toolIndicatorEl.innerHTML = '<span class="tool-icon">' + icon + '</span> <span class="tool-label">' + escHtml(label) + '</span>' + (detail ? ' <span class="tool-detail">' + escHtml(detail) + '</span>' : '') + ' <span class="tool-step">\u00b7 ' + _t('easy.tool.step', {n: toolStepCount}) + '</span> <span class="tool-timer"></span>';
+      var timerEl = toolIndicatorEl.querySelector('.tool-timer');
+      toolIndicatorEl._timerInterval = setInterval(function() {
+        timerEl.textContent = Math.floor((Date.now() - toolIndicatorEl._startTime) / 1000) + 's';
+      }, 1000);
+      autoScroll();
+      return;
+    }
+
+    // First tool — create bubble
+    toolStepCount = 1;
     var el = document.createElement('div');
     el.className = 'msg tool-activity';
-    el.innerHTML = content;
+    el._toolName = name;
+    el._startTime = Date.now();
+    el.innerHTML = '<span class="tool-icon">' + icon + '</span> <span class="tool-label">' + escHtml(label) + '</span>' + (detail ? ' <span class="tool-detail">' + escHtml(detail) + '</span>' : '') + ' <span class="tool-timer"></span>';
     chatArea.appendChild(el);
+    var timerEl2 = el.querySelector('.tool-timer');
+    el._timerInterval = setInterval(function() {
+      timerEl2.textContent = Math.floor((Date.now() - el._startTime) / 1000) + 's';
+    }, 1000);
     toolIndicatorEl = el;
     autoScroll();
   }
@@ -2526,26 +2627,41 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 
   function clearToolIndicator() {
     if (toolIndicatorEl) {
+      if (toolIndicatorEl._timerInterval) clearInterval(toolIndicatorEl._timerInterval);
+      if (toolStepCount > 1) {
+        toolIndicatorEl.innerHTML = '\u2699\ufe0f ' + _t('easy.tool.done', {n: toolStepCount});
+      } else {
+        // Single step — just fade it
+        var timerEl = toolIndicatorEl.querySelector('.tool-timer');
+        if (timerEl && toolIndicatorEl._startTime) {
+          timerEl.textContent = Math.floor((Date.now() - toolIndicatorEl._startTime) / 1000) + 's';
+        }
+      }
       toolIndicatorEl.classList.add('done');
     }
     toolIndicatorEl = null;
+    toolStepCount = 0;
   }
 
   // ---- Chat history persistence ----
   var chatHistoryKey = 'easy_chat_' + sessionId;
 
+  var _saveChatTimer = null;
   function saveChatHistory() {
-    try {
-      var msgs = [];
-      var items = chatArea.querySelectorAll('.msg.user, .msg.assistant');
-      for (var i = 0; i < items.length; i++) {
-        var rawText = items[i]._rawText || items[i].textContent;
-        msgs.push({ role: items[i].classList.contains('user') ? 'user' : 'assistant', text: rawText });
-      }
-      // Keep last 50 messages
-      if (msgs.length > 50) msgs = msgs.slice(-50);
-      localStorage.setItem(chatHistoryKey, JSON.stringify(msgs));
-    } catch(e) {}
+    if (_saveChatTimer) return;
+    _saveChatTimer = setTimeout(function() {
+      _saveChatTimer = null;
+      try {
+        var msgs = [];
+        var items = chatArea.querySelectorAll('.msg.user, .msg.assistant');
+        for (var i = 0; i < items.length; i++) {
+          var rawText = items[i]._rawText || items[i].textContent;
+          msgs.push({ role: items[i].classList.contains('user') ? 'user' : 'assistant', text: rawText });
+        }
+        if (msgs.length > 50) msgs = msgs.slice(-50);
+        localStorage.setItem(chatHistoryKey, JSON.stringify(msgs));
+      } catch(e) {}
+    }, 2000);
   }
 
   function restoreChatHistory() {
@@ -2626,16 +2742,31 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     saveChatHistory();
   }
 
+  var _lastDetectedUrl = '';
   function appendAssistantText(text, isThinking) {
-    // Each message is a separate bubble with appropriate styling
-    currentAssistantMsg = document.createElement('div');
-    currentAssistantMsg.className = 'msg assistant' + (isThinking ? ' thinking-msg' : '');
-    currentAssistantMsg._rawText = text;
-    currentAssistantMsg.innerHTML = linkify(text);
-    chatArea.appendChild(currentAssistantMsg);
-    // Auto-detect preview URL
+    // Reuse thinking placeholder bubble if it exists (smooth transition, no flicker)
+    if (currentAssistantMsg && currentAssistantMsg._isThinkingPlaceholder) {
+      if (!text) {
+        // Empty initial message — keep spinner, just assign msgId via caller
+        return;
+      }
+      currentAssistantMsg._isThinkingPlaceholder = false;
+      currentAssistantMsg.className = 'msg assistant' + (isThinking ? ' thinking-msg' : '');
+      currentAssistantMsg._rawText = text;
+      currentAssistantMsg.innerHTML = linkify(text);
+    } else {
+      currentAssistantMsg = document.createElement('div');
+      currentAssistantMsg.className = 'msg assistant' + (isThinking ? ' thinking-msg' : '');
+      currentAssistantMsg._rawText = text;
+      currentAssistantMsg.innerHTML = linkify(text);
+      chatArea.appendChild(currentAssistantMsg);
+    }
+    // Auto-detect preview URL — only trigger reload if URL changed
     var detectedUrl = detectPreviewUrl(text);
-    if (detectedUrl) setPreviewUrl(detectedUrl, true);
+    if (detectedUrl && detectedUrl !== _lastDetectedUrl) {
+      _lastDetectedUrl = detectedUrl;
+      setPreviewUrl(detectedUrl, true);
+    }
     // Badge on chat tab if user is on preview
     if (activeTab === 'preview') chatBadge.classList.add('show');
     saveChatHistory();
@@ -2652,7 +2783,10 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     currentAssistantMsg._rawText = text;
     currentAssistantMsg.innerHTML = linkify(text);
     var detectedUrl = detectPreviewUrl(text);
-    if (detectedUrl) setPreviewUrl(detectedUrl, true);
+    if (detectedUrl && detectedUrl !== _lastDetectedUrl) {
+      _lastDetectedUrl = detectedUrl;
+      setPreviewUrl(detectedUrl, true);
+    }
     if (activeTab === 'preview') chatBadge.classList.add('show');
     saveChatHistory();
   }
@@ -2708,26 +2842,33 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   }
 
   function showThinking() {
-    var existing = chatArea.querySelector('.thinking');
-    if (existing) return;
+    // Create a placeholder assistant bubble with spinner inside
+    // When the first message arrives, it replaces the spinner content in-place
+    if (currentAssistantMsg && currentAssistantMsg._isThinkingPlaceholder) return;
     var div = document.createElement('div');
-    div.className = 'thinking';
-    div.innerHTML = '<span></span><span></span><span></span>';
+    div.className = 'msg assistant thinking-placeholder';
+    div.innerHTML = '<span class="dot-spinner"><span></span><span></span><span></span></span>';
+    div._isThinkingPlaceholder = true;
     chatArea.appendChild(div);
+    currentAssistantMsg = div;
     autoScroll();
   }
 
   function hideThinking() {
-    var t = chatArea.querySelector('.thinking');
-    if (t) t.remove();
+    // Remove placeholder only if it wasn't replaced by real content
+    if (currentAssistantMsg && currentAssistantMsg._isThinkingPlaceholder) {
+      currentAssistantMsg.remove();
+      currentAssistantMsg = null;
+    }
   }
 
+  var _scrollPending = false;
   function autoScroll() {
-    // Double rAF: first ensures styles applied, second ensures layout computed
+    if (_scrollPending) return;
+    _scrollPending = true;
     requestAnimationFrame(function() {
-      requestAnimationFrame(function() {
-        chatArea.scrollTop = chatArea.scrollHeight;
-      });
+      _scrollPending = false;
+      chatArea.scrollTop = chatArea.scrollHeight;
     });
   }
 
@@ -2756,6 +2897,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   // ---- Send message ----
   function sendMessage() {
     var text = msgInput.value.trim();
+    dbg('sendMessage: text=' + (text ? text.substring(0, 30) : '(empty)') + ' state=' + state + ' ws=' + (ws ? ws.readyState : 'null'));
     if (!text) return;
     if (state !== 'ready') return;
 
@@ -2786,16 +2928,29 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     msgInput.style.height = Math.min(msgInput.scrollHeight, 120) + 'px';
   });
 
+  var composing = false;
+  msgInput.addEventListener('compositionstart', function() { composing = true; });
+  msgInput.addEventListener('compositionend', function() { composing = false; });
   msgInput.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !composing && !e.isComposing && e.keyCode !== 229) {
       e.preventDefault();
-      voiceTriggered = false; // typed, not voice
+      voiceTriggered = false;
       sendMessage();
     }
   });
 
-  sendBtn.addEventListener('click', function() {
-    voiceTriggered = false; // tapped send, not voice
+  sendBtn.addEventListener('touchstart', function(e) {
+    e.preventDefault(); // prevent focus loss from input
+  });
+  sendBtn.addEventListener('touchend', function(e) {
+    e.preventDefault();
+    voiceTriggered = false;
+    dbg('send touchend, input=' + JSON.stringify(msgInput.value) + ' state=' + state);
+    sendMessage();
+  });
+  sendBtn.addEventListener('click', function(e) {
+    voiceTriggered = false;
+    dbg('send click, input=' + JSON.stringify(msgInput.value) + ' state=' + state);
     sendMessage();
   });
 
@@ -3095,12 +3250,20 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       '</div>';
   }
 
-  // ---- Voice (ASR) ----
+  // ---- Voice (ASR) — Pro-style unified ----
   var voiceWs = null;
   var audioStream = null, audioContext = null, sourceNode = null, processorNode = null;
   var audioReady = false;
   var isRecording = false;
+  var wantsToStop = false;
   var micReleaseTimer = null;
+  var pendingAsrText = '';
+  var cancelledRec = false;
+  var asrFlushed = false;
+  var releaseFlushTimer = null;
+  var trailingTimer = null;
+  var voiceRetryDelay = 1000;
+  var holdKeyName = /Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Option' : 'Alt';
 
   function releaseMic() {
     audioReady = false;
@@ -3109,10 +3272,80 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     if (audioStream) { audioStream.getTracks().forEach(function(t) { t.stop(); }); audioStream = null; }
     if (audioContext) { try { audioContext.close(); } catch {} audioContext = null; }
   }
-  var pendingAsrText = '';
-  var cancelledRec = false;
-  var voiceSent = false;
-  var voiceTriggered = false; // true when user sent via voice → auto-TTS reply
+
+  function scheduleMicRelease() {
+    clearTimeout(micReleaseTimer);
+    micReleaseTimer = setTimeout(releaseMic, 30000);
+  }
+
+  // Voice popup helpers
+  function vpShow() {
+    vpText.textContent = '';
+    vpText.classList.add('listening');
+    vpHint.textContent = _t('easy.voice.hint_default');
+    vpHint.style.display = '';
+    vpActions.style.display = 'none';
+    vpEl.classList.remove('hidden', 'cancel', 'send-ready');
+    vpConfirmVisible = false;
+  }
+  function vpHide() {
+    vpEl.classList.add('hidden');
+    vpEl.classList.remove('cancel', 'send-ready');
+    vpActions.style.display = 'none';
+    vpConfirmVisible = false;
+    vpText.contentEditable = 'false';
+  }
+  function vpUpdate(txt) {
+    vpText.textContent = txt;
+    vpText.classList.remove('listening');
+  }
+  function vpSetCancel(on) {
+    if (on) { vpEl.classList.add('cancel'); vpEl.classList.remove('send-ready'); vpHint.textContent = _t('easy.voice.hint_cancel'); }
+    else { vpEl.classList.remove('cancel'); vpHint.textContent = _t('easy.voice.hint_default'); }
+  }
+  function vpShowConfirm() {
+    vpActions.style.display = 'flex';
+    vpEl.classList.remove('cancel', 'send-ready');
+    vpConfirmVisible = true;
+    vpText.contentEditable = 'true';
+    setTimeout(function() { vpText.focus(); }, 100);
+    var range = document.createRange();
+    range.selectNodeContents(vpText);
+    range.collapse(false);
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    vpHint.textContent = _t('easy.voice.hint_confirm');
+  }
+  function vpSendAction() {
+    vpConfirmVisible = false;
+    vpText.contentEditable = 'false';
+    var finalText = (vpText.textContent || '').trim();
+    if (finalText && state === 'ready') {
+      asrFlushed = true;
+      addUserMsg(finalText);
+      currentAssistantMsg = null;
+      wsSend({ type: 'send', text: finalText });
+    }
+    pendingAsrText = '';
+    vpHide();
+  }
+  function vpDismiss() {
+    vpConfirmVisible = false;
+    vpText.contentEditable = 'false';
+    pendingAsrText = '';
+    asrFlushed = true;
+    vpHide();
+  }
+  document.getElementById('vp-send').onclick = vpSendAction;
+  document.getElementById('vp-cancel-btn').onclick = vpDismiss;
+
+  // Keyboard shortcuts for confirm popup
+  document.addEventListener('keydown', function(e) {
+    if (!vpConfirmVisible) return;
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); vpSendAction(); }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); vpDismiss(); }
+  }, true);
 
   function fillInputFromVoice(text) {
     // Switch to keyboard mode if in voice mode
@@ -3124,7 +3357,6 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       vtKbIcon.style.display = 'none';
       voiceToggle.classList.remove('active');
     }
-    // Fill input and show send button
     msgInput.value = text;
     updateSendBtn();
     msgInput.style.height = 'auto';
@@ -3133,46 +3365,69 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     msgInput.selectionStart = msgInput.selectionEnd = text.length;
   }
 
+  function flushAsrText() {
+    if (asrFlushed) return;
+    if (isRecording || altDown) return;
+    if (pendingAsrText) {
+      vpShowConfirm();
+    } else {
+      vpHide();
+    }
+  }
+
   function connectVoice() {
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     voiceWs = new WebSocket(proto + '//' + location.host + '/terminal/ws-voice');
-    voiceWs.onopen = function() { voiceRetryDelay = 1000; };
+    voiceWs.onopen = function() {
+      voiceRetryDelay = 1000;
+      if (isRecording && !cancelledRec) voiceWs.send(JSON.stringify({ type: 'asr_start' }));
+    };
     voiceWs.onmessage = function(e) {
       var d = JSON.parse(e.data);
       if (cancelledRec) return;
       if (d.type === 'asr' && d.text) {
-        pendingAsrText = d.text;
-        voText.textContent = d.text;
-        if (!isRecording && !voiceSent) {
-          // Final result after release — fill textbox for user to review/edit
-          voiceSent = true;
-          voiceOverlay.classList.remove('show');
-          fillInputFromVoice(d.text);
+        clearTimeout(releaseFlushTimer);
+        if (!vpConfirmVisible && d.text !== pendingAsrText) {
+          pendingAsrText = d.text;
+          vpUpdate(d.text);
+        } else if (vpConfirmVisible) {
+          pendingAsrText = d.text;
         }
+        if (!asrFlushed) flushAsrText();
       } else if (d.type === 'asr_partial' && d.text) {
-        pendingAsrText = d.text;
-        voText.textContent = d.text;
+        if (!asrFlushed && !vpConfirmVisible) {
+          pendingAsrText = d.text;
+          vpUpdate(d.text);
+        }
       } else if (d.type === 'error') {
-        if (pendingAsrText && !voiceSent) {
-          voiceSent = true;
-          voiceOverlay.classList.remove('show');
-          fillInputFromVoice(pendingAsrText);
+        clearTimeout(releaseFlushTimer);
+        if (pendingAsrText && !asrFlushed) {
+          flushAsrText();
         } else {
-          voStatus.textContent = _t('easy.voice.error');
-          setTimeout(function() { voiceOverlay.classList.remove('show'); }, 1500);
+          vpUpdate(_t('easy.voice.error'));
+          setTimeout(vpHide, 2000);
         }
       }
     };
     voiceWs.onclose = function() {
+      clearTimeout(releaseFlushTimer);
+      clearTimeout(trailingTimer);
+      isRecording = false;
+      wantsToStop = false;
+      cancelledRec = false;
+      vpHide();
+      scheduleMicRelease();
       voiceRetryDelay = Math.min((voiceRetryDelay || 1000) * 1.5, 15000);
       setTimeout(connectVoice, voiceRetryDelay);
     };
   }
-  var voiceRetryDelay = 1000;
 
   async function acquireMic() {
     if (audioReady) return true;
-    if (!navigator.mediaDevices) return false;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      addSystemMsg(window.isSecureContext ? _t('easy.voice.no_mic') : 'Mic requires HTTPS');
+      return false;
+    }
     try {
       audioStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } });
       audioContext = new AudioContext({ sampleRate: 16000 });
@@ -3191,49 +3446,62 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       processorNode.connect(audioContext.destination);
       audioReady = true;
       return true;
-    } catch { return false; }
+    } catch(err) {
+      addSystemMsg(_t('easy.voice.no_mic'));
+      return false;
+    }
   }
 
   async function startRec() {
     if (isRecording) return;
     clearTimeout(micReleaseTimer);
+    clearTimeout(releaseFlushTimer);
+    clearTimeout(trailingTimer);
+    wantsToStop = false;
     var ok = await acquireMic();
-    if (!ok) { addSystemMsg(_t('easy.voice.no_mic')); return; }
+    if (!ok) return;
     if (audioContext.state === 'suspended') audioContext.resume();
     isRecording = true;
+    asrFlushed = false;
     pendingAsrText = '';
     cancelledRec = false;
-    voiceSent = false;
-    voText.textContent = '';
-    voStatus.textContent = _t('easy.voice.recording');
-    voiceOverlay.classList.add('show');
-    holdSpeak.classList.add('recording');
     if (voiceWs && voiceWs.readyState === 1) voiceWs.send(JSON.stringify({ type: 'asr_start' }));
+    if (wantsToStop) { stopRec(true); return; }
+    holdSpeak.classList.add('recording');
+    vpShow();
   }
 
   function stopRec(cancel) {
+    wantsToStop = true;
+    clearTimeout(trailingTimer);
     if (!isRecording) return;
-    isRecording = false;
     holdSpeak.classList.remove('recording');
-    clearTimeout(micReleaseTimer);
-    micReleaseTimer = setTimeout(releaseMic, 30000);
+
     if (cancel) {
+      isRecording = false;
       cancelledRec = true;
+      asrFlushed = true;
       pendingAsrText = '';
-      voiceOverlay.classList.remove('show');
+      vpHide();
       if (voiceWs && voiceWs.readyState === 1) voiceWs.send(JSON.stringify({ type: 'asr_end' }));
+      scheduleMicRelease();
       return;
     }
-    voStatus.textContent = _t('easy.voice.processing');
-    if (voiceWs && voiceWs.readyState === 1) voiceWs.send(JSON.stringify({ type: 'asr_end' }));
-    // Wait for final result via onmessage
-    setTimeout(function() {
-      if (pendingAsrText && !voiceSent && voiceOverlay.classList.contains('show')) {
-        voiceSent = true;
-        voiceOverlay.classList.remove('show');
-        fillInputFromVoice(pendingAsrText);
+
+    // Trailing capture: keep recording 300ms to catch trailing speech
+    trailingTimer = setTimeout(function() {
+      isRecording = false;
+      if (voiceWs && voiceWs.readyState === 1) voiceWs.send(JSON.stringify({ type: 'asr_end' }));
+      scheduleMicRelease();
+
+      if (asrFlushed) return;
+      clearTimeout(releaseFlushTimer);
+      if (pendingAsrText) {
+        releaseFlushTimer = setTimeout(function() { if (!asrFlushed) flushAsrText(); }, 300);
+      } else {
+        releaseFlushTimer = setTimeout(function() { if (!asrFlushed) flushAsrText(); }, 3000);
       }
-    }, 3000);
+    }, 300);
   }
 
   // Voice toggle: switch between text input and hold-to-speak
@@ -3258,7 +3526,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     }
   });
 
-  // Hold-to-speak button (touch events like Pro Mode — prevents context menu)
+  // Hold-to-speak button
   var micDown = false;
   var holdTouchStartY = 0;
   var holdSwipedCancel = false;
@@ -3276,9 +3544,11 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     if (dy > 50 && !holdSwipedCancel) {
       holdSwipedCancel = true;
       holdSpeak.textContent = _t('easy.btn.release_to_cancel');
+      vpSetCancel(true);
     } else if (dy <= 30 && holdSwipedCancel) {
       holdSwipedCancel = false;
       holdSpeak.textContent = _t('easy.btn.release_to_send');
+      vpSetCancel(false);
     }
   }, { passive: true });
   holdSpeak.addEventListener('touchend', function(e) {
@@ -3308,11 +3578,6 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     holdSpeak.textContent = _t('easy.btn.hold_to_speak');
     stopRec(holdSwipedCancel);
   });
-  voCancel.addEventListener('click', function() {
-    micDown = false;
-    holdSpeak.textContent = _t('easy.btn.hold_to_speak');
-    stopRec(true);
-  });
 
   // ---- Option/Alt hold-to-speak ----
   var altDown = false, altDownTime = 0, altCombined = false;
@@ -3321,6 +3586,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       altDown = true;
       altDownTime = Date.now();
       altCombined = false;
+      if (vpConfirmVisible) { e.preventDefault(); e.stopPropagation(); return; }
       startRec();
       e.preventDefault();
       e.stopPropagation();
@@ -3335,6 +3601,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       var holdDuration = Date.now() - altDownTime;
       e.preventDefault();
       e.stopPropagation();
+      if (vpConfirmVisible) { vpSendAction(); return; }
       if (altCombined || holdDuration < 800) {
         if (isRecording) stopRec(true);
       } else {
@@ -3481,7 +3748,7 @@ const indexHtml = `<!DOCTYPE html>
     #terminal { flex: 1; padding: 8px; overflow: hidden; }
     .xterm-helper-textarea { opacity: 0 !important; caret-color: transparent !important; color: transparent !important; position: absolute !important; left: -9999px !important; }
     #voice-bar {
-      background: #16213e; padding: 10px 16px; display: flex; align-items: center; gap: 10px;
+      background: #16213e; padding: 10px 16px; display: none; align-items: center; gap: 10px;
       border-top: 2px solid #0f3460; color: #fff; font-family: system-ui;
       flex-shrink: 0; z-index: 60;
       -webkit-tap-highlight-color: transparent;
@@ -3625,7 +3892,6 @@ const indexHtml = `<!DOCTYPE html>
     .key-btn:active { background: #4ade80; color: #000; }
     #special-keys { display: none; align-items: center; gap: 4px; flex: 1; }
     #bar-row1 { display: contents; }
-    #bar-row2 { display: contents; }
     #copy-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 500; background: rgba(0,0,0,0.95); flex-direction: column; }
     #copy-overlay.active { display: flex; }
     #copy-overlay pre { flex: 1; overflow: auto; margin: 0; padding: 8px; color: #e0e0e0; font: 12px Menlo, Monaco, "Courier New", monospace; white-space: pre; -webkit-user-select: text; user-select: text; -webkit-overflow-scrolling: touch; }
@@ -3659,25 +3925,26 @@ const indexHtml = `<!DOCTYPE html>
     .float-key-config .cfg-cancel { background: #333; color: #e0e0e0; }
     /* --- Chat Mode --- */
     #chat-bar {
-      display: none; background: #16213e; padding: 6px 6px;
+      display: flex; flex-direction: column; gap: 6px;
+      background: #16213e; padding: 10px 12px 12px;
       border-top: 2px solid #0f3460; flex-shrink: 0; z-index: 60;
       font-family: system-ui; -webkit-tap-highlight-color: transparent;
     }
-    #chat-bar.active { display: flex; flex-direction: column; gap: 4px; }
     #chat-bar .chat-input-row {
-      display: flex; align-items: center; gap: 4px; width: 100%;
+      display: flex; align-items: stretch; gap: 6px; width: 100%;
     }
+    body.mobile #chat-menu-btn2 { display: none !important; }
     #chat-input {
       flex: 1; background: #111827; color: #e0e0e0; border: 1px solid #333;
-      border-radius: 8px; padding: 7px 12px; font-size: 15px; font-family: system-ui;
-      outline: none; resize: none; min-height: 34px; max-height: 120px;
-      line-height: 1.3; overflow-y: auto; scrollbar-width: none;
+      border-radius: 8px; padding: 10px 14px; font-size: 15px; font-family: system-ui;
+      outline: none; resize: none; min-height: 40px; max-height: 120px;
+      line-height: 1.4; overflow-y: auto; scrollbar-width: none;
     }
     #chat-input::-webkit-scrollbar { display: none; }
     #chat-input:focus { border-color: #4ade80; }
     #chat-input::placeholder { color: #555; }
     #chat-send-btn {
-      padding: 0 14px; height: 34px; border-radius: 6px; border: none;
+      padding: 0 14px; border-radius: 6px; border: none;
       background: #4ade80; color: #000; font-size: 14px; font-weight: 600; cursor: pointer;
       display: flex; align-items: center; justify-content: center; flex-shrink: 0;
       -webkit-tap-highlight-color: transparent;
@@ -3685,7 +3952,7 @@ const indexHtml = `<!DOCTYPE html>
     #chat-send-btn:active { background: #22c55e; }
     #chat-send-btn:disabled { background: #333; color: #666; cursor: default; }
     #chat-voice-toggle.active { border-color: #4ade80; color: #4ade80; }
-    #chat-hold-speak:active, #chat-hold-speak.recording { background: #1a3a2e !important; border-color: #4ade80 !important; color: #4ade80 !important; }
+    #chat-hold-speak.recording { background: #4ade80; color: #000; border-color: #4ade80; }
     #chat-quick-actions {
       display: none; flex-wrap: wrap; gap: 6px; padding: 0 4px;
     }
@@ -3706,11 +3973,9 @@ const indexHtml = `<!DOCTYPE html>
     @supports (padding-top: env(safe-area-inset-top)) {
       #chat-bar { padding-bottom: max(8px, env(safe-area-inset-bottom)); }
     }
-    body.mobile #voice-bar { padding: 6px 6px; gap: 0; flex-direction: column; }
+    body.mobile #voice-bar { display: flex; padding: 6px 6px; gap: 0; flex-direction: column; }
     body.mobile #bar-row1 { display: flex; align-items: center; gap: 4px; width: 100%; }
-    body.mobile #bar-row2 { display: flex; align-items: center; gap: 4px; width: 100%; margin-top: 5px; }
     body.mobile #special-keys { display: flex; }
-    body.mobile #status { font-size: 15px; padding: 14px 8px; flex: 3; text-align: center; border-radius: 8px; }
     body.mobile #text { display: none; }
     body.mobile #font-controls { display: none; }
     body.mobile .desktop-paste-btn { display: none; }
@@ -3718,9 +3983,9 @@ const indexHtml = `<!DOCTYPE html>
     .mobile-only { display: none; }
     body.mobile .mobile-only { display: inline-block; }
     body.mobile #menu-btn { display: none; }
-    body.mobile #menu-btn-mobile { font-size: 16px; min-width: 32px; }
     #voice-bar { transition: transform 0.3s ease, max-height 0.3s ease, padding 0.3s ease, border-width 0.3s ease; overflow: hidden; }
     #voice-bar.collapsed { transform: translateX(calc(100% + 2px)); max-height: 0 !important; padding-top: 0 !important; padding-bottom: 0 !important; border-top-width: 0 !important; }
+    #chat-bar.collapsed { display: none !important; }
     #bar-handle {
       display: none; width: 42px; height: 42px; border-radius: 50%;
       border: 2px solid rgba(255,255,255,0.45);
@@ -3829,13 +4094,14 @@ const indexHtml = `<!DOCTYPE html>
     </div>
     <div id="voice-bar">
       <div id="bar-row1">
-        <button id="menu-btn" class="key-btn" style="min-width:32px;padding:2px 6px;"><svg viewBox="0 0 512 512" fill="none" style="width:34px;height:34px;vertical-align:middle;"><circle cx="185" cy="175" r="42" fill="#4ade80"/><circle cx="327" cy="175" r="42" fill="#4ade80"/><circle cx="185" cy="175" r="16" fill="#1a1a2e"/><circle cx="327" cy="175" r="16" fill="#1a1a2e"/><rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/><path d="M205 218L230 240L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M242 240L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/><rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/><rect x="165" y="340" width="50" height="20" rx="10" fill="#22c55e"/><rect x="297" y="340" width="50" height="20" rx="10" fill="#22c55e"/></svg></button>
+        <button id="menu-btn" class="key-btn" style="min-width:28px;padding:2px 4px;"><svg viewBox="0 0 512 512" fill="none" style="width:24px;height:24px;vertical-align:middle;"><circle cx="185" cy="175" r="42" fill="#4ade80"/><circle cx="327" cy="175" r="42" fill="#4ade80"/><circle cx="185" cy="175" r="16" fill="#1a1a2e"/><circle cx="327" cy="175" r="16" fill="#1a1a2e"/><rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/><path d="M205 218L230 240L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M242 240L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/><rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/><rect x="165" y="340" width="50" height="20" rx="10" fill="#22c55e"/><rect x="297" y="340" width="50" height="20" rx="10" fill="#22c55e"/></svg></button>
         <div id="special-keys">
-          <button class="key-btn" id="bar-hide-btn" style="font-size:14px;">&#x276F;</button>
+          <button id="chat-menu-btn" class="key-btn" style="min-width:28px;padding:2px 4px;"><svg viewBox="0 0 512 512" fill="none" style="width:24px;height:24px;vertical-align:middle;"><circle cx="185" cy="175" r="42" fill="#4ade80"/><circle cx="327" cy="175" r="42" fill="#4ade80"/><circle cx="185" cy="175" r="16" fill="#1a1a2e"/><circle cx="327" cy="175" r="16" fill="#1a1a2e"/><rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/><path d="M205 218L230 240L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M242 240L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/><rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/><rect x="165" y="340" width="50" height="20" rx="10" fill="#22c55e"/><rect x="297" y="340" width="50" height="20" rx="10" fill="#22c55e"/></svg></button>
           <button class="key-btn" data-key="esc">Esc</button>
           <button class="key-btn" data-key="tab">Tab</button>
           <button class="key-btn" data-key="up">&#x25B2;</button>
           <button class="key-btn" data-key="down">&#x25BC;</button>
+          <button class="key-btn" id="return-btn" title="Return" style="font-size:20px;">&#x23CE;</button>
           <button class="key-btn" id="paste-btn" title="Paste" style="font-size:16px;">&#x2398;</button>
           <button class="key-btn" id="copy-btn" title="Select/Copy text">Sel</button>
           <button class="key-btn" id="scroll-bottom" title="Scroll to bottom" style="font-size:20px;">&#x21E9;</button>
@@ -3846,21 +4112,17 @@ const indexHtml = `<!DOCTYPE html>
           <button class="font-btn" onclick="changeFontSize(2)">+</button>
         </div>
       </div>
-      <div id="bar-row2">
-        <button id="menu-btn-mobile" class="key-btn mobile-only" style="min-width:32px;padding:2px 6px;"><svg viewBox="0 0 512 512" fill="none" style="width:34px;height:34px;vertical-align:middle;"><circle cx="185" cy="175" r="42" fill="#4ade80"/><circle cx="327" cy="175" r="42" fill="#4ade80"/><circle cx="185" cy="175" r="16" fill="#1a1a2e"/><circle cx="327" cy="175" r="16" fill="#1a1a2e"/><rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/><path d="M205 218L230 240L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M242 240L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/><rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/><rect x="165" y="340" width="50" height="20" rx="10" fill="#22c55e"/><rect x="297" y="340" width="50" height="20" rx="10" fill="#22c55e"/></svg></button>
-        <div id="status" data-i18n="pro.status.hold_to_speak">Hold Alt to speak</div>
-        <div id="text"></div>
-        <button id="return-btn" class="key-btn" title="Return" style="font-size:20px;">&#x23CE;</button>
       </div>
-    </div>
-    <div id="chat-bar">
+    <div id="chat-bar" class="active">
+      <div id="status" style="display:none"></div>
+      <div id="text" style="display:none"></div>
       <div id="chat-quick-actions"></div>
       <div class="chat-input-row">
-        <button id="chat-menu-btn" class="key-btn" style="min-width:32px;padding:2px 6px;flex-shrink:0;"><svg viewBox="0 0 512 512" fill="none" style="width:34px;height:34px;vertical-align:middle;"><circle cx="185" cy="175" r="42" fill="#4ade80"/><circle cx="327" cy="175" r="42" fill="#4ade80"/><circle cx="185" cy="175" r="16" fill="#1a1a2e"/><circle cx="327" cy="175" r="16" fill="#1a1a2e"/><rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/><path d="M205 218L230 240L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M242 240L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/><rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/><rect x="165" y="340" width="50" height="20" rx="10" fill="#22c55e"/><rect x="297" y="340" width="50" height="20" rx="10" fill="#22c55e"/></svg></button>
+        <button id="chat-menu-btn2" class="key-btn" style="min-width:28px;padding:2px 4px;width:34px;height:34px;border-radius:6px;border:1px solid #374151;background:transparent;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;"><svg viewBox="0 0 512 512" fill="none" style="width:24px;height:24px;"><circle cx="185" cy="175" r="42" fill="#4ade80"/><circle cx="327" cy="175" r="42" fill="#4ade80"/><circle cx="185" cy="175" r="16" fill="#1a1a2e"/><circle cx="327" cy="175" r="16" fill="#1a1a2e"/><rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/><path d="M205 218L230 240L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M242 240L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/><rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/><rect x="165" y="340" width="50" height="20" rx="10" fill="#22c55e"/><rect x="297" y="340" width="50" height="20" rx="10" fill="#22c55e"/></svg></button>
         <button id="chat-voice-toggle" title="Switch voice/keyboard" style="width:34px;height:34px;border-radius:6px;border:1px solid #374151;background:transparent;color:#9ca3af;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;"><svg id="cvt-mic-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg><svg id="cvt-kb-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display:none"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="6" y1="8" x2="6" y2="8.01"/><line x1="10" y1="8" x2="10" y2="8.01"/><line x1="14" y1="8" x2="14" y2="8.01"/><line x1="18" y1="8" x2="18" y2="8.01"/><line x1="6" y1="12" x2="6" y2="12.01"/><line x1="10" y1="12" x2="10" y2="12.01"/><line x1="14" y1="12" x2="14" y2="12.01"/><line x1="18" y1="12" x2="18" y2="12.01"/><line x1="8" y1="16" x2="16" y2="16"/></svg></button>
         <label for="chat-input" style="position:absolute;left:-9999px">Chat input</label>
         <textarea id="chat-input" name="chat-input" rows="1" placeholder="Message..." autocomplete="off"></textarea>
-        <button id="chat-hold-speak" data-i18n="pro.chat.hold_to_speak" style="display:none;flex:1;height:36px;border-radius:8px;border:1px solid #374151;background:#111827;color:#9ca3af;font-size:14px;cursor:pointer;text-align:center;touch-action:none;-webkit-touch-callout:none;">Hold to speak</button>
+        <button id="chat-hold-speak" style="display:none;flex:1;height:34px;border-radius:8px;border:1px solid #374151;background:#1e293b;color:#9ca3af;font-size:14px;font-family:system-ui;cursor:pointer;-webkit-tap-highlight-color:transparent;-webkit-user-select:none;user-select:none;" data-i18n="pro.chat.hold_to_speak">Hold to speak</button>
         <button id="chat-upload-btn" title="Upload file" style="width:34px;height:34px;border-radius:6px;border:1px solid #374151;background:transparent;color:#9ca3af;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3m0 0l-4 4m4-4l4 4"/><path d="M2 17l.621 2.485A2 2 0 004.561 21h14.878a2 2 0 001.94-1.515L22 17"/></svg></button>
         <input type="file" id="chat-upload-input" multiple style="display:none;">
         <button id="chat-send-btn" disabled data-i18n="pro.chat.btn_send">Send</button>
@@ -4002,16 +4264,37 @@ const indexHtml = `<!DOCTYPE html>
   <script src="./vendor/xterm-addon-fit.js"></script>
   <script src="./vendor/xterm-addon-webgl.js"></script>
   <script>
-    window.onerror = function(msg, src, line) {
-      document.getElementById('status').textContent = 'JS Error: ' + msg;
-      document.getElementById('status').style.background = '#f87171';
+    window.onerror = function(msg, src, line, col) {
+      var errText = 'JS L' + line + ':' + col + ' ' + msg;
+      var el = document.getElementById('chat-hold-speak');
+      if (el) { el.style.display = ''; el.textContent = errText; el.style.background = '#f87171'; el.style.color = '#fff'; el.style.fontSize = '10px'; el.style.height = 'auto'; }
+      var inp = document.getElementById('chat-input');
+      if (inp) inp.placeholder = errText;
     };
 
     const isMobile = ('ontouchstart' in window || navigator.maxTouchPoints > 0) && window.innerWidth < 768;
     if (isMobile) document.body.classList.add('mobile');
     var isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent);
     var holdKeyName = isMac ? 'Option' : 'Alt';
-    document.getElementById('status').textContent = isMobile ? _t('pro.status.hold_here') : _t('pro.status.hold_to_speak', {key: holdKeyName});
+    var _statusEl = document.getElementById('status');
+    var _chatInput = document.getElementById('chat-input');
+    var _holdSpeak = document.getElementById('chat-hold-speak');
+    var defaultStatusText = _t('pro.status.hold_to_speak', {key: holdKeyName});
+    var _defaultPlaceholder = isMobile ? _t('pro.chat.placeholder_mobile') : _t('pro.chat.placeholder', {key: holdKeyName, paste: isMac ? 'Cmd' : 'Ctrl'});
+    var _currentStatus = '';
+    function setStatus(text, bg) {
+      _currentStatus = text || '';
+      if (_statusEl) { _statusEl.textContent = text; _statusEl.style.background = bg || ''; }
+      // Show status in placeholder when it's not the default
+      var isDefault = !text || text === defaultStatusText;
+      if (_chatInput) {
+        _chatInput.placeholder = isDefault ? _defaultPlaceholder : text;
+      }
+      if (_holdSpeak && !isDefault) {
+        _holdSpeak.textContent = text;
+      }
+    }
+    setStatus(defaultStatusText);
     var savedFontSize = parseInt(localStorage.getItem('hopcode-font-size'));
     let fontSize = savedFontSize > 0 ? savedFontSize : (isMobile ? 14 : 21);
     const term = new Terminal({
@@ -4027,10 +4310,11 @@ const indexHtml = `<!DOCTYPE html>
     var termEl = document.getElementById('terminal');
     term.open(termEl);
     var hasWebGL = false;
-    try { term.loadAddon(new WebglAddon.WebglAddon()); hasWebGL = true; } catch(e) {
-      console.warn('WebGL addon failed, using DOM renderer:', e);
-      term.options.scrollback = 500;
-    }
+    // WebGL disabled: may cause full-screen flicker on some systems
+    // try { term.loadAddon(new WebglAddon.WebglAddon()); hasWebGL = true; } catch(e) {
+    //   console.warn('WebGL addon failed, using DOM renderer:', e);
+    //   term.options.scrollback = 500;
+    // }
     fitAddon.fit();
 
     // Auto-copy selection to clipboard (desktop: mouse select → auto-copy)
@@ -4167,9 +4451,8 @@ const indexHtml = `<!DOCTYPE html>
     var termWs = null;
     var isReconnect = false;
     var outputRefocusTimer = null;
-
     function connectTerminal() {
-      document.getElementById('status').textContent = isReconnect ? _t('pro.status.reconnecting') : _t('pro.status.connecting');
+      setStatus(isReconnect ? _t('pro.status.reconnecting') : _t('pro.status.connecting'));
       termWs = new WebSocket(wsUrl);
       termWs.onmessage = (e) => {
         const msg = JSON.parse(e.data);
@@ -4197,9 +4480,9 @@ const indexHtml = `<!DOCTYPE html>
             if (wasAtBottom) {
               term.scrollToBottom();
             } else {
-              if (term.buffer.active.viewportY !== savedViewportY) {
-                term.scrollToLine(savedViewportY);
-              }
+              var newBuf = term.buffer.active;
+              var delta = newBuf.baseY - buf.baseY;
+              term.scrollToLine(savedViewportY + delta);
             }
           });
           // Re-focus terminal after output settles (mobile loses focus during heavy output)
@@ -4212,18 +4495,15 @@ const indexHtml = `<!DOCTYPE html>
         }
       };
       termWs.onopen = () => {
-        document.getElementById('status').textContent = isMobile ? _t('pro.status.hold_here') : _t('pro.status.hold_to_speak', {key: holdKeyName});
-        document.getElementById('status').style.background = '';
+        setStatus(defaultStatusText);
         lastCols = 0; lastRows = 0; sendResize();
       };
       termWs.onerror = () => {
-        document.getElementById('status').textContent = _t('pro.status.ws_error');
-        document.getElementById('status').style.background = '#f87171';
+        setStatus(_t('pro.status.ws_error'), '#f87171');
       };
       termWs.onclose = (e) => {
         if (termWs.sessionExited) return;
-        document.getElementById('status').textContent = _t('pro.status.reconnecting');
-        document.getElementById('status').style.background = '#6b7280';
+        setStatus(_t('pro.status.reconnecting'), '#6b7280');
         isReconnect = true;
         setTimeout(connectTerminal, 2000);
       };
@@ -4753,9 +5033,8 @@ const indexHtml = `<!DOCTYPE html>
     }
     function pasteUploadFile(file, extraText) {
       pasteHide();
-      var statusEl = document.getElementById('status');
-      var prevStatus = statusEl ? statusEl.textContent : '';
-      if (statusEl) { statusEl.textContent = _t('pro.status.uploading'); statusEl.style.background = '#60a5fa'; }
+      var prevStatus = _statusEl ? _statusEl.textContent : '';
+      setStatus(_t('pro.status.uploading'), '#60a5fa');
       fetch('/terminal/upload', {
         method: 'POST', credentials: 'include',
         headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-Filename': encodeURIComponent(file.name) },
@@ -4773,11 +5052,11 @@ const indexHtml = `<!DOCTYPE html>
           combined = data.path + ' ';
         }
         if (combined) sendInput(combined);
-        if (statusEl) { statusEl.textContent = _t('pro.status.uploaded'); statusEl.style.background = '#4ade80'; }
-        setTimeout(function() { if (statusEl) { statusEl.textContent = prevStatus; statusEl.style.background = ''; } }, 2000);
+        setStatus(_t('pro.status.uploaded'), '#4ade80');
+        setTimeout(function() { setStatus(prevStatus); }, 2000);
       }).catch(function(err) {
-        if (statusEl) { statusEl.textContent = 'Upload failed: ' + err.message; statusEl.style.background = '#f87171'; }
-        setTimeout(function() { if (statusEl) { statusEl.textContent = prevStatus; statusEl.style.background = ''; } }, 5000);
+        setStatus(_t('pro.status.upload_failed') + ': ' + err.message, '#f87171');
+        setTimeout(function() { setStatus(prevStatus); }, 5000);
       });
     }
     document.getElementById('paste-btn').addEventListener('click', function(e) {
@@ -4969,9 +5248,10 @@ const indexHtml = `<!DOCTYPE html>
       menuRenderFk();
       menuLoadSessions();
     }
-    function menuHide() { appMenu.style.display = 'none'; term.focus(); }
+    function menuHide() { appMenu.style.display = 'none'; if (!isMobile) term.focus(); }
     document.getElementById('menu-btn').addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); menuShow(); });
-    document.getElementById('menu-btn-mobile').addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); menuShow(); });
+    document.getElementById('chat-menu-btn').addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); chatInput.blur(); menuShow(); });
+    if (document.getElementById('chat-menu-btn2')) document.getElementById('chat-menu-btn2').addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); chatInput.blur(); menuShow(); });
     appMenu.querySelector('.app-menu-backdrop').addEventListener('click', menuHide);
     appMenu.querySelector('.app-menu-panel').addEventListener('click', function(e) {
       var sec = e.target.closest('.app-menu-section.collapsible');
@@ -5181,6 +5461,7 @@ const indexHtml = `<!DOCTYPE html>
       var bar = document.getElementById('voice-bar');
       var handle = document.getElementById('bar-handle');
       bar.classList.toggle('collapsed');
+      chatBar.classList.toggle('collapsed');
       var isCollapsed = bar.classList.contains('collapsed');
       if (isCollapsed) {
         handle.classList.add('visible');
@@ -5189,12 +5470,6 @@ const indexHtml = `<!DOCTYPE html>
       }
       setTimeout(function() { fitAddon.fit(); visibleRows = term.rows; }, 350);
     }
-
-    // Hide bar button in row1
-    document.getElementById('bar-hide-btn').addEventListener('click', function(e) {
-      e.preventDefault();
-      toggleBar();
-    });
 
     // Bar handle (pull tab to restore bar)
     document.getElementById('bar-handle').addEventListener('click', function(e) {
@@ -5255,7 +5530,13 @@ const indexHtml = `<!DOCTYPE html>
     });
 
     // Voice setup - streaming ASR (sends PCM in real-time)
-    const status = document.getElementById('status');
+    // status proxy — routes .textContent through setStatus, .classList is no-op
+    var status = {
+      get textContent() { return _currentStatus; },
+      set textContent(v) { setStatus(v); },
+      classList: { add: function(){}, remove: function(){} },
+      style: {}
+    };
     const text = document.getElementById('text');
     let voiceWs, audioStream, audioContext, sourceNode, processorNode;
     let isRecording = false, audioReady = false;
@@ -5269,8 +5550,6 @@ const indexHtml = `<!DOCTYPE html>
     var touchStartX = 0; // touchstart X for swipe detection
     var swipedToCancel = false; // Whether user swiped up into cancel zone
     var swipedToSend = false; // Whether user swiped right to send directly
-
-    var defaultStatusText = isMobile ? _t('pro.status.hold_here') : _t('pro.status.hold_to_speak', {key: holdKeyName});
 
     var vpEl = document.getElementById('voice-popup');
     var vpText = document.getElementById('vp-text');
@@ -5392,19 +5671,6 @@ const indexHtml = `<!DOCTYPE html>
       if (asrFlushed) return;
       if (isRecording || altDown) return; // Still recording, wait for release
       if (pendingAsrText) {
-        // Chat mode: put voice result in chat input instead of voice popup
-        if (chatModeEnabled && !chatMicDown && !chatHoldDown && !chatVoiceMode) {
-          asrFlushed = true;
-          chatInput.value = pendingAsrText;
-          chatInput.style.height = 'auto';
-          chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
-          chatSendBtn.disabled = !chatInput.value.trim();
-          chatInput.focus();
-          pendingAsrText = '';
-          vpHide();
-          status.textContent = defaultStatusText;
-          return;
-        }
         vpShowConfirm();
       } else {
         vpHide();
@@ -5466,7 +5732,7 @@ const indexHtml = `<!DOCTYPE html>
         swipedToCancel = false;
         vpHide();
         scheduleMicRelease();
-        status.classList.remove('recording');
+        /* status recording class removed */
         if (status.textContent === _t('pro.status.processing') || status.textContent === 'Finishing...' || status.textContent === _t('pro.status.recording')) {
           status.textContent = defaultStatusText;
         }
@@ -5540,7 +5806,7 @@ const indexHtml = `<!DOCTYPE html>
         return;
       }
       status.textContent = _t('pro.status.recording');
-      status.classList.add('recording');
+      /* status recording class added */
       text.textContent = '';
       vpShow();
     }
@@ -5551,7 +5817,7 @@ const indexHtml = `<!DOCTYPE html>
       wantsToStop = true;
       clearTimeout(trailingTimer);
       if (!isRecording) return;
-      status.classList.remove('recording');
+      /* status recording class removed */
       directSendMode = !!directSend;
 
       if (cancel) {
@@ -5647,11 +5913,10 @@ const indexHtml = `<!DOCTYPE html>
     const voiceBar = document.getElementById('voice-bar');
     const fontControls = document.getElementById('font-controls');
     var menuBtn = document.getElementById('menu-btn');
-    var menuBtnMobile = document.getElementById('menu-btn-mobile');
     var specialKeys = document.getElementById('special-keys');
     var returnBtn = document.getElementById('return-btn');
     function isExcluded(el) {
-      return (fontControls && fontControls.contains(el)) || (menuBtn && menuBtn.contains(el)) || (menuBtnMobile && menuBtnMobile.contains(el)) || (specialKeys && specialKeys.contains(el)) || (returnBtn && returnBtn.contains(el));
+      return (fontControls && fontControls.contains(el)) || (menuBtn && menuBtn.contains(el)) || (specialKeys && specialKeys.contains(el)) || (returnBtn && returnBtn.contains(el));
     }
     voiceBar.addEventListener('touchstart', (e) => {
       if (isExcluded(e.target)) return;
@@ -5673,7 +5938,7 @@ const indexHtml = `<!DOCTYPE html>
         voiceBar.classList.add('cancel-zone');
         voiceBar.classList.remove('recording');
         status.textContent = '\u2191 Release to cancel';
-        status.classList.remove('recording');
+        /* status recording class removed */
         vpSetCancel(true);
       } else if (dx > 60 && !swipedToSend && dy < 30) {
         swipedToSend = true;
@@ -5681,7 +5946,7 @@ const indexHtml = `<!DOCTYPE html>
         voiceBar.classList.remove('cancel-zone');
         voiceBar.classList.add('recording');
         status.textContent = '\u2192 Release to send';
-        status.classList.add('recording');
+        /* status recording class added */
         vpSetSendReady(true);
       } else if (dy <= 30 && dx <= 40 && (swipedToCancel || swipedToSend)) {
         swipedToCancel = false;
@@ -5689,7 +5954,7 @@ const indexHtml = `<!DOCTYPE html>
         voiceBar.classList.remove('cancel-zone');
         voiceBar.classList.add('recording');
         status.textContent = _t('pro.status.recording');
-        status.classList.add('recording');
+        /* status recording class added */
         vpSetCancel(false);
         vpSetSendReady(false);
       }
@@ -5869,8 +6134,8 @@ const indexHtml = `<!DOCTYPE html>
     var chatHoldSpeak = document.getElementById('chat-hold-speak');
     var cvtMicIcon = document.getElementById('cvt-mic-icon');
     var cvtKbIcon = document.getElementById('cvt-kb-icon');
-    var chatModeEnabled = false;
-    var chatVoiceMode = false; // false=keyboard, true=hold-to-speak
+    var chatModeEnabled = true;
+    var chatVoiceMode = false; // kept for compatibility
 
     // Auto-grow textarea + toggle send button
     chatInput.addEventListener('input', function() {
@@ -5910,79 +6175,104 @@ const indexHtml = `<!DOCTYPE html>
       if (xtermTextarea) xtermTextarea.disabled = false;
     });
 
-    // Voice toggle in chat bar: switch between text input and hold-to-speak
-    chatVoiceToggle.addEventListener('click', function() {
-      chatVoiceMode = !chatVoiceMode;
-      if (chatVoiceMode) {
-        chatInput.style.display = 'none';
-        chatHoldSpeak.style.display = '';
-        chatSendBtn.style.display = 'none';
-        cvtMicIcon.style.display = 'none';
-        cvtKbIcon.style.display = '';
-        chatVoiceToggle.classList.add('active');
-      } else {
-        chatInput.style.display = '';
-        chatHoldSpeak.style.display = 'none';
-        chatSendBtn.style.display = '';
-        cvtMicIcon.style.display = '';
-        cvtKbIcon.style.display = 'none';
-        chatVoiceToggle.classList.remove('active');
-        chatInput.focus();
-      }
-    });
+    // Voice toggle: switch between text input and hold-to-speak
+    var chatVoiceMode = false;
+    var chatHoldSpeak = document.getElementById('chat-hold-speak');
+    if (chatVoiceToggle && chatHoldSpeak) {
+      chatVoiceToggle.addEventListener('click', function() {
+        chatVoiceMode = !chatVoiceMode;
+        if (chatVoiceMode) {
+          chatHoldSpeak.style.display = '';
+          chatInput.style.display = 'none';
+          chatSendBtn.style.display = 'none';
+          cvtMicIcon.style.display = 'none';
+          cvtKbIcon.style.display = '';
+          chatVoiceToggle.classList.add('active');
+        } else {
+          chatHoldSpeak.style.display = 'none';
+          chatInput.style.display = '';
+          chatSendBtn.style.display = '';
+          cvtMicIcon.style.display = '';
+          cvtKbIcon.style.display = 'none';
+          chatVoiceToggle.classList.remove('active');
+          chatSendBtn.disabled = !chatInput.value.trim();
+          chatInput.focus();
+        }
+      });
 
-    // Chat hold-to-speak button events
-    var chatHoldDown = false;
-    function chatHoldStart(e) {
-      e.preventDefault();
-      chatHoldDown = true;
-      chatHoldSpeak.classList.add('recording');
-      chatHoldSpeak.textContent = _t('pro.chat.recording');
-      startRec();
+      // Hold-to-speak touch events
+      var chatMicDown = false;
+      var chatHoldStartY = 0;
+      var chatHoldSwiped = false;
+      chatHoldSpeak.addEventListener('touchstart', function(e) {
+        e.preventDefault();
+        chatMicDown = true;
+        chatHoldStartY = e.touches[0].clientY;
+        chatHoldSwiped = false;
+        touchStartY = chatHoldStartY;
+        touchStartX = e.touches[0].clientX;
+        swipedToCancel = false;
+        swipedToSend = false;
+        chatHoldSpeak.textContent = _t('pro.chat.recording');
+        chatHoldSpeak.classList.add('recording');
+        startRec();
+      }, { passive: false });
+      chatHoldSpeak.addEventListener('touchmove', function(e) {
+        if (!chatMicDown) return;
+        var dy = chatHoldStartY - e.touches[0].clientY;
+        if (dy > 50 && !chatHoldSwiped) {
+          chatHoldSwiped = true;
+          swipedToCancel = true;
+          chatHoldSpeak.textContent = _t('easy.btn.release_to_cancel');
+          vpSetCancel(true);
+        } else if (dy <= 30 && chatHoldSwiped) {
+          chatHoldSwiped = false;
+          swipedToCancel = false;
+          chatHoldSpeak.textContent = _t('pro.chat.recording');
+          vpSetCancel(false);
+        }
+      }, { passive: true });
+      chatHoldSpeak.addEventListener('touchend', function(e) {
+        e.preventDefault();
+        if (!chatMicDown) return;
+        chatMicDown = false;
+        chatHoldSpeak.textContent = _t('pro.chat.hold_to_speak');
+        chatHoldSpeak.classList.remove('recording');
+        stopRec(chatHoldSwiped, false);
+      }, { passive: false });
+      chatHoldSpeak.addEventListener('touchcancel', function() {
+        chatMicDown = false;
+        chatHoldSpeak.textContent = _t('pro.chat.hold_to_speak');
+        chatHoldSpeak.classList.remove('recording');
+        stopRec(true, false);
+      });
+      chatHoldSpeak.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+      // Desktop mouse hold
+      chatHoldSpeak.addEventListener('mousedown', function(e) {
+        e.preventDefault();
+        chatMicDown = true;
+        chatHoldSwiped = false;
+        chatHoldSpeak.textContent = _t('pro.chat.recording');
+        chatHoldSpeak.classList.add('recording');
+        startRec();
+      });
+      document.addEventListener('mouseup', function() {
+        if (!chatMicDown) return;
+        chatMicDown = false;
+        chatHoldSpeak.textContent = _t('pro.chat.hold_to_speak');
+        chatHoldSpeak.classList.remove('recording');
+        stopRec(chatHoldSwiped, false);
+      });
     }
-    function chatHoldEnd(e) {
-      if (!chatHoldDown) return;
-      chatHoldDown = false;
-      chatHoldSpeak.classList.remove('recording');
-      chatHoldSpeak.textContent = _t('pro.chat.hold_to_speak');
-      stopRec(false, false);
-    }
-    chatHoldSpeak.addEventListener('mousedown', chatHoldStart);
-    chatHoldSpeak.addEventListener('mouseup', chatHoldEnd);
-    chatHoldSpeak.addEventListener('mouseleave', chatHoldEnd);
-    chatHoldSpeak.addEventListener('touchstart', chatHoldStart, { passive: false });
-    chatHoldSpeak.addEventListener('touchend', chatHoldEnd);
-
-    // chatMicBtn removed — voice toggle replaces it
-    var chatMicDown = false;
 
     // When in chat mode, voice result goes to chat input instead of terminal
     var chatModeVoiceIntercept = false;
 
-    // Toggle chat mode
+    // Chat mode always enabled — setChatMode kept for compatibility
     function setChatMode(on) {
-      chatModeEnabled = on;
-      chatModeVoiceIntercept = on;
-      if (on) {
-        chatBar.classList.add('active');
-        voiceBar.style.display = 'none';
-        if (chatMenuToggle) chatMenuToggle.textContent = _t('pro.menu.classic_mode');
-      } else {
-        chatBar.classList.remove('active');
-        voiceBar.style.display = '';
-        if (chatMenuToggle) chatMenuToggle.textContent = _t('pro.menu.chat_mode');
-      }
-      localStorage.setItem('hopcode-chat-mode', on ? '1' : '0');
+      chatModeEnabled = true;
+      chatModeVoiceIntercept = true;
     }
-
-    if (chatMenuToggle) chatMenuToggle.addEventListener('click', function() {
-      if (!chatModeAllowed) return;
-      setChatMode(!chatModeEnabled);
-    });
-    // Chat bar menu button opens the app menu (menuShow is hoisted)
-    if (chatMenuBtn) chatMenuBtn.addEventListener('click', function(e) {
-      e.preventDefault(); e.stopPropagation(); menuShow();
-    });
 
     // Quick action buttons for y/n prompts
     function chatShowQuickActions(actions) {
@@ -6045,22 +6335,8 @@ const indexHtml = `<!DOCTYPE html>
 
 
 
-    // Auto-enable chat mode for all users on desktop
     var chatModeAllowed = true;
-    // Immediately enable chat mode on desktop (don't wait for sessions API)
-    (function() {
-      var isWideScreen = window.innerWidth >= 768;
-      var saved = localStorage.getItem('hopcode-chat-mode');
-      if (isWideScreen) {
-        // Desktop: always enable chat mode
-        setChatMode(true);
-      } else if (saved === '1') {
-        setChatMode(true);
-      }
-    })();
-    function initChatModeForUser(user) {
-      if (chatMenuToggle) chatMenuToggle.style.display = '';
-    }
+    function initChatModeForUser(user) {}
 
     // --- File Browser ---
     var fbPanel = document.getElementById('file-browser');
@@ -6320,38 +6596,12 @@ const indexHtml = `<!DOCTYPE html>
         fbUploadInput.value = '';
       }
     });
-    // Chat upload button (in input bar) — upload to CWD, not file browser path
+    // Chat upload button — pick files then show upload chooser dialog
     var chatUploadInput = document.getElementById('chat-upload-input');
     document.getElementById('chat-upload-btn').addEventListener('click', function() { chatUploadInput.click(); });
     chatUploadInput.addEventListener('change', function() {
       if (!chatUploadInput.files || chatUploadInput.files.length === 0) return;
-      var files = chatUploadInput.files;
-      var total = files.length;
-      var done = 0;
-      var errors = [];
-      for (var i = 0; i < files.length; i++) {
-        (function(file) {
-          fetch('/terminal/file-upload?session=' + encodeURIComponent(sessionId) + '&path=', {
-            method: 'POST',
-            credentials: 'include',
-            headers: { 'X-Filename': encodeURIComponent(file.name) },
-            body: file,
-          })
-          .then(function(r) { return r.json(); })
-          .then(function(data) {
-            if (data.error) errors.push(file.name + ': ' + data.error);
-            done++;
-            if (done === total) {
-              if (errors.length > 0) alert('Upload errors: ' + errors.join('; '));
-              if (fbPanel.classList.contains('open')) fbLoadDir(fbCurrentPath);
-            }
-          })
-          .catch(function(err) {
-            errors.push(file.name + ': ' + err.message);
-            done++;
-          });
-        })(files[i]);
-      }
+      uploadChooserShow(chatUploadInput.files, null);
       chatUploadInput.value = '';
     });
     document.getElementById('fb-mkdir-btn').addEventListener('click', function() {
@@ -7000,20 +7250,22 @@ interface EasySessionInfo {
   project: string;
   name: string;
   createdAt: number;
+  lastActivity: number;
 }
 const easySessions = new Map<string, EasySessionInfo>();
 
 function sendHtml(req: http.IncomingMessage, res: http.ServerResponse, html: string, precompressed?: Buffer): void {
+  const noCacheHeaders = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', 'Pragma': 'no-cache', 'Expires': '0', 'Vary': 'Accept-Encoding' };
   const acceptGzip = (req.headers['accept-encoding'] || '').includes('gzip');
   if (acceptGzip && precompressed) {
-    res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Encoding': 'gzip', 'Cache-Control': 'no-store', 'Vary': 'Accept-Encoding' });
+    res.writeHead(200, { ...noCacheHeaders, 'Content-Encoding': 'gzip' });
     res.end(precompressed);
   } else if (acceptGzip) {
     const gz = zlib.gzipSync(html);
-    res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Encoding': 'gzip', 'Cache-Control': 'no-store', 'Vary': 'Accept-Encoding' });
+    res.writeHead(200, { ...noCacheHeaders, 'Content-Encoding': 'gzip' });
     res.end(gz);
   } else {
-    res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
+    res.writeHead(200, noCacheHeaders);
     res.end(html);
   }
 }
@@ -7867,12 +8119,60 @@ const server = http.createServer(async (req, res) => {
           res.writeHead(404); res.end('Not found'); return;
         }
       }
-      const mime = getMimeType(filePath);
-      res.writeHead(200, {
-        'Content-Type': mime + (mime.startsWith('text/') ? '; charset=utf-8' : ''),
-        'Cache-Control': 'no-cache',
-      });
-      fs.createReadStream(filePath).pipe(res);
+      // Render CSV/MD as HTML when ?render=1
+      const wantRender = parsedUrl.searchParams.get('render') === '1';
+      const ext = path.extname(filePath).toLowerCase();
+      if (wantRender && ext === '.csv') {
+        const raw = await fs.promises.readFile(filePath, 'utf-8');
+        const rows = raw.split('\n').filter(r => r.trim());
+        let table = '<table>';
+        for (let i = 0; i < rows.length; i++) {
+          const cells = rows[i].split(',').map(c => c.replace(/^"|"$/g, '').trim());
+          const tag = i === 0 ? 'th' : 'td';
+          table += '<tr>' + cells.map(c => `<${tag}>${c.replace(/</g,'&lt;')}</${tag}>`).join('') + '</tr>';
+        }
+        table += '</table>';
+        const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font-family:system-ui;margin:16px;color:#1d1d1f}table{border-collapse:collapse;width:100%}th,td{border:1px solid #d2d2d7;padding:8px 12px;text-align:left;font-size:14px}th{background:#f5f5f7;font-weight:600}tr:nth-child(even){background:#fafafa}</style></head><body>${table}</body></html>`;
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+        res.end(html);
+      } else if (wantRender && ext === '.md') {
+        const raw = await fs.promises.readFile(filePath, 'utf-8');
+        // Simple markdown → HTML: headings, bold, italic, code, links, lists, paragraphs
+        const esc = (s: string) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        const lines = raw.split('\n');
+        let html = '';
+        let inList = false;
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) { if (inList) { html += '</ul>'; inList = false; } html += '<br>'; continue; }
+          if (trimmed.startsWith('# ')) { html += `<h1>${esc(trimmed.slice(2))}</h1>`; continue; }
+          if (trimmed.startsWith('## ')) { html += `<h2>${esc(trimmed.slice(3))}</h2>`; continue; }
+          if (trimmed.startsWith('### ')) { html += `<h3>${esc(trimmed.slice(4))}</h3>`; continue; }
+          if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+            if (!inList) { html += '<ul>'; inList = true; }
+            html += `<li>${esc(trimmed.slice(2))}</li>`;
+            continue;
+          }
+          if (inList) { html += '</ul>'; inList = false; }
+          let p = esc(trimmed);
+          p = p.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+          p = p.replace(/\*(.+?)\*/g, '<em>$1</em>');
+          p = p.replace(/`(.+?)`/g, '<code>$1</code>');
+          p = p.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+          html += `<p>${p}</p>`;
+        }
+        if (inList) html += '</ul>';
+        const page = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font-family:system-ui;margin:16px;color:#1d1d1f;line-height:1.6;max-width:720px}h1,h2,h3{margin:1em 0 .5em}code{background:#f5f5f7;padding:2px 6px;border-radius:4px;font-size:13px}a{color:#007aff}ul{padding-left:20px}li{margin:4px 0}</style></head><body>${html}</body></html>`;
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+        res.end(page);
+      } else {
+        const mime = getMimeType(filePath);
+        res.writeHead(200, {
+          'Content-Type': mime + (mime.startsWith('text/') ? '; charset=utf-8' : ''),
+          'Cache-Control': 'no-cache',
+        });
+        fs.createReadStream(filePath).pipe(res);
+      }
     } catch {
       res.writeHead(404); res.end('Not found');
     }
@@ -8036,11 +8336,6 @@ const server = http.createServer(async (req, res) => {
   const isEasyRoute = !isProForced && (pathname === '/terminal/easy' || pathname === '/easy' ||
     (easySessionCheck && easySessionCheck.startsWith('easy_') && pathname !== '/terminal'));
   if (isEasyRoute) {
-    if (auth.username !== 'root' && auth.username !== 'pony') {
-      res.writeHead(302, { 'Location': '/terminal' });
-      res.end();
-      return;
-    }
     if (!easySessionCheck) {
       // Check session limit before auto-creating
       if (!(await checkSessionLimit(auth.username))) {
@@ -8237,7 +8532,7 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
 
   if (!info) {
     cp = new ClaudeProcess(sessionId, projectDir, sendToClient);
-    info = { cp, owner: wsAuth.username, project: projectParam, name: projectParam || sessionId, createdAt: Date.now() };
+    info = { cp, owner: wsAuth.username, project: projectParam, name: projectParam || sessionId, createdAt: Date.now(), lastActivity: Date.now() };
     easySessions.set(sessionId, info);
     console.log(`[easy] Created ClaudeProcess for ${sessionId} in ${projectDir}`);
   } else {
@@ -8253,9 +8548,11 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
     clientWs.send(JSON.stringify({ type: 'history', messages: history }));
   }
   // Send current state
+  const initialState = cp.isActive() ? 'thinking' : 'ready';
+  console.log(`[easy] ${sessionId} sending initial state: ${initialState} (activeChild=${cp.isActive()}, history=${history.length})`);
   clientWs.send(JSON.stringify({
     type: 'state',
-    state: cp.isActive() ? 'thinking' : 'ready',
+    state: initialState,
   }));
 
   // Client messages
@@ -8266,6 +8563,7 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
       const msg: EasyClientMessage = JSON.parse(raw);
       if (msg.type === 'send') {
         console.log(`[easy] ${sessionId} sendMessage: ${msg.text.substring(0, 100)}`);
+        if (info) info.lastActivity = Date.now();
         cp!.sendMessage(msg.text);
       } else if (msg.type === 'cancel') {
         cp!.cancel();

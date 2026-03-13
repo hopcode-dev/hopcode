@@ -19,8 +19,9 @@ export type EasyState =
 export type EasyServerMessage =
   | { type: 'state'; state: EasyState }
   | { type: 'message'; id: number; role: 'assistant'; text: string; thinking?: boolean }
-  | { type: 'message_update'; id: number; text: string }
+  | { type: 'message_delta'; id: number; delta: string }
   | { type: 'tool'; name: string; detail: string; status: 'running' | 'done' }
+  | { type: 'preview_hint'; url: string }
   | { type: 'history'; messages: { role: 'user' | 'assistant'; text: string; id: number }[] }
   | { type: 'error'; message: string };
 

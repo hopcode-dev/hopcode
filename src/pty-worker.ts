@@ -172,14 +172,26 @@ function initPty(msg: InitMessage) {
   // Start recording
   initRecording(120, 30, `${sessionName} (${msg.owner})`);
 
-  // Forward PTY output to parent
+  // Forward PTY output to parent (buffered to reduce flicker from rapid redraws)
+  let outputBuf = '';
+  let outputTimer: ReturnType<typeof setTimeout> | null = null;
+  function flushOutput() {
+    if (!outputBuf) return;
+    const data = outputBuf;
+    outputBuf = '';
+    outputTimer = null;
+    send({ type: 'output', data });
+    recordEvent('o', data);
+  }
   ptyProcess.onData((data) => {
     // Track cursor visibility
     if (data.includes('\x1b[?25l')) cursorHidden = true;
     if (data.includes('\x1b[?25h')) cursorHidden = false;
     headlessTerm!.write(data);
-    send({ type: 'output', data });
-    recordEvent('o', data);
+    outputBuf += data;
+    if (!outputTimer) {
+      outputTimer = setTimeout(flushOutput, 40);
+    }
   });
 
   // Notify parent when PTY exits

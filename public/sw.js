@@ -1,4 +1,4 @@
-var CACHE = 'hopcode-v1';
+var CACHE = 'hopcode-v3';
 var PRECACHE = [
   '/vendor/xterm.js',
   '/vendor/xterm.css',
