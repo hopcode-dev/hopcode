@@ -1702,11 +1702,11 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 
 /* Chat area */
 #chat-area { flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:8px; }
-.msg { max-width:92%; padding:10px 14px; border-radius:18px; font-size:var(--easy-font-size, 15px); line-height:1.5; word-wrap:break-word; white-space:pre-wrap; animation:fadeIn 0.15s ease; }
+.msg { max-width:92%; padding:10px 14px; border-radius:18px; font-size:var(--easy-font-size, 15px); line-height:1.5; word-break:break-word; overflow-wrap:break-word; white-space:pre-wrap; animation:fadeIn 0.15s ease; }
 @keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
 .msg.user { align-self:flex-end; background:#95ec69; color:#1d1d1f; border-bottom-right-radius:6px; }
-.msg-wrap { display:flex; flex-direction:column; max-width:92%; align-self:flex-start; }
-.msg-wrap .msg { max-width:100%; }
+.msg-wrap { display:block; max-width:92%; align-self:flex-start; }
+.msg-wrap .msg { display:inline-block; max-width:100%; text-align:left; }
 .msg-wrap .msg-sender { font-size:12px; color:#999; margin-bottom:2px; padding-left:4px; }
 .msg-wrap .msg.user { background:#e9e9eb; color:#1d1d1f; border-bottom-right-radius:18px; border-bottom-left-radius:6px; }
 #participants-indicator { font-size:11px; color:#86868b; margin-left:8px; cursor:default; }
@@ -1735,7 +1735,10 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 .mention-avatar { width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:600; color:#fff; flex-shrink:0; }
 .mention-name { flex:1; }
 .msg-wrap.assistant-wrap .msg-sender { color:#8e44ad; }
-.msg.assistant { align-self:flex-start; background:#e9e9eb; color:#1d1d1f; border-bottom-left-radius:6px; font-family:'SF Mono',Monaco,Consolas,monospace; font-size:var(--easy-font-size, 15px); max-width:98%; }
+.msg-wrap.user-wrap { align-self:flex-end; text-align:right; }
+.msg-wrap.user-wrap .msg-sender { padding-right:4px; color:#2e7d32; }
+.msg-wrap.user-wrap .msg.user { display:inline-block; text-align:left; background:#95ec69; color:#1d1d1f; border-bottom-right-radius:6px; border-bottom-left-radius:18px; }
+.msg.assistant { background:#e9e9eb; color:#1d1d1f; border-bottom-left-radius:6px; font-family:'SF Mono',Monaco,Consolas,monospace; font-size:var(--easy-font-size, 15px); max-width:98%; }
 .msg.assistant.thinking-msg { background:#f5f5f5; color:#8e8e93; font-size:calc(var(--easy-font-size, 15px) - 1px); font-style:italic; }
 .msg.system { align-self:center; background:none; color:#86868b; font-size:12px; text-align:center; padding:4px 8px; }
 .msg.error { align-self:center; background:#fff0f0; color:#ff3b30; border:1px solid #ffcdd2; font-size:13px; }
@@ -3420,12 +3423,19 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         var isSelf = d.sender === username;
         var isMentioned = d.text && d.text.match(new RegExp('@' + username + '(?![\\w\\u4e00-\\u9fff])'));
         if (isSelf) {
+          var wrap = document.createElement('div');
+          wrap.className = 'msg-wrap user-wrap';
+          var nameTag = document.createElement('div');
+          nameTag.className = 'msg-sender';
+          nameTag.textContent = d.sender || username;
+          wrap.appendChild(nameTag);
           var div = document.createElement('div');
           div.className = 'msg user';
           div._rawText = d.text;
           div._sender = d.sender;
           div.innerHTML = linkify(d.text);
-          chatArea.appendChild(div);
+          wrap.appendChild(div);
+          chatArea.appendChild(wrap);
         } else {
           var wrap = document.createElement('div');
           wrap.className = 'msg-wrap';
@@ -3461,12 +3471,19 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
             if (m.role === 'user') {
               var isSelf = !m.sender || m.sender === username;
               if (isSelf) {
+                var wrap = document.createElement('div');
+                wrap.className = 'msg-wrap user-wrap';
+                var nameTag = document.createElement('div');
+                nameTag.className = 'msg-sender';
+                nameTag.textContent = m.sender || username;
+                wrap.appendChild(nameTag);
                 var div = document.createElement('div');
                 div.className = 'msg user';
                 div._rawText = m.text;
                 div._sender = m.sender || username;
                 div.innerHTML = linkify(m.text);
-                chatArea.appendChild(div);
+                wrap.appendChild(div);
+                chatArea.appendChild(wrap);
               } else {
                 var wrap = document.createElement('div');
                 wrap.className = 'msg-wrap';
@@ -3684,12 +3701,19 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         } else if (m.role === 'user') {
           var isSelf = !m.sender || m.sender === username;
           if (isSelf) {
+            var wrap = document.createElement('div');
+            wrap.className = 'msg-wrap user-wrap';
+            var nameTag = document.createElement('div');
+            nameTag.className = 'msg-sender';
+            nameTag.textContent = m.sender || username;
+            wrap.appendChild(nameTag);
             var div = document.createElement('div');
             div.className = 'msg user';
             div._rawText = m.text;
             div._sender = m.sender || username;
             div.innerHTML = linkify(m.text);
-            chatArea.appendChild(div);
+            wrap.appendChild(div);
+            chatArea.appendChild(wrap);
           } else {
             var wrap = document.createElement('div');
             wrap.className = 'msg-wrap';
@@ -3889,10 +3913,19 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   // ---- Chat messages ----
   function addUserMsg(text) {
     currentAssistantMsg = null;
+    var wrap = document.createElement('div');
+    wrap.className = 'msg-wrap user-wrap';
+    var nameTag = document.createElement('div');
+    nameTag.className = 'msg-sender';
+    nameTag.textContent = username || _t('easy.you');
+    wrap.appendChild(nameTag);
     var div = document.createElement('div');
     div.className = 'msg user';
-    div.textContent = text;
-    chatArea.appendChild(div);
+    div._rawText = text;
+    div._sender = username;
+    div.innerHTML = linkify(text);
+    wrap.appendChild(div);
+    chatArea.appendChild(wrap);
     autoScroll();
     saveChatHistory();
   }
