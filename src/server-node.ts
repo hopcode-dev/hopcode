@@ -870,7 +870,7 @@ function getLoginHtml(): string {
 // Session chooser HTML page - generated dynamically with server-side rendering
 async function buildSessionsHtml(username?: string): Promise<string> {
   const isRoot = username === 'root';
-  let sessionList: { id: string; name: string; owner: string; createdAt: number; lastActivity: number; clients: number; mode?: string; project?: string }[] = [];
+  let sessionList: { id: string; name: string; owner: string; createdAt: number; lastActivity: number; clients: number; mode?: string; project?: string; sharedWith?: string[]; onlineUsers?: string[] }[] = [];
   try {
     // Root sees all sessions; other users see only their own
     const ownerQuery = isMultiUser && username && !isRoot ? `?owner=${encodeURIComponent(username)}` : '';
@@ -882,9 +882,10 @@ async function buildSessionsHtml(username?: string): Promise<string> {
   } catch {}
   // Append Easy Mode sessions
   for (const [id, info] of easySessions) {
-    if (isMultiUser && username && !isRoot && info.owner !== username) continue;
+    if (isMultiUser && username && !isRoot && info.owner !== username && !info.sharedWith.has(username)) continue;
     if (sessionList.some(s => s.id === id)) continue;
-    sessionList.push({ id, name: info.name, owner: info.owner, createdAt: info.createdAt, lastActivity: info.lastActivity || info.createdAt, clients: 0, mode: 'easy', project: info.project });
+    const onlineUsers = Array.from(info.connectedUsers.keys());
+    sessionList.push({ id, name: info.name, owner: info.owner, createdAt: info.createdAt, lastActivity: info.lastActivity || info.createdAt, clients: onlineUsers.length, mode: 'easy', project: info.project, sharedWith: info.sharedWith.size > 0 ? Array.from(info.sharedWith) : undefined, onlineUsers: onlineUsers.length > 0 ? onlineUsers : undefined });
   }
   sessionList.sort((a, b) => b.lastActivity - a.lastActivity);
 
@@ -907,11 +908,24 @@ async function buildSessionsHtml(username?: string): Promise<string> {
     const href = s.mode === 'easy'
       ? `/terminal/easy?session=${encodeURIComponent(s.id)}${s.project ? '&project=' + encodeURIComponent(s.project) : ''}`
       : `/terminal?session=${encodeURIComponent(s.id)}`;
+    // Collaboration badge for shared sessions
+    let collabBadge = '';
+    if (s.sharedWith && s.sharedWith.length > 0) {
+      const allMembers = [s.owner, ...s.sharedWith];
+      const onlineSet = new Set(s.onlineUsers || []);
+      const avatars = allMembers.slice(0, 3).map(u => {
+        const initial = u.charAt(0).toUpperCase();
+        const online = onlineSet.has(u) ? ' collab-online' : '';
+        return '<span class="collab-avatar' + online + '" title="' + esc(u) + '">' + esc(initial) + '</span>';
+      }).join('');
+      const extra = allMembers.length > 3 ? '<span class="collab-extra">+' + (allMembers.length - 3) + '</span>' : '';
+      collabBadge = '<div class="collab-badge">' + avatars + extra + '</div>';
+    }
     return `<a class="session-card" href="${href}" data-session-id="${esc(s.id)}">
       <div class="card-bar ${barClass}"></div>
       <div class="session-info">
         <div class="session-name" data-session="${esc(s.id)}"><span class="session-name-text">${esc(s.name)}</span></div>
-        <div class="session-meta">${fmtAge(s.lastActivity)}</div>
+        <div class="session-meta">${fmtAge(s.lastActivity)}${collabBadge}</div>
       </div>
       <button class="rename-btn" data-i18n-title="portal.rename_title" title="Rename session">&#9998;</button>
       <button class="delete-btn" data-i18n-title="portal.delete_title" title="Delete session">&times;</button>
@@ -1019,7 +1033,12 @@ async function buildSessionsHtml(username?: string): Promise<string> {
     .session-info { flex: 1; min-width: 0; padding: 14px 12px; }
     .session-name { display: flex; align-items: center; }
     .session-name-text { font-size: 15px; font-weight: 600; color: #f3f4f6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .session-meta { font-size: 12px; color: #6b7280; margin-top: 2px; }
+    .session-meta { font-size: 12px; color: #6b7280; margin-top: 2px; display:flex; align-items:center; gap:6px; }
+    .collab-badge { display:inline-flex; align-items:center; gap:0; margin-left:4px; }
+    .collab-avatar { width:18px; height:18px; border-radius:50%; background:#4b5563; color:#fff; font-size:10px; font-weight:600; display:inline-flex; align-items:center; justify-content:center; margin-left:-4px; border:1.5px solid #1e293b; }
+    .collab-avatar:first-child { margin-left:0; }
+    .collab-avatar.collab-online { background:#22c55e; border-color:#166534; }
+    .collab-extra { font-size:10px; color:#9ca3af; margin-left:3px; }
 
     /* Card action buttons */
     .rename-btn, .delete-btn {
@@ -1453,6 +1472,16 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 .msg-wrap .msg-sender { font-size:12px; color:#999; margin-bottom:2px; padding-left:4px; }
 .msg-wrap .msg.user { background:#e9e9eb; color:#1d1d1f; border-bottom-right-radius:18px; border-bottom-left-radius:6px; }
 #participants-indicator { font-size:11px; color:#86868b; margin-left:8px; cursor:default; }
+.mention { color:#007aff; font-weight:500; }
+.msg.mentioned { border-left:3px solid #007aff; padding-left:9px; }
+#mention-dropdown { display:none; position:absolute; bottom:100%; left:0; right:0; background:#fff; border:1px solid #e0e0e0; border-radius:10px; max-height:200px; overflow-y:auto; z-index:1000; margin-bottom:4px; box-shadow:0 -4px 16px rgba(0,0,0,.12); }
+.mention-item { display:flex; align-items:center; gap:8px; padding:10px 14px; cursor:pointer; font-size:14px; }
+.mention-item:first-child { border-radius:10px 10px 0 0; }
+.mention-item:last-child { border-radius:0 0 10px 10px; }
+.mention-item:only-child { border-radius:10px; }
+.mention-item.active, .mention-item:hover { background:#f0f0f5; }
+.mention-avatar { width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:600; color:#fff; flex-shrink:0; }
+.mention-name { flex:1; }
 .msg-wrap.assistant-wrap .msg-sender { color:#8e44ad; }
 .msg.assistant { align-self:flex-start; background:#e9e9eb; color:#1d1d1f; border-bottom-left-radius:6px; font-family:'SF Mono',Monaco,Consolas,monospace; font-size:var(--easy-font-size, 15px); max-width:98%; }
 .msg.assistant.thinking-msg { background:#f5f5f5; color:#8e8e93; font-size:calc(var(--easy-font-size, 15px) - 1px); font-style:italic; }
@@ -1482,7 +1511,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 #msg-input::-webkit-scrollbar { display:none; }
 #msg-input::-webkit-resizer { display:none; }
 #msg-input:focus { background:#ffffff; border-color:#007aff; box-shadow:0 0 0 3px rgba(0,122,255,0.15); }
-#msg-input::placeholder { color:#86868b; }
+#msg-input::placeholder { color:#86868b; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .input-btn { width:40px; height:40px; border-radius:50%; border:none; cursor:pointer; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
 #upload-btn { background:none; color:#86868b; }
 #upload-btn svg { width:22px; height:22px; }
@@ -1769,7 +1798,8 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     <!-- Quick actions -->
     <div id="quick-actions"></div>
     <!-- Input bar -->
-    <div id="input-bar">
+    <div id="input-bar" style="position:relative;">
+    <div id="mention-dropdown"></div>
     <button class="input-btn" id="menu-btn" title="Menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
     <button class="input-btn" id="voice-toggle" title="Voice/Keyboard"><svg id="vt-mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg><svg id="vt-kb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display:none"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="6" y1="8" x2="6" y2="8.01"/><line x1="10" y1="8" x2="10" y2="8.01"/><line x1="14" y1="8" x2="14" y2="8.01"/><line x1="18" y1="8" x2="18" y2="8.01"/><line x1="6" y1="12" x2="6" y2="12.01"/><line x1="10" y1="12" x2="10" y2="12.01"/><line x1="14" y1="12" x2="14" y2="12.01"/><line x1="18" y1="12" x2="18" y2="12.01"/><line x1="8" y1="16" x2="16" y2="16"/></svg></button>
     <button class="input-btn" id="cancel-btn" title="Stop"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>
@@ -2049,6 +2079,108 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   var collabToast = document.getElementById('collab-toast');
   var _currentParticipants = [];
   var _collabToastTimer = null;
+
+  // --- @ Mention ---
+  var mentionDropdown = document.getElementById('mention-dropdown');
+  var _mentionActive = false;
+  var _mentionIdx = 0;
+  var _mentionItems = [];
+  var _mentionFlashTimer = null;
+  var _originalTitle = document.title;
+  var _avatarColors = ['#FF6B6B','#4ECDC4','#45B7D1','#96CEB4','#FFEAA7','#DDA0DD','#98D8C8','#F7DC6F','#BB8FCE','#85C1E9'];
+
+  function getAvatarColor(name) {
+    var hash = 0;
+    for (var i = 0; i < name.length; i++) hash = ((hash << 5) - hash) + name.charCodeAt(i);
+    return _avatarColors[Math.abs(hash) % _avatarColors.length];
+  }
+
+  function getMentionCandidates(query) {
+    var assistantName = _t('easy.assistant_name') || '小码';
+    var candidates = [{ name: assistantName, isAI: true }];
+    for (var i = 0; i < _currentParticipants.length; i++) {
+      if (_currentParticipants[i] !== username) {
+        candidates.push({ name: _currentParticipants[i], isAI: false });
+      }
+    }
+    if (!query) return candidates;
+    var q = query.toLowerCase();
+    return candidates.filter(function(c) { return c.name.toLowerCase().indexOf(q) !== -1; });
+  }
+
+  function showMentionDropdown(candidates) {
+    if (!mentionDropdown || candidates.length === 0) { hideMentionDropdown(); return; }
+    _mentionItems = candidates;
+    _mentionIdx = 0;
+    _mentionActive = true;
+    mentionDropdown.innerHTML = '';
+    for (var i = 0; i < candidates.length; i++) {
+      var item = document.createElement('div');
+      item.className = 'mention-item' + (i === 0 ? ' active' : '');
+      item.dataset.idx = i;
+      var avatar = document.createElement('div');
+      avatar.className = 'mention-avatar';
+      if (candidates[i].isAI) {
+        avatar.style.background = '#8e44ad';
+        avatar.textContent = '\\uD83E\\uDD16';
+      } else {
+        avatar.style.background = getAvatarColor(candidates[i].name);
+        avatar.textContent = candidates[i].name.charAt(0).toUpperCase();
+      }
+      item.appendChild(avatar);
+      var nameEl = document.createElement('span');
+      nameEl.className = 'mention-name';
+      nameEl.textContent = candidates[i].name;
+      item.appendChild(nameEl);
+      item.addEventListener('mousedown', function(e) {
+        e.preventDefault(); // prevent blur
+        var idx = parseInt(this.dataset.idx);
+        insertMention(_mentionItems[idx].name);
+      });
+      mentionDropdown.appendChild(item);
+    }
+    mentionDropdown.style.display = 'block';
+  }
+
+  function hideMentionDropdown() {
+    if (mentionDropdown) mentionDropdown.style.display = 'none';
+    _mentionActive = false;
+    _mentionItems = [];
+    _mentionIdx = 0;
+  }
+
+  function insertMention(name) {
+    var val = msgInput.value;
+    var pos = msgInput.selectionStart;
+    // Find the @ before cursor
+    var before = val.substring(0, pos);
+    var atIdx = before.lastIndexOf('@');
+    if (atIdx === -1) { hideMentionDropdown(); return; }
+    var after = val.substring(pos);
+    msgInput.value = before.substring(0, atIdx) + '@' + name + ' ' + after;
+    var newPos = atIdx + name.length + 2; // @name + space
+    msgInput.selectionStart = msgInput.selectionEnd = newPos;
+    msgInput.focus();
+    hideMentionDropdown();
+    updateSendBtn();
+  }
+
+  function startMentionFlash() {
+    if (_mentionFlashTimer) return;
+    var on = true;
+    _mentionFlashTimer = setInterval(function() {
+      document.title = on ? _t('easy.mention.title_alert') : _originalTitle;
+      on = !on;
+    }, 1000);
+  }
+
+  document.addEventListener('visibilitychange', function() {
+    if (!document.hidden && _mentionFlashTimer) {
+      clearInterval(_mentionFlashTimer);
+      _mentionFlashTimer = null;
+      document.title = _originalTitle;
+    }
+  });
 
   document.getElementById('menu-invite').addEventListener('click', function() {
     menuHide();
@@ -2556,7 +2688,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     var canInput = (newState === 'ready');
     msgInput.disabled = !canInput;
     if (newState === 'ready') {
-      msgInput.placeholder = (('ontouchstart' in window || navigator.maxTouchPoints > 0) && window.innerWidth < 768) ? _t('easy.input.placeholder_mobile') : _t('easy.input.placeholder', {key: /Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Option' : 'Alt'});
+      msgInput.placeholder = (('ontouchstart' in window || navigator.maxTouchPoints > 0) || window.innerWidth < 768 || msgInput.offsetWidth < 300) ? _t('easy.input.placeholder_mobile') : _t('easy.input.placeholder', {key: /Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Option' : 'Alt'});
     } else if (newState === 'thinking') {
       msgInput.placeholder = _t('easy.input.thinking');
     } else {
@@ -2662,10 +2794,13 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       } else if (d.type === 'user_message') {
         // Server echo of user message — WeChat group style
         var isSelf = d.sender === username;
+        var isMentioned = d.text && d.text.match(new RegExp('@' + username + '(?![\\w\\u4e00-\\u9fff])'));
         if (isSelf) {
           var div = document.createElement('div');
           div.className = 'msg user';
-          div.textContent = d.text;
+          div._rawText = d.text;
+          div._sender = d.sender;
+          div.innerHTML = linkify(d.text);
           chatArea.appendChild(div);
         } else {
           var wrap = document.createElement('div');
@@ -2675,10 +2810,14 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
           nameTag.textContent = d.sender;
           wrap.appendChild(nameTag);
           var bubble = document.createElement('div');
-          bubble.className = 'msg user';
-          bubble.textContent = d.text;
+          bubble.className = 'msg user' + (isMentioned ? ' mentioned' : '');
+          bubble._rawText = d.text;
+          bubble._sender = d.sender;
+          bubble.innerHTML = linkify(d.text);
           wrap.appendChild(bubble);
           chatArea.appendChild(wrap);
+          // Title flash when mentioned and page not visible
+          if (isMentioned && document.hidden) { startMentionFlash(); }
         }
         currentAssistantMsg = null;
         autoScroll();
@@ -2699,7 +2838,9 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
               if (isSelf) {
                 var div = document.createElement('div');
                 div.className = 'msg user';
-                div.textContent = m.text;
+                div._rawText = m.text;
+                div._sender = m.sender || username;
+                div.innerHTML = linkify(m.text);
                 chatArea.appendChild(div);
               } else {
                 var wrap = document.createElement('div');
@@ -2710,7 +2851,9 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
                 wrap.appendChild(nameTag);
                 var bubble = document.createElement('div');
                 bubble.className = 'msg user';
-                bubble.textContent = m.text;
+                bubble._rawText = m.text;
+                bubble._sender = m.sender;
+                bubble.innerHTML = linkify(m.text);
                 wrap.appendChild(bubble);
                 chatArea.appendChild(wrap);
               }
@@ -2866,7 +3009,9 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         var items = chatArea.querySelectorAll('.msg.user, .msg.assistant');
         for (var i = 0; i < items.length; i++) {
           var rawText = items[i]._rawText || items[i].textContent;
-          msgs.push({ role: items[i].classList.contains('user') ? 'user' : 'assistant', text: rawText });
+          var entry = { role: items[i].classList.contains('user') ? 'user' : 'assistant', text: rawText };
+          if (items[i]._sender) entry.sender = items[i]._sender;
+          msgs.push(entry);
         }
         if (msgs.length > 50) msgs = msgs.slice(-50);
         localStorage.setItem(chatHistoryKey, JSON.stringify(msgs));
@@ -2881,15 +3026,35 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       var msgs = JSON.parse(raw);
       if (!Array.isArray(msgs) || msgs.length === 0) return;
       for (var i = 0; i < msgs.length; i++) {
-        var div = document.createElement('div');
-        div.className = 'msg ' + msgs[i].role;
-        if (msgs[i].role === 'assistant') {
-          div._rawText = msgs[i].text;
-          div.innerHTML = linkify(msgs[i].text);
-        } else {
-          div.textContent = msgs[i].text;
+        var m = msgs[i];
+        if (m.role === 'assistant') {
+          appendAssistantText(m.text);
+          currentAssistantMsg = null;
+        } else if (m.role === 'user') {
+          var isSelf = !m.sender || m.sender === username;
+          if (isSelf) {
+            var div = document.createElement('div');
+            div.className = 'msg user';
+            div._rawText = m.text;
+            div._sender = m.sender || username;
+            div.innerHTML = linkify(m.text);
+            chatArea.appendChild(div);
+          } else {
+            var wrap = document.createElement('div');
+            wrap.className = 'msg-wrap';
+            var nameTag = document.createElement('div');
+            nameTag.className = 'msg-sender';
+            nameTag.textContent = m.sender;
+            wrap.appendChild(nameTag);
+            var bubble = document.createElement('div');
+            bubble.className = 'msg user';
+            bubble._rawText = m.text;
+            bubble._sender = m.sender;
+            bubble.innerHTML = linkify(m.text);
+            wrap.appendChild(bubble);
+            chatArea.appendChild(wrap);
+          }
         }
-        chatArea.appendChild(div);
       }
       autoScroll();
     } catch(e) {}
@@ -2929,7 +3094,9 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   function linkify(text) {
     var fixed = joinSplitUrls(text);
     var escaped = escHtml(fixed);
-    return escaped.replace(/(https?:\\/\\/[^\\s<>'"]+)/g, '<a href="$1" class="chat-link" style="color:#007aff;word-break:break-all;text-decoration:underline;">$1</a>');
+    var withLinks = escaped.replace(/(https?:\\/\\/[^\\s<>'"]+)/g, '<a href="$1" class="chat-link" style="color:#007aff;word-break:break-all;text-decoration:underline;">$1</a>');
+    // Highlight @mentions
+    return withLinks.replace(/@([\w\u4e00-\u9fff]+)/g, '<span class="mention">@$1</span>');
   }
 
   // Intercept link clicks in chat — open in preview instead of navigating away
@@ -3161,11 +3328,18 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     if (!text) return;
     if (state !== 'ready') return;
 
+    // Extract @mentions from text
+    var mentionMatches = text.match(/@([\w\u4e00-\u9fff]+)/g);
+    var mentions = mentionMatches ? mentionMatches.map(function(m) { return m.substring(1); }) : [];
+
     // Don't render locally — wait for server echo (user_message) for multi-user consistency
     currentAssistantMsg = null;
-    wsSend({ type: 'send', text: text });
+    var msg = { type: 'send', text: text };
+    if (mentions.length > 0) msg.mentions = mentions;
+    wsSend(msg);
     msgInput.value = '';
     msgInput.style.height = 'auto';
+    hideMentionDropdown();
     updateSendBtn();
     // State will be set to 'thinking' by the server response
   }
@@ -3186,12 +3360,50 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     updateSendBtn();
     msgInput.style.height = 'auto';
     msgInput.style.height = Math.min(msgInput.scrollHeight, 120) + 'px';
+    // @ mention detection
+    var val = msgInput.value;
+    var pos = msgInput.selectionStart;
+    var before = val.substring(0, pos);
+    var match = before.match(/@([\w\u4e00-\u9fff]*)$/);
+    if (match) {
+      var candidates = getMentionCandidates(match[1]);
+      showMentionDropdown(candidates);
+    } else {
+      hideMentionDropdown();
+    }
   });
 
   var composing = false;
   msgInput.addEventListener('compositionstart', function() { composing = true; });
   msgInput.addEventListener('compositionend', function() { composing = false; });
   msgInput.addEventListener('keydown', function(e) {
+    // @ mention dropdown navigation
+    if (_mentionActive && _mentionItems.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        _mentionIdx = (_mentionIdx + 1) % _mentionItems.length;
+        var items = mentionDropdown.querySelectorAll('.mention-item');
+        for (var i = 0; i < items.length; i++) items[i].className = 'mention-item' + (i === _mentionIdx ? ' active' : '');
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        _mentionIdx = (_mentionIdx - 1 + _mentionItems.length) % _mentionItems.length;
+        var items = mentionDropdown.querySelectorAll('.mention-item');
+        for (var i = 0; i < items.length; i++) items[i].className = 'mention-item' + (i === _mentionIdx ? ' active' : '');
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        insertMention(_mentionItems[_mentionIdx].name);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        hideMentionDropdown();
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey && !composing && !e.isComposing && e.keyCode !== 229) {
       e.preventDefault();
       voiceTriggered = false;
@@ -3881,7 +4093,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   });
 
   // ---- Init ----
-  msgInput.placeholder = (('ontouchstart' in window || navigator.maxTouchPoints > 0) && window.innerWidth < 768) ? _t('easy.input.placeholder_mobile') : _t('easy.input.placeholder', {key: /Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Option' : 'Alt'});
+  msgInput.placeholder = (('ontouchstart' in window || navigator.maxTouchPoints > 0) || window.innerWidth < 768 || msgInput.offsetWidth < 300) ? _t('easy.input.placeholder_mobile') : _t('easy.input.placeholder', {key: /Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Option' : 'Alt'});
   restoreChatHistory();
   connectWs();
   connectVoice();
@@ -7510,6 +7722,7 @@ interface EasySessionInfo {
   createdAt: number;
   lastActivity: number;
   connectedUsers: Map<string, Set<WebSocket>>;  // username -> set of WS connections
+  sharedWith: Set<string>;  // usernames who have ever joined (excluding owner)
 }
 const easySessions = new Map<string, EasySessionInfo>();
 
@@ -7524,6 +7737,7 @@ interface EasyRegistryEntry {
   createdAt: number;
   lastActivity: number;
   projectDir: string;
+  sharedWith?: string[];
 }
 
 function saveEasyRegistry(): void {
@@ -7538,6 +7752,7 @@ function saveEasyRegistry(): void {
         createdAt: info.createdAt,
         lastActivity: info.lastActivity,
         projectDir: info.cp.projectDir,
+        sharedWith: info.sharedWith.size > 0 ? Array.from(info.sharedWith) : undefined,
       });
     }
     fs.mkdirSync(path.dirname(EASY_REGISTRY_FILE), { recursive: true });
@@ -7565,6 +7780,7 @@ function loadEasyRegistry(): void {
         createdAt: entry.createdAt,
         lastActivity: entry.lastActivity,
         connectedUsers: new Map(),
+        sharedWith: new Set(entry.sharedWith || []),
       };
       easySessions.set(entry.id, info);
     }
@@ -7615,6 +7831,7 @@ function scanOrphanEasySessions(): void {
             createdAt: stat.birthtimeMs || stat.mtimeMs,
             lastActivity: stat.mtimeMs,
             connectedUsers: new Map(),
+            sharedWith: new Set(),
           });
           knownDirs.add(projDir);
           recovered++;
@@ -8507,8 +8724,8 @@ const server = http.createServer(async (req, res) => {
     // Allow embedding in iframe (preview panel)
     res.removeHeader('X-Frame-Options');
     res.removeHeader('Content-Security-Policy');
-    const project = serveMatch[2]!;
-    const filePart = serveMatch[3] || '/index.html';
+    const project = decodeURIComponent(serveMatch[2]!);
+    const filePart = decodeURIComponent(serveMatch[3] || '/index.html');
 
     // Find project directory: collect all candidates, pick the one that has the file
     const homeDir = (!auth.linuxUser || auth.linuxUser === 'root') ? (process.env.HOME || '/root') : `/home/${auth.linuxUser}`;
@@ -8972,7 +9189,7 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
       ? `${homeDir}/coding/${projectParam}`
       : `${homeDir}`;
     cp = new ClaudeProcess(sessionId, projectDir, sendToClient);
-    info = { cp, owner: wsAuth.username, project: projectParam, name: projectParam || sessionId, createdAt: Date.now(), lastActivity: Date.now(), connectedUsers: new Map() };
+    info = { cp, owner: wsAuth.username, project: projectParam, name: projectParam || sessionId, createdAt: Date.now(), lastActivity: Date.now(), connectedUsers: new Map(), sharedWith: new Set() };
     easySessions.set(sessionId, info);
     saveEasyRegistry();
     console.log(`[easy] Created ClaudeProcess for ${sessionId} in ${projectDir}`);
@@ -9002,6 +9219,14 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
   };
   broadcastParticipants();
 
+  // Track shared users (non-owner who joined)
+  if (info && connUser !== info.owner && connUser !== 'anonymous') {
+    if (!info.sharedWith.has(connUser)) {
+      info.sharedWith.add(connUser);
+      saveEasyRegistry();
+    }
+  }
+
   // Send current state + history on connect
   const history = cp.getHistory();
   if (history.length > 0) {
@@ -9029,7 +9254,15 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
       if (msg.type === 'send') {
         console.log(`[easy] ${sessionId} sendMessage from ${connUser}: ${msg.text.substring(0, 100)}`);
         if (info) { info.lastActivity = Date.now(); saveEasyRegistry(); }
-        cp!.sendMessage(msg.text, connUser);
+        // Server-side fallback: extract mentions from text if client didn't send them
+        let mentions = msg.mentions;
+        if (!mentions) {
+          const mentionMatches = msg.text.match(/@([\w\u4e00-\u9fff]+)/g);
+          if (mentionMatches) mentions = mentionMatches.map((m: string) => m.substring(1));
+        }
+        // Pass participant count so claude-process can decide whether to invoke Claude
+        const participantCount = info ? info.connectedUsers.size : 1;
+        cp!.sendMessage(msg.text, connUser, mentions, participantCount);
       } else if (msg.type === 'cancel') {
         cp!.cancel();
       }

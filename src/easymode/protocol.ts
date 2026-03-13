@@ -30,5 +30,5 @@ export type EasyServerMessage =
 // --- Client → Server Messages ---
 
 export type EasyClientMessage =
-  | { type: 'send'; text: string }
+  | { type: 'send'; text: string; mentions?: string[] }
   | { type: 'cancel' };

@@ -167,6 +167,7 @@ const en: Record<string, string> = {
   'easy.invite.only_you': 'Only you — invite someone!',
   'easy.participant.joined': '{name} joined',
   'easy.participant.left': '{name} left',
+  'easy.mention.title_alert': 'Someone mentioned you',
 
   // Pro Mode
   'pro.status.hold_to_speak': 'Hold {key} to speak',
@@ -414,6 +415,7 @@ const zh: Record<string, string> = {
   'easy.invite.only_you': '只有你 — 邀请伙伴一起吧！',
   'easy.participant.joined': '{name} 已加入',
   'easy.participant.left': '{name} 已离开',
+  'easy.mention.title_alert': '有人@了你',
 
   // Pro Mode
   'pro.status.hold_to_speak': '按住 {key} 说话',

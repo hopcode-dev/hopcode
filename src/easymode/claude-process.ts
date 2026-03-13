@@ -30,6 +30,7 @@ export class ClaudeProcess {
   private _knownPreviewFiles = new Map<string, number>(); // name -> mtime
   private static PREVIEW_EXTS = new Set(['.html', '.htm', '.svg', '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf']);
   lastPreviewUrl: string | null = null;
+  private _pendingContext: string[] = [];  // skipped messages to prepend on next Claude call
 
   private stateFile: string;
 
@@ -118,7 +119,7 @@ export class ClaudeProcess {
     } catch {}
   }
 
-  sendMessage(text: string, sender?: string): void {
+  sendMessage(text: string, sender?: string, mentions?: string[], participantCount: number = 1): void {
     if (this.disposed) return;
 
     // Cancel any active child before starting new one
@@ -136,11 +137,52 @@ export class ClaudeProcess {
     // Broadcast user_message to all listeners (including sender — client waits for echo)
     this.broadcast({ type: 'user_message', id: userEntry.id, sender: sender || 'user', text });
 
+    // Decide whether to invoke Claude:
+    // - Single user: always invoke
+    // - Multi-user (2+): invoke if @小码, OR if last message was from assistant (reply to 小码)
+    //   Skip if @other_user without @小码, or unrelated chat
+    const aiNames = ['小码', 'xiaoma'];
+    const mentionsAI = mentions && mentions.some(m => aiNames.includes(m.toLowerCase()));
+    if (participantCount > 1 && !mentionsAI) {
+      // Check if this is a follow-up to 小码's last response (no @ but clearly replying to AI)
+      const lastEntry = this.history.length >= 2 ? this.history[this.history.length - 2] : null; // -2 because current msg is already pushed
+      const followingAssistant = lastEntry && lastEntry.role === 'assistant';
+      const mentionsOther = mentions && mentions.length > 0; // explicitly @someone else
+      if (!followingAssistant || mentionsOther) {
+        // Pure human chat — skip Claude, buffer for context
+        const contextLine = sender ? `[${sender}]: ${text}` : text;
+        this._pendingContext.push(contextLine);
+        this.broadcast({ type: 'state', state: 'ready' });
+        return;
+      }
+      // followingAssistant && !mentionsOther → treat as reply to 小码, invoke Claude
+    }
+
     // Notify client: thinking state
     this.broadcast({ type: 'state', state: 'thinking' });
 
-    // Prepend [sender] for Claude context in multi-user scenarios
-    const promptText = sender ? `[${sender}]: ${text}` : text;
+    // Build prompt prefix based on @ mentions
+    // Format: [sender → @小码]: text | [sender → @alice]: text | [sender]: text
+    let promptText: string;
+    if (sender) {
+      if (mentions && mentions.length > 0) {
+        const mentionStr = mentions.map(m => '@' + m).join(' ');
+        promptText = `[${sender} → ${mentionStr}]: ${text}`;
+      } else {
+        promptText = `[${sender}]: ${text}`;
+      }
+    } else {
+      promptText = text;
+    }
+
+    // Append any buffered context from skipped messages (as context block after the main message)
+    if (this._pendingContext.length > 0) {
+      const contextBlock = '\n\n[Recent chat while you were not mentioned:\n'
+        + this._pendingContext.join('\n')
+        + '\n]';
+      promptText = promptText + contextBlock;
+      this._pendingContext = [];
+    }
 
     // Build command args
     const args = [
@@ -150,7 +192,15 @@ export class ClaudeProcess {
       '--model', 'sonnet',
       '--include-partial-messages',
       '--append-system-prompt',
-      'You are 小码 (Xiaoma), a friendly action-oriented AI assistant in Hopcode Easy Mode. When users confirm or agree (好的/试试/做吧/go ahead/ok), START DOING THE WORK immediately — write code, create files. Never just say "ok let me know". Be concise — this is a mobile chat UI. Reply in the same language as the user. Messages prefixed with [username]: indicate who sent it in this collaborative multi-user session.',
+      `You are 小码 (Xiaoma), a friendly action-oriented AI assistant in Hopcode Easy Mode. When users confirm or agree (好的/试试/做吧/go ahead/ok), START DOING THE WORK immediately — write code, create files. Never just say "ok let me know". Be concise — this is a mobile chat UI. Reply in the same language as the user.
+
+## Multi-user @ mention rules
+Messages are formatted as: [sender → @mentions]: text  or  [sender]: text
+- When @小码 appears in the message → you MUST respond (you were directly addressed)
+- When a message immediately follows YOUR previous response and has no @ → treat it as a reply to you, respond normally
+- When a message has no @ mentions and doesn't follow your response → read and understand for context, but only respond if the content clearly requires your input (e.g., a coding question, a request for help)
+- When @someone_else appears without @小码 → stay silent unless the content directly involves work you are doing
+- When in doubt, stay silent — it's better to wait to be asked than to interrupt a human conversation`,
     ];
 
     if (this.claudeSessionId) {
