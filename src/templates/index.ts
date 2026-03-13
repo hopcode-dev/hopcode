@@ -82,7 +82,7 @@ export function setupProjectTemplate(
   }
 
   const port = getNextPort(username);
-  const serveUrl = `/serve/${encodeURIComponent(projectName)}/index.html`;
+  const serveUrl = `/serve/${encodeURIComponent(projectName)}/workspace/`;
   const deployInstructions = getDeployInstructions(username, projectName, port);
 
   const content = template
@@ -108,6 +108,7 @@ export function setupProjectTemplate(
   const claudeMdPath = path.join(projectDir, 'CLAUDE.md');
   try {
     fs.mkdirSync(projectDir, { recursive: true });
+    fs.mkdirSync(path.join(projectDir, 'workspace'), { recursive: true });
     fs.writeFileSync(claudeMdPath, finalContent, 'utf-8');
   } catch (e) {
     console.error(`[template] Failed to write ${claudeMdPath}:`, e);

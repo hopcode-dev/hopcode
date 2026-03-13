@@ -104,14 +104,15 @@ export class ClaudeProcess {
     // If no saved preview URL, scan for existing previewable files
     if (!this.lastPreviewUrl) {
       this.snapshotPreviewFiles();
-      // Find the best existing previewable file (prefer HTML, newest mtime)
+      // Find the best existing previewable file in workspace/ (prefer HTML, newest mtime)
       try {
-        const files = readdirSync(this.projectDir);
+        const wsDir = this.workspaceDir;
+        const files = readdirSync(wsDir);
         const candidates: { name: string; mtime: number; ext: string }[] = [];
         for (const f of files) {
           if (!this.isPreviewable(f)) continue;
           try {
-            const st = statSync(path.join(this.projectDir, f));
+            const st = statSync(path.join(wsDir, f));
             candidates.push({ name: f, mtime: st.mtimeMs, ext: path.extname(f).toLowerCase() });
           } catch {}
         }
@@ -124,9 +125,10 @@ export class ClaudeProcess {
           });
           const best = candidates[0];
           const project = path.basename(this.projectDir);
+          const prefix = wsDir !== this.projectDir ? 'workspace/' : '';
           const url = (best.ext === '.csv' || best.ext === '.md')
-            ? '/serve/' + project + '/' + best.name + '?render=1'
-            : '/serve/' + project + '/' + best.name;
+            ? '/serve/' + project + '/' + prefix + best.name + '?render=1'
+            : '/serve/' + project + '/' + prefix + best.name;
           this.addPreviewUrl(url);
           this.saveState();
         }
@@ -233,6 +235,11 @@ export class ClaudeProcess {
       '--include-partial-messages',
       '--append-system-prompt',
       `You are 小码 (Xiaoma), a friendly action-oriented AI assistant in Hopcode Easy Mode. When users confirm or agree (好的/试试/做吧/go ahead/ok), START DOING THE WORK immediately — write code, create files. Never just say "ok let me know". Be concise — this is a mobile chat UI. Reply in the same language as the user.
+
+## File organization
+- Final output (HTML, CSS, JS, images) → write to workspace/ subdirectory
+- Working files (downloads, temp scripts, node_modules, backend code) → project root
+- Never default to generic names like index.html. Name files to reflect the user's intent (e.g. workspace/weather-dashboard.html, workspace/doctor-consult.html)
 
 ## Multi-user @ mention rules
 Messages are formatted as: [sender → @mentions]: text  or  [sender]: text
@@ -484,7 +491,17 @@ Messages are formatted as: [sender → @mentions]: text  or  [sender]: text
             let detail = '';
             // file_path: "..."
             const fpMatch = buf.match(/"file_path"\s*:\s*"([^"]+)"/);
-            if (fpMatch) detail = fpMatch[1].replace(/^.*\//, '');
+            if (fpMatch) {
+              detail = fpMatch[1].replace(/^.*\//, '');
+              // Track files Claude writes via Write/Edit (only in workspace/)
+              const curTool = this._lastStreamToolName || '';
+              if (curTool === 'Write' || curTool === 'Edit') {
+                const filePath = fpMatch[1];
+                if (filePath.includes('/workspace/') || filePath.startsWith('workspace/')) {
+                  this._writtenFiles.add(path.basename(filePath));
+                }
+              }
+            }
             // command: "..."
             if (!detail) {
               const cmdMatch = buf.match(/"command"\s*:\s*"([^"]{1,60})/);
@@ -523,7 +540,16 @@ Messages are formatted as: [sender → @mentions]: text  or  [sender]: text
             let detail = '';
             if (typeof block.input === 'object' && block.input) {
               const inp = block.input as Record<string, unknown>;
-              if (inp.file_path) detail = String(inp.file_path).replace(/^.*\//, '');
+              if (inp.file_path) {
+                detail = String(inp.file_path).replace(/^.*\//, '');
+                // Track files Claude intentionally writes (Write/Edit tools, only in workspace/)
+                if (toolName === 'Write' || toolName === 'Edit') {
+                  const fp = String(inp.file_path);
+                  if (fp.includes('/workspace/') || fp.startsWith('workspace/')) {
+                    this._writtenFiles.add(path.basename(fp));
+                  }
+                }
+              }
               else if (inp.command) detail = String(inp.command).substring(0, 60);
               else if (inp.pattern) detail = String(inp.pattern).substring(0, 60);
             }
@@ -667,16 +693,25 @@ Messages are formatted as: [sender → @mentions]: text  or  [sender]: text
     return true;
   }
 
-  /** Scan project dir for new/modified previewable files. Returns serve URL of newest changed file, preferring HTML. */
+  /** Get the workspace directory (output dir). Falls back to project root for old projects. */
+  private get workspaceDir(): string {
+    const ws = path.join(this.projectDir, 'workspace');
+    try { statSync(ws); return ws; } catch { return this.projectDir; }
+  }
+
+  /** Scan workspace/ for new/modified previewable files that Claude explicitly wrote. */
   checkForNewPreviewFile(): string | null {
     try {
-      const files = readdirSync(this.projectDir);
-      // Collect all previewable files with mtime
+      const wsDir = this.workspaceDir;
+      const files = readdirSync(wsDir);
+      // Collect previewable files that Claude intentionally wrote (via Write/Edit tools)
       const candidates: { name: string; mtime: number; ext: string }[] = [];
       for (const f of files) {
         if (!this.isPreviewable(f)) continue;
+        // Only auto-preview files Claude explicitly wrote, not downloaded/fetched files
+        if (!this._writtenFiles.has(f)) continue;
         try {
-          const st = statSync(path.join(this.projectDir, f));
+          const st = statSync(path.join(wsDir, f));
           const prevMtime = this._knownPreviewFiles.get(f);
           // Only include new or modified files
           if (prevMtime === undefined || st.mtimeMs > prevMtime) {
@@ -684,8 +719,10 @@ Messages are formatted as: [sender → @mentions]: text  or  [sender]: text
           }
         } catch {}
       }
-      // Update snapshot
+      // Update snapshot (tracks all files, not just written ones)
       this.snapshotPreviewFiles();
+      // Clear written files for next turn
+      this._writtenFiles.clear();
       if (candidates.length === 0) return null;
       // Prefer HTML/HTM, then sort by mtime descending
       candidates.sort((a, b) => {
@@ -696,42 +733,43 @@ Messages are formatted as: [sender → @mentions]: text  or  [sender]: text
       });
       const best = candidates[0];
       const project = path.basename(this.projectDir);
+      // Build serve path: workspace/ prefix only if workspace dir exists
+      const prefix = wsDir !== this.projectDir ? 'workspace/' : '';
       // CSV and MD need a wrapper to render nicely
       if (best.ext === '.csv' || best.ext === '.md') {
-        return '/serve/' + project + '/' + best.name + '?render=1';
+        return '/serve/' + project + '/' + prefix + best.name + '?render=1';
       }
-      return '/serve/' + project + '/' + best.name;
+      return '/serve/' + project + '/' + prefix + best.name;
     } catch { return null; }
   }
 
-  /** Snapshot current previewable files + all files */
+  /** Snapshot current previewable files in workspace/ */
   snapshotPreviewFiles(): void {
     try {
-      const files = readdirSync(this.projectDir);
+      const wsDir = this.workspaceDir;
+      const files = readdirSync(wsDir);
       for (const f of files) {
         this._knownAllFiles.add(f);
         if (!this.isPreviewable(f)) continue;
-        try { this._knownPreviewFiles.set(f, statSync(path.join(this.projectDir, f)).mtimeMs); } catch {}
+        try { this._knownPreviewFiles.set(f, statSync(path.join(wsDir, f)).mtimeMs); } catch {}
       }
     } catch {}
   }
 
-  /** Check for new files that browsers can't preview — suggest HTML conversion */
+  /** Check for new files in workspace/ that browsers can't preview — suggest HTML conversion */
   checkForNonPreviewableFiles(): string | null {
     try {
-      const files = readdirSync(this.projectDir);
+      const wsDir = this.workspaceDir;
+      const files = readdirSync(wsDir);
       for (const f of files) {
         if (this._knownAllFiles.has(f)) continue; // not new
         if (f.startsWith('.')) continue;
         const ext = path.extname(f).toLowerCase();
         if (ClaudeProcess.SUGGEST_PREVIEW_EXTS.has(ext)) {
-          // Found a new non-previewable file — return its name
-          // Update snapshot so we don't suggest again
           this._knownAllFiles.add(f);
           return f;
         }
       }
-      // Update snapshot for all new files
       for (const f of files) this._knownAllFiles.add(f);
     } catch {}
     return null;

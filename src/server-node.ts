@@ -2696,9 +2696,15 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     renderPreviewNav();
   }
 
+  var _deletedPreviews = {};
+  try { _deletedPreviews = JSON.parse(localStorage.getItem('easy_preview_deleted_' + sessionId) || '{}'); } catch(e) {}
+
   function removePreviewUrl(url) {
     var idx = previewUrls.indexOf(url);
     if (idx >= 0) previewUrls.splice(idx, 1);
+    // Remember deletion so server re-push doesn't bring it back
+    _deletedPreviews[url] = 1;
+    try { localStorage.setItem('easy_preview_deleted_' + sessionId, JSON.stringify(_deletedPreviews)); } catch(e) {}
     // If removing the active preview, switch to next available or clear
     if (url === currentPreviewUrl) {
       if (previewUrls.length > 0) {
@@ -2822,6 +2828,8 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 
   function setPreviewUrl(url, forceReload) {
     if (!url) return;
+    // Skip URLs the user has explicitly deleted
+    if (_deletedPreviews[url]) return;
     // Remove duplicate if exists, then add to front (newest first)
     var idx = previewUrls.indexOf(url);
     if (idx >= 0) previewUrls.splice(idx, 1);
@@ -2841,16 +2849,17 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     if (activeTab === 'chat') {
       previewBadge.classList.add('show');
     }
-    // Persist preview URLs
-    try { localStorage.setItem('easy_preview_' + sessionId, JSON.stringify({ urls: previewUrls, current: currentPreviewUrl })); } catch(e) {}
+    // Persist preview URLs (exclude deleted)
+    var _persistUrls = previewUrls.filter(function(u) { return !_deletedPreviews[u]; });
+    try { localStorage.setItem('easy_preview_' + sessionId, JSON.stringify({ urls: _persistUrls, current: currentPreviewUrl })); } catch(e) {}
   }
 
-  // Restore preview URLs from localStorage on load
+  // Restore preview URLs from localStorage on load (filter out deleted ones)
   try {
     var savedPreview = JSON.parse(localStorage.getItem('easy_preview_' + sessionId) || '');
     if (savedPreview && savedPreview.urls && savedPreview.urls.length > 0) {
-      previewUrls = savedPreview.urls;
-      currentPreviewUrl = savedPreview.current || previewUrls[0];
+      previewUrls = savedPreview.urls.filter(function(u) { return !_deletedPreviews[u]; });
+      currentPreviewUrl = (!_deletedPreviews[savedPreview.current] && savedPreview.current) || previewUrls[0] || '';
       hardRefreshPreview(currentPreviewUrl);
       previewFrame.classList.add('loaded');
       document.getElementById('preview-guide').style.display = 'none';
@@ -4358,9 +4367,15 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     return _previewExts.indexOf(ext) >= 0;
   }
   function makeServeUrl(dir, name) {
-    var project = _projectDir ? _projectDir.split('/').pop() : '';
+    if (!_projectDir) return '';
+    var parts = _projectDir.split('/').filter(Boolean);
+    // If _projectDir ends with /workspace, project name is the parent dir
+    var project = (parts[parts.length - 1] === 'workspace' && parts.length >= 2)
+      ? parts[parts.length - 2] : parts[parts.length - 1];
     if (!project) return '';
     var relPath = (dir + '/' + name).replace(_projectDir + '/', '');
+    // If browsing inside workspace/, prefix the serve path with workspace/
+    if (_projectDir.endsWith('/workspace') || _projectDir.endsWith('/workspace/')) relPath = 'workspace/' + relPath;
     var ext = (name.split('.').pop() || '').toLowerCase();
     var url = '/serve/' + project + '/' + relPath;
     if (ext === 'csv' || ext === 'md') url += '?render=1';
@@ -9827,19 +9842,23 @@ const server = http.createServer(async (req, res) => {
       let requestedPath = parsedUrl.searchParams.get('path') || '';
       let dirPath: string;
 
-      // For Easy Mode sessions with file access, resolve within project dir (bypass home sandbox)
+      // For Easy Mode sessions with file access, lock to workspace/ subdir (output only)
       if (isEasyWithAccess && easyProjectDir) {
+        const workspaceDir = path.join(easyProjectDir, 'workspace');
+        // Use workspace/ if it exists, otherwise fall back to project root (old projects)
+        let easyRoot = easyProjectDir;
+        try { fs.statSync(workspaceDir); easyRoot = workspaceDir; } catch {}
         if (!requestedPath) {
-          dirPath = easyProjectDir;
+          dirPath = easyRoot;
         } else {
           const resolved = path.resolve('/', requestedPath);
-          // Allow paths within the project dir; clamp others
-          if (resolved.startsWith(easyProjectDir + '/') || resolved === easyProjectDir) {
+          // Allow paths within the workspace dir; clamp others
+          if (resolved.startsWith(easyRoot + '/') || resolved === easyRoot) {
             dirPath = resolved;
           } else if (isAdminLinuxUser(auth.linuxUser)) {
             dirPath = resolved;
           } else {
-            dirPath = easyProjectDir;
+            dirPath = easyRoot;
           }
         }
       } else if (!requestedPath) {
@@ -10004,8 +10023,20 @@ const server = http.createServer(async (req, res) => {
     }
     const filePath = path.resolve(projectRoot, '.' + filePart);
 
-    // Security: must stay within project directory
-    if (!filePath.startsWith(projectRoot + '/') && filePath !== projectRoot) {
+    // Security: if workspace/ exists, restrict serving to workspace/ only
+    // Prevents path traversal from workspace/ HTML accessing project root files
+    const wsExists = (() => { try { fs.statSync(path.join(projectRoot, 'workspace')); return true; } catch { return false; } })();
+    const serveRoot = wsExists ? path.join(projectRoot, 'workspace') : projectRoot;
+    if (!filePath.startsWith(serveRoot + '/') && filePath !== serveRoot) {
+      // If file not in workspace/ but would exist there, redirect with workspace/ prefix
+      if (wsExists && filePart && !filePart.startsWith('/workspace/')) {
+        const wsFilePath = path.join(projectRoot, 'workspace', '.' + filePart);
+        try {
+          fs.accessSync(wsFilePath);
+          const newUrl = '/serve/' + encodeURIComponent(project) + '/workspace' + filePart + (parsedUrl.search || '');
+          res.writeHead(302, { 'Location': newUrl }); res.end(); return;
+        } catch {}
+      }
       res.writeHead(403); res.end('Forbidden'); return;
     }
 
@@ -10526,10 +10557,14 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
   const isOwner = connUser === info.owner;
   const fileAccessUsers = info._fileAccessUsers || new Set<string>();
   const hasFileAccess = isOwner || fileAccessUsers.has(connUser);
+  // Expose workspace/ as the visible project dir (locks file panel to output dir)
+  const wsDir = path.join(cp.projectDir, 'workspace');
+  let visibleDir = cp.projectDir;
+  try { fs.statSync(wsDir); visibleDir = wsDir; } catch {}
   clientWs.send(JSON.stringify({
     type: 'session_info',
     owner: info.owner,
-    projectDir: cp.projectDir,
+    projectDir: visibleDir,
     isOwner,
     hasFileAccess,
   }));

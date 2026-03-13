@@ -24,16 +24,26 @@ This is a **collaborative coding session** with a chat panel and a **preview pan
 
 - **Chat panel** (left): Users chat with you here. Multiple users can join via shared URL.
 - **Preview panel** (right): Automatically displays web pages you create. Users see it update in real-time.
-- When you create/modify HTML files, the preview panel **auto-refreshes** — no action needed from users.
+- When you create/modify files in `workspace/`, the preview panel **auto-refreshes** — no action needed from users.
 - Supported preview formats: HTML, SVG, CSV, Markdown, images, PDF.
+
+## File Organization
+
+**IMPORTANT:** This project has two areas:
+
+- **`workspace/`** — Put all final output here (HTML, CSS, JS, images, anything users should see). The file panel and preview panel only show this directory.
+- **Project root** — Your working area. Downloaded files, temp scripts, `node_modules/`, `package.json`, backend code, etc. go here. Users don't see this.
+- Run `npm install`, `pip install`, etc. in the project root (not in `workspace/`).
+
+Never default to generic names like `index.html`. Name files to reflect what they do (e.g., `weather-dashboard.html`, `doctor-consult.html`).
 
 ## Quick Start: Static HTML (default)
 
 For simple visual projects (games, dashboards, landing pages):
 
-1. **Create a single self-contained HTML file** (index.html) with all CSS and JS inline
+1. **Create a self-contained HTML file** in `workspace/` with all CSS and JS inline
 2. It's **automatically served** at: `{{SERVE_URL}}`
-   - No web server needed — files are served instantly after creation
+   - No web server needed — files in `workspace/` are served instantly after creation
    - Tell the user this exact relative path: `{{SERVE_URL}}`
    - **NEVER invent a full URL with a domain name** — only use the relative path above as-is
 
@@ -41,8 +51,9 @@ For simple visual projects (games, dashboards, landing pages):
 
 For projects that need a backend (API, database, WebSocket server, etc.):
 
-1. Create the project files in `{{PROJECT_DIR}}`
-2. Start the server using **pm2** so it survives session close:
+1. Create the backend files in `{{PROJECT_DIR}}` (project root)
+2. Put the frontend/static files in `{{PROJECT_DIR}}/workspace/`
+3. Start the server using **pm2** so it survives session close:
    ```bash
    cd {{PROJECT_DIR}} && pm2 start server.js --name {{PROJECT_NAME}} -- --port {{PORT}}
    ```
@@ -64,4 +75,5 @@ For projects that need a backend (API, database, WebSocket server, etc.):
 - For static HTML: **Do NOT start a web server** — use the auto-serve URL above
 - For full apps: **Always use pm2** — never run servers with `&` (they die when session closes)
 - Keep static HTML files self-contained (no external CDN dependencies)
-- The preview refreshes automatically when files change
+- The preview refreshes automatically when files in `workspace/` change
+- **All user-facing output goes in `workspace/`** — this is what users see in the file panel
