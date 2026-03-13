@@ -28,9 +28,24 @@ export class ClaudeProcess {
   private _lastStreamToolName = '';
   private _toolJsonBuf = '';
   private _knownPreviewFiles = new Map<string, number>(); // name -> mtime
+  private _knownAllFiles = new Set<string>(); // track all files to detect new ones
   private static PREVIEW_EXTS = new Set(['.html', '.htm', '.svg', '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf']);
+  private static PREVIEW_EXCLUDE = new Set(['claude.md', 'readme.md', 'license.md', 'changelog.md', 'contributing.md', 'code_of_conduct.md']);
+  // File types that are useful but browsers can't render — worth suggesting HTML preview
+  private static SUGGEST_PREVIEW_EXTS = new Set([
+    '.py', '.js', '.ts', '.tsx', '.jsx', '.json', '.yaml', '.yml', '.toml',
+    '.xml', '.sql', '.sh', '.bash', '.zsh', '.go', '.rs', '.java', '.kt',
+    '.c', '.cpp', '.h', '.rb', '.php', '.swift', '.r', '.lua', '.dart',
+    '.css', '.scss', '.less', '.txt', '.log', '.env', '.ini', '.cfg',
+    '.xlsx', '.xls', '.docx', '.doc', '.pptx', '.ppt',
+  ]);
   lastPreviewUrl: string | null = null;
+  previewUrls: string[] = [];  // all preview URLs in order (newest first)
   private _pendingContext: string[] = [];  // skipped messages to prepend on next Claude call
+  private _messageQueue: { text: string; sender?: string; mentions?: string[]; participantCount: number }[] = [];
+  private _idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private _idleNotified = false;
+  private static IDLE_TIMEOUT = 3 * 60 * 1000; // 3 min without output = stuck
 
   private stateFile: string;
 
@@ -73,7 +88,18 @@ export class ClaudeProcess {
         }
       }
       if (data.lastPreviewUrl) this.lastPreviewUrl = data.lastPreviewUrl;
+      if (Array.isArray(data.previewUrls)) this.previewUrls = data.previewUrls;
     } catch {}
+
+    // Clean out any saved preview URLs pointing to excluded files (e.g. CLAUDE.md)
+    const isExcludedUrl = (url: string) => {
+      const filename = url.split('/').pop()?.split('?')[0] || '';
+      return ClaudeProcess.PREVIEW_EXCLUDE.has(filename.toLowerCase()) || filename.startsWith('.');
+    };
+    this.previewUrls = this.previewUrls.filter(u => !isExcludedUrl(u));
+    if (this.lastPreviewUrl && isExcludedUrl(this.lastPreviewUrl)) {
+      this.lastPreviewUrl = this.previewUrls[0] || null;
+    }
 
     // If no saved preview URL, scan for existing previewable files
     if (!this.lastPreviewUrl) {
@@ -98,15 +124,22 @@ export class ClaudeProcess {
           });
           const best = candidates[0];
           const project = path.basename(this.projectDir);
-          if (best.ext === '.csv' || best.ext === '.md') {
-            this.lastPreviewUrl = '/serve/' + project + '/' + best.name + '?render=1';
-          } else {
-            this.lastPreviewUrl = '/serve/' + project + '/' + best.name;
-          }
+          const url = (best.ext === '.csv' || best.ext === '.md')
+            ? '/serve/' + project + '/' + best.name + '?render=1'
+            : '/serve/' + project + '/' + best.name;
+          this.addPreviewUrl(url);
           this.saveState();
         }
       } catch {}
     }
+  }
+
+  private addPreviewUrl(url: string): void {
+    const idx = this.previewUrls.indexOf(url);
+    if (idx >= 0) this.previewUrls.splice(idx, 1);
+    this.previewUrls.unshift(url);
+    if (this.previewUrls.length > 20) this.previewUrls.length = 20;
+    this.lastPreviewUrl = url;
   }
 
   private saveState(): void {
@@ -115,19 +148,13 @@ export class ClaudeProcess {
         claudeSessionId: this.claudeSessionId,
         history: this.history,
         lastPreviewUrl: this.lastPreviewUrl,
+        previewUrls: this.previewUrls,
       }), 'utf-8');
     } catch {}
   }
 
   sendMessage(text: string, sender?: string, mentions?: string[], participantCount: number = 1): void {
     if (this.disposed) return;
-
-    // Cancel any active child before starting new one
-    if (this.activeChild) {
-      const old = this.activeChild;
-      this.activeChild = null;  // Detach so its close event won't send 'ready'
-      try { old.kill('SIGKILL'); } catch {}
-    }
 
     // Record user message in history and persist
     const userEntry: HistoryEntry = { role: 'user', text, id: this.nextMsgId++, sender };
@@ -158,6 +185,19 @@ export class ClaudeProcess {
       // followingAssistant && !mentionsOther → treat as reply to 小码, invoke Claude
     }
 
+    // If Claude is busy, queue the message instead of killing the active process
+    if (this.activeChild) {
+      this._messageQueue.push({ text, sender, mentions, participantCount });
+      console.log(`[claude-process] ${this.sessionId} queued message (${this._messageQueue.length} in queue) while claude is busy`);
+      this.broadcast({ type: 'state', state: 'queued' });
+      return;
+    }
+
+    this._spawnClaude(text, sender, mentions, participantCount);
+  }
+
+  /** Internal: spawn a claude -p subprocess with the given prompt */
+  private _spawnClaude(text: string, sender?: string, mentions?: string[], participantCount: number = 1): void {
     // Notify client: thinking state
     this.broadcast({ type: 'state', state: 'thinking' });
 
@@ -223,6 +263,10 @@ Messages are formatted as: [sender → @mentions]: text  or  [sender]: text
     this.activeChild = child;
     console.log(`[claude-process] ${this.sessionId} spawned pid=${child.pid}`);
 
+    // Idle detection: notify if no output for IDLE_TIMEOUT
+    this._idleNotified = false;
+    this._resetIdleTimer(child);
+
     let stdoutBuffer = '';
     let fullResponseText = '';
     let lastToolName = '';
@@ -232,6 +276,7 @@ Messages are formatted as: [sender → @mentions]: text  or  [sender]: text
     let streamingIsThinking = false;
 
     child.stdout?.on('data', (chunk: Buffer) => {
+      this._resetIdleTimer(child);
       stdoutBuffer += chunk.toString();
       // Process complete lines (NDJSON)
       const lines = stdoutBuffer.split('\n');
@@ -268,6 +313,8 @@ Messages are formatted as: [sender → @mentions]: text  or  [sender]: text
     });
 
     child.on('close', (code) => {
+      // Clear idle timer
+      if (this._idleTimer) { clearTimeout(this._idleTimer); this._idleTimer = null; }
       // If this child was replaced by a newer one, ignore its close event
       const isCurrentChild = this.activeChild === child;
       if (isCurrentChild) this.activeChild = null;
@@ -307,15 +354,51 @@ Messages are formatted as: [sender → @mentions]: text  or  [sender]: text
       if (isCurrentChild) {
         const previewUrl = this.checkForNewPreviewFile();
         if (previewUrl) {
-          this.lastPreviewUrl = previewUrl;
+          this.addPreviewUrl(previewUrl);
           this.saveState();
           this.broadcast({ type: 'preview_hint', url: previewUrl });
         }
-        this.broadcast({ type: 'state', state: 'ready' });
+
+        // If no previewable file found, check for non-previewable files worth suggesting
+        if (!previewUrl) {
+          const suggestFile = this.checkForNonPreviewableFiles();
+          if (suggestFile) {
+            this.broadcast({ type: 'preview_suggest', filename: suggestFile });
+          }
+        }
+
+        // Drain message queue: combine all queued messages and send to Claude
+        if (this._messageQueue.length > 0) {
+          const queued = this._messageQueue.splice(0);
+          console.log(`[claude-process] ${this.sessionId} draining ${queued.length} queued messages`);
+
+          let combinedText: string;
+          if (queued.length === 1) {
+            // Single queued message — send as-is
+            const q = queued[0];
+            combinedText = q.sender ? `[${q.sender}]: ${q.text}` : q.text;
+          } else {
+            // Multiple queued messages — format with order and dedup instructions
+            const lines: string[] = [];
+            lines.push(`[${queued.length} messages arrived while you were working. Read all in order (#1 earliest → #${queued.length} latest), then decide how to proceed. If the requests are clear and compatible, go ahead and execute. If there are contradictions, ambiguity, or you're unsure what the group actually wants, ask the group to clarify BEFORE doing any work.]`);
+            for (let i = 0; i < queued.length; i++) {
+              const q = queued[i];
+              const prefix = q.sender ? `[${q.sender}]` : '';
+              lines.push(`#${i + 1} ${prefix}: ${q.text}`);
+            }
+            combinedText = lines.join('\n');
+          }
+
+          const lastMsg = queued[queued.length - 1];
+          this._spawnClaude(combinedText, undefined, lastMsg.mentions, lastMsg.participantCount);
+        } else {
+          this.broadcast({ type: 'state', state: 'ready' });
+        }
       }
 
-      if (code !== 0 && code !== null) {
-        console.error(`[claude-process] ${this.sessionId} exited with code ${code}`);
+      if (isCurrentChild && code !== 0 && code !== null && !fullResponseText) {
+        console.error(`[claude-process] ${this.sessionId} crashed with code ${code}`);
+        this.broadcast({ type: 'error', message: `Claude exited unexpectedly (code ${code}). You can retry your message.` });
       }
     });
 
@@ -515,6 +598,12 @@ Messages are formatted as: [sender → @mentions]: text  or  [sender]: text
   }
 
   cancel(): void {
+    // Clear queued messages — user wants to stop everything
+    if (this._messageQueue.length > 0) {
+      console.log(`[claude-process] ${this.sessionId} cancel: clearing ${this._messageQueue.length} queued messages`);
+      this._messageQueue = [];
+    }
+    if (this._idleTimer) { clearTimeout(this._idleTimer); this._idleTimer = null; }
     if (this.activeChild) {
       // Send SIGINT to gracefully stop Claude
       this.activeChild.kill('SIGINT');
@@ -526,6 +615,33 @@ Messages are formatted as: [sender → @mentions]: text  or  [sender]: text
         }
       }, 3000);
     }
+  }
+
+  /** Retry: find last user message in history and re-send to Claude */
+  retry(): void {
+    if (this.activeChild) return; // still running, nothing to retry
+    // Find the last user message
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      if (this.history[i].role === 'user') {
+        const msg = this.history[i];
+        console.log(`[claude-process] ${this.sessionId} retrying last user message: ${msg.text.substring(0, 80)}`);
+        this._spawnClaude(msg.text, msg.sender);
+        return;
+      }
+    }
+  }
+
+  /** Reset idle timer — called on spawn and on every stdout chunk */
+  private _resetIdleTimer(child: ChildProcess): void {
+    if (this._idleTimer) clearTimeout(this._idleTimer);
+    this._idleNotified = false;
+    this._idleTimer = setTimeout(() => {
+      if (this.activeChild === child) {
+        console.warn(`[claude-process] ${this.sessionId} pid=${child.pid} idle for ${ClaudeProcess.IDLE_TIMEOUT / 1000}s, notifying users`);
+        this._idleNotified = true;
+        this.broadcast({ type: 'error', message: 'Claude has been idle — it may be stuck.' });
+      }
+    }, ClaudeProcess.IDLE_TIMEOUT);
   }
 
   getHistory(): HistoryEntry[] {
@@ -543,7 +659,12 @@ Messages are formatted as: [sender → @mentions]: text  or  [sender]: text
 
   private isPreviewable(name: string): boolean {
     const ext = path.extname(name).toLowerCase();
-    return ClaudeProcess.PREVIEW_EXTS.has(ext);
+    if (!ClaudeProcess.PREVIEW_EXTS.has(ext)) return false;
+    // Exclude system/config markdown files
+    if (ClaudeProcess.PREVIEW_EXCLUDE.has(name.toLowerCase())) return false;
+    // Also exclude dotfiles like .claude.md
+    if (name.startsWith('.')) return false;
+    return true;
   }
 
   /** Scan project dir for new/modified previewable files. Returns serve URL of newest changed file, preferring HTML. */
@@ -583,14 +704,36 @@ Messages are formatted as: [sender → @mentions]: text  or  [sender]: text
     } catch { return null; }
   }
 
-  /** Snapshot current previewable files */
+  /** Snapshot current previewable files + all files */
   snapshotPreviewFiles(): void {
     try {
       const files = readdirSync(this.projectDir);
       for (const f of files) {
+        this._knownAllFiles.add(f);
         if (!this.isPreviewable(f)) continue;
         try { this._knownPreviewFiles.set(f, statSync(path.join(this.projectDir, f)).mtimeMs); } catch {}
       }
     } catch {}
+  }
+
+  /** Check for new files that browsers can't preview — suggest HTML conversion */
+  checkForNonPreviewableFiles(): string | null {
+    try {
+      const files = readdirSync(this.projectDir);
+      for (const f of files) {
+        if (this._knownAllFiles.has(f)) continue; // not new
+        if (f.startsWith('.')) continue;
+        const ext = path.extname(f).toLowerCase();
+        if (ClaudeProcess.SUGGEST_PREVIEW_EXTS.has(ext)) {
+          // Found a new non-previewable file — return its name
+          // Update snapshot so we don't suggest again
+          this._knownAllFiles.add(f);
+          return f;
+        }
+      }
+      // Update snapshot for all new files
+      for (const f of files) this._knownAllFiles.add(f);
+    } catch {}
+    return null;
   }
 }

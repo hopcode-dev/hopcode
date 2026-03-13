@@ -11,6 +11,7 @@ export type EasyState =
   | 'thinking'
   | 'responding'
   | 'tool_running'
+  | 'queued'
   | 'exited'
   | 'error';
 
@@ -23,12 +24,19 @@ export type EasyServerMessage =
   | { type: 'user_message'; id: number; sender: string; text: string }
   | { type: 'tool'; name: string; detail: string; status: 'running' | 'done' }
   | { type: 'preview_hint'; url: string }
-  | { type: 'participants'; users: string[] }
+  | { type: 'preview_suggest'; filename: string }
+  | { type: 'participants'; users: { name: string; online: boolean }[] }
   | { type: 'history'; messages: { role: 'user' | 'assistant'; text: string; id: number; sender?: string }[] }
+  | { type: 'session_info'; owner: string; projectDir: string; isOwner: boolean; hasFileAccess: boolean }
+  | { type: 'file_access_request'; user: string }
+  | { type: 'file_access_granted'; user: string }
   | { type: 'error'; message: string };
 
 // --- Client → Server Messages ---
 
 export type EasyClientMessage =
   | { type: 'send'; text: string; mentions?: string[] }
-  | { type: 'cancel' };
+  | { type: 'cancel' }
+  | { type: 'retry' }
+  | { type: 'request_file_access' }
+  | { type: 'grant_file_access'; user: string };

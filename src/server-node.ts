@@ -36,7 +36,7 @@ import {
 import { ClaudeProcess } from './easymode/claude-process.js';
 import type { EasyClientMessage, EasyServerMessage } from './easymode/protocol.js';
 import { setupProjectTemplate } from './templates/index.js';
-import { getI18nScript } from './i18n.js';
+import { getI18nScript, t } from './i18n.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -54,10 +54,17 @@ const LEGACY_AUTH_TOKEN = 'hopcode_auth_' + Buffer.from(PASSWORD).toString('base
 interface UserConfig {
   password: string;
   linuxUser: string;
+  disabled?: boolean;
 }
 
 let usersConfig: Record<string, UserConfig> = {};
 let isMultiUser = false;
+
+// System administrators — full access to all sessions, recordings, user management
+const ADMIN_USERS = new Set(['root', 'jack']);
+function isAdminUser(username?: string): boolean {
+  return !!username && ADMIN_USERS.has(username);
+}
 
 function loadUsersConfig(): void {
   const usersPath = path.join(__dirname, '..', 'users.json');
@@ -75,6 +82,15 @@ function loadUsersConfig(): void {
   }
 }
 loadUsersConfig();
+
+function saveUsersConfig(): void {
+  const usersPath = path.join(__dirname, '..', 'users.json');
+  try {
+    fs.writeFileSync(usersPath, JSON.stringify(usersConfig, null, 2) + '\n', 'utf-8');
+  } catch (e) {
+    console.error('[auth] Failed to save users.json:', (e as Error).message);
+  }
+}
 
 function makeAuthToken(username: string): string {
   const hmac = createHmac('sha256', PASSWORD!).update(username).digest('hex');
@@ -95,6 +111,25 @@ function verifyAuthToken(token: string): string | null {
   return diff === 0 ? username : null;
 }
 
+// --- Guest Token (stateless HMAC, 48h validity) ---
+
+function makeGuestToken(sessionId: string, expiresAt: number): string {
+  const payload = `guest:${sessionId}:${expiresAt}`;
+  return createHmac('sha256', PASSWORD!).update(payload).digest('hex');
+}
+
+function verifyGuestToken(sessionId: string, token: string, expires: string): boolean {
+  const expiresAt = parseInt(expires, 10);
+  if (isNaN(expiresAt) || Date.now() > expiresAt) return false;
+  const expected = makeGuestToken(sessionId, expiresAt);
+  if (token.length !== expected.length) return false;
+  let diff = 0;
+  for (let i = 0; i < token.length; i++) {
+    diff |= token.charCodeAt(i) ^ expected.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
 interface AuthInfo {
   authenticated: boolean;
   username: string;
@@ -108,7 +143,7 @@ function getAuthInfo(req: http.IncomingMessage): AuthInfo {
   if (isMultiUser) {
     // Multi-user: verify HMAC token → extract username
     const username = verifyAuthToken(authCookie);
-    if (username && usersConfig[username]) {
+    if (username && usersConfig[username] && !usersConfig[username]!.disabled) {
       return { authenticated: true, username, linuxUser: usersConfig[username]!.linuxUser };
     }
     return { authenticated: false, username: '', linuxUser: '' };
@@ -251,7 +286,7 @@ async function ptyFetch(urlPath: string, options?: RequestInit): Promise<Respons
 const MAX_SESSIONS_PER_USER = 3;
 
 async function checkSessionLimit(username: string): Promise<boolean> {
-  if (username === 'root') return true;
+  if (isAdminUser(username)) return true;
   try {
     const resp = await ptyFetch(`/sessions?owner=${encodeURIComponent(username)}`);
     if (resp.ok) {
@@ -304,10 +339,23 @@ async function autoRename(dir: string, baseName: string, isDir: boolean): Promis
   return `${stem} (${Date.now()})${ext}`;
 }
 
+// Map linuxUser -> Hopcode username for admin checks
+function isAdminLinuxUser(linuxUser?: string): boolean {
+  if (!linuxUser) return false;
+  if (linuxUser === 'root') return true;
+  // Check if any admin user maps to this linuxUser
+  for (const [username, config] of Object.entries(usersConfig)) {
+    if (config.linuxUser === linuxUser && ADMIN_USERS.has(username)) return true;
+  }
+  return false;
+}
+
 function resolveSafePath(requestedPath: string, linuxUser?: string): string {
   const resolved = path.resolve('/', requestedPath);
-  // Non-root users are sandboxed to their home directory
-  if (linuxUser && linuxUser !== 'root') {
+  // Admin users have full filesystem access
+  if (isAdminLinuxUser(linuxUser)) return resolved;
+  // Non-admin users are sandboxed to their home directory
+  if (linuxUser) {
     const home = getUserHome(linuxUser);
     if (!resolved.startsWith(home + '/') && resolved !== home) {
       return home;
@@ -869,7 +917,7 @@ function getLoginHtml(): string {
 
 // Session chooser HTML page - generated dynamically with server-side rendering
 async function buildSessionsHtml(username?: string): Promise<string> {
-  const isRoot = username === 'root';
+  const isRoot = isAdminUser(username);
   let sessionList: { id: string; name: string; owner: string; createdAt: number; lastActivity: number; clients: number; mode?: string; project?: string; sharedWith?: string[]; onlineUsers?: string[] }[] = [];
   try {
     // Root sees all sessions; other users see only their own
@@ -921,12 +969,14 @@ async function buildSessionsHtml(username?: string): Promise<string> {
       const extra = allMembers.length > 3 ? '<span class="collab-extra">+' + (allMembers.length - 3) + '</span>' : '';
       collabBadge = '<div class="collab-badge">' + avatars + extra + '</div>';
     }
+    const shareBtn = s.mode === 'easy' ? `<button class="share-btn" data-session-id="${esc(s.id)}" title="Share" onclick="event.preventDefault();event.stopPropagation();showShareModal('${esc(s.id)}','${esc(s.name)}')">&#x1F517;</button>` : '';
     return `<a class="session-card" href="${href}" data-session-id="${esc(s.id)}">
       <div class="card-bar ${barClass}"></div>
       <div class="session-info">
         <div class="session-name" data-session="${esc(s.id)}"><span class="session-name-text">${esc(s.name)}</span></div>
         <div class="session-meta">${fmtAge(s.lastActivity)}${collabBadge}</div>
       </div>
+      ${shareBtn}
       <button class="rename-btn" data-i18n-title="portal.rename_title" title="Rename session">&#9998;</button>
       <button class="delete-btn" data-i18n-title="portal.delete_title" title="Delete session">&times;</button>
     </a>`;
@@ -944,8 +994,10 @@ async function buildSessionsHtml(username?: string): Promise<string> {
       groups.set(s.owner, arr);
     }
     const sortedOwners = Array.from(groups.keys()).sort((a, b) => {
-      if (a === 'root') return -1;
-      if (b === 'root') return 1;
+      // Current admin user's sessions first, then other admins, then alphabetical
+      if (a === username) return -1;
+      if (b === username) return 1;
+      if (isAdminUser(a) !== isAdminUser(b)) return isAdminUser(a) ? -1 : 1;
       return a.localeCompare(b);
     });
     for (const owner of sortedOwners) {
@@ -996,6 +1048,8 @@ async function buildSessionsHtml(username?: string): Promise<string> {
     .header-brand h1 { color: #4ade80; font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
     .header-meta { display: flex; align-items: center; gap: 8px; }
     .user-info { color: #6b7280; font-size: 12px; }
+    .admin-link { color: #60a5fa; font-size: 12px; text-decoration: none; padding: 4px 8px; border-radius: 6px; transition: all 0.15s; }
+    .admin-link:hover { color: #93c5fd; background: rgba(96,165,250,0.1); }
     .logout-btn { color: #6b7280; font-size: 12px; text-decoration: none; padding: 4px 8px; border-radius: 6px; transition: all 0.15s; }
     .logout-btn:hover { color: #f87171; background: rgba(248,113,113,0.1); }
     .header-row2 { display: flex; align-items: center; justify-content: center; gap: 8px; }
@@ -1041,12 +1095,14 @@ async function buildSessionsHtml(username?: string): Promise<string> {
     .collab-extra { font-size:10px; color:#9ca3af; margin-left:3px; }
 
     /* Card action buttons */
-    .rename-btn, .delete-btn {
+    .rename-btn, .delete-btn, .share-btn {
       background: none; border: none; color: #6b7280; line-height: 1;
       cursor: pointer; flex-shrink: 0;
       transition: opacity 0.15s, color 0.15s;
       -webkit-tap-highlight-color: transparent;
     }
+    .share-btn { font-size: 14px; padding: 14px 4px 14px 8px; }
+    .share-btn:hover { color: #60a5fa; }
     .rename-btn { font-size: 16px; padding: 14px 4px 14px 8px; }
     .delete-btn { font-size: 20px; padding: 14px 14px 14px 4px; }
     .rename-btn:hover { color: #4ade80; }
@@ -1106,6 +1162,13 @@ async function buildSessionsHtml(username?: string): Promise<string> {
     .btn-cancel:hover { background: #4b5563; }
     .btn-delete { background: #dc2626; color: #fff; }
     .btn-delete:hover { background: #ef4444; }
+    .toast-msg {
+      position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%) translateY(20px);
+      background: #1f2937; color: #e5e7eb; padding: 10px 24px; border-radius: 20px;
+      font-size: 14px; opacity: 0; transition: opacity 0.3s, transform 0.3s;
+      z-index: 2000; pointer-events: none; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+    .toast-msg.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
     /* Swipe-to-delete (mobile) */
     .session-card.swiping { transition: none; }
@@ -1140,6 +1203,7 @@ async function buildSessionsHtml(username?: string): Promise<string> {
         </div>
         <div class="header-meta">
           ${isMultiUser && username ? `<span class="user-info">${esc(username)}</span>` : ''}
+          ${isRoot ? `<a class="admin-link" href="/terminal/admin" data-i18n="portal.admin">Admin</a>` : ''}
           <button class="lang-btn" id="lang-toggle" onclick="_setLang(_lang==='en'?'zh':'en')">EN/中</button>
           <a class="logout-btn" href="/terminal/logout" data-i18n="portal.btn_logout">Logout</a>
         </div>
@@ -1243,9 +1307,21 @@ async function buildSessionsHtml(username?: string): Promise<string> {
             cardEl.style.opacity = '0';
             cardEl.style.transform = 'translateX(40px)';
             setTimeout(function() { cardEl.remove(); }, 200);
+            if (d.left) {
+              showToast(_t('portal.left_session'));
+            }
           }
         }).catch(function() { overlay.remove(); });
       };
+    }
+
+    function showToast(msg) {
+      var toast = document.createElement('div');
+      toast.className = 'toast-msg';
+      toast.textContent = msg;
+      document.body.appendChild(toast);
+      setTimeout(function() { toast.classList.add('show'); }, 10);
+      setTimeout(function() { toast.classList.remove('show'); setTimeout(function() { toast.remove(); }, 300); }, 2500);
     }
 
     // --- Group collapse ---
@@ -1339,6 +1415,71 @@ async function buildSessionsHtml(username?: string): Promise<string> {
       });
     });
   })();
+
+  // --- QR Share Modal ---
+  var _qrModal = null;
+  function showShareModal(sessionId, sessionName) {
+    // Create modal if not exists
+    if (!_qrModal) {
+      _qrModal = document.createElement('div');
+      _qrModal.id = 'share-modal';
+      _qrModal.innerHTML = '<div class="share-backdrop"></div><div class="share-box"><div class="share-close">&times;</div><div class="share-title"></div><div class="share-qr" id="share-qr"></div><div class="share-desc" data-i18n="portal.share_scan"></div><div class="share-actions"><button class="share-copy-btn" id="share-copy-btn" data-i18n="portal.share_copy">Copy Link</button></div></div>';
+      document.body.appendChild(_qrModal);
+      // Add styles
+      var st = document.createElement('style');
+      st.textContent = '#share-modal{position:fixed;inset:0;z-index:3000;display:flex;align-items:center;justify-content:center}.share-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.6)}.share-box{position:relative;background:#1f2937;border:1px solid #374151;border-radius:16px;padding:24px;max-width:340px;width:calc(100% - 40px);text-align:center;z-index:1}.share-close{position:absolute;top:10px;right:14px;font-size:22px;color:#6b7280;cursor:pointer}.share-close:hover{color:#f3f4f6}.share-title{font-size:16px;font-weight:600;color:#f3f4f6;margin-bottom:16px}.share-qr{display:flex;justify-content:center;margin-bottom:12px}.share-qr canvas,.share-qr img{border-radius:8px}.share-desc{font-size:13px;color:#9ca3af;margin-bottom:16px}.share-actions{display:flex;gap:10px;justify-content:center}.share-copy-btn{padding:10px 24px;background:#3b82f6;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit}.share-copy-btn:hover{background:#2563eb}.share-copy-btn.copied{background:#22c55e}';
+      document.head.appendChild(st);
+      _qrModal.querySelector('.share-backdrop').addEventListener('click', function() { _qrModal.style.display = 'none'; });
+      _qrModal.querySelector('.share-close').addEventListener('click', function() { _qrModal.style.display = 'none'; });
+    }
+    _qrModal.style.display = 'flex';
+    _qrModal.querySelector('.share-title').textContent = _t('portal.share') + ': ' + sessionName;
+    var qrContainer = document.getElementById('share-qr');
+    qrContainer.innerHTML = '<div style="color:#6b7280;padding:20px;">Loading...</div>';
+
+    // Fetch guest link
+    fetch('/terminal/api/guest-link', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ sessionId: sessionId })
+    }).then(function(r) { return r.json(); }).then(function(data) {
+      if (!data.url) { qrContainer.innerHTML = '<div style="color:#f87171">Error: ' + (data.error || 'Unknown') + '</div>'; return; }
+      var shareUrl = data.url;
+
+      // Load qrcode-generator from CDN
+      if (window.qrcode) {
+        renderQR(shareUrl);
+      } else {
+        var sc = document.createElement('script');
+        sc.src = 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js';
+        sc.onload = function() { renderQR(shareUrl); };
+        sc.onerror = function() { qrContainer.innerHTML = '<div style="color:#f87171">Failed to load QR library</div>'; };
+        document.head.appendChild(sc);
+      }
+
+      function renderQR(url) {
+        var qr = qrcode(0, 'M');
+        qr.addData(url);
+        qr.make();
+        qrContainer.innerHTML = qr.createSvgTag(5, 8);
+        var svg = qrContainer.querySelector('svg');
+        if (svg) { svg.style.borderRadius = '8px'; svg.style.background = '#fff'; svg.style.padding = '8px'; }
+      }
+
+      // Copy button
+      var copyBtn = document.getElementById('share-copy-btn');
+      copyBtn.onclick = function() {
+        navigator.clipboard.writeText(shareUrl).then(function() {
+          copyBtn.textContent = _t('portal.share_copied');
+          copyBtn.classList.add('copied');
+          setTimeout(function() { copyBtn.textContent = _t('portal.share_copy'); copyBtn.classList.remove('copied'); }, 2000);
+        });
+      };
+    }).catch(function(err) {
+      qrContainer.innerHTML = '<div style="color:#f87171">Error: ' + err.message + '</div>';
+    });
+  }
   </script>
   <script>if('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js');</script>
 </body>
@@ -1347,7 +1488,23 @@ async function buildSessionsHtml(username?: string): Promise<string> {
 }
 
 // Easy Mode HTML page — terminal-free chat UI for beginners
-function getEasyModeHtml(auth: AuthInfo): string {
+// Guest error page
+function getGuestErrorHtml(message: string): string {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Hopcode</title>
+<script>${getI18nScript()}</script>
+<style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f5f5f7;color:#1d1d1f}.card{background:#fff;border-radius:16px;padding:40px;max-width:400px;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.08)}h2{margin:0 0 12px;font-size:20px}p{margin:0 0 24px;color:#86868b;font-size:15px;line-height:1.5}a{display:inline-block;padding:10px 24px;background:#007aff;color:#fff;border-radius:8px;text-decoration:none;font-size:15px}a:hover{background:#0066d6}</style></head>
+<body><div class="card"><h2>${message}</h2><p></p><a href="/">${t('en', 'login.btn')}</a></div></body></html>`;
+}
+
+interface GuestOptions {
+  guestMode?: boolean;
+  guestSessionId?: string;
+  guestToken?: string;
+  guestExpires?: string;
+}
+
+function getEasyModeHtml(auth: AuthInfo, guestOpts?: GuestOptions): string {
+  const isGuest = guestOpts?.guestMode || false;
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -1392,6 +1549,23 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 .menu-item.active .mi-icon { color:#34c759; }
 .menu-divider { height:1px; background:#e5e5ea; margin:4px 16px; }
 
+/* Project/session list in menu */
+.menu-proj-list { max-height:240px; overflow-y:auto; padding:2px 0; }
+.menu-proj-item { display:flex; align-items:center; gap:8px; padding:10px 20px; cursor:pointer; font-size:14px; color:#1d1d1f; text-decoration:none; position:relative; }
+.menu-proj-item:active { background:rgba(0,0,0,0.04); }
+.menu-proj-item.current { color:#007aff; font-weight:600; }
+.menu-proj-dot { width:6px; height:6px; border-radius:50%; background:#d2d2d7; flex-shrink:0; }
+.menu-proj-dot.active { background:#34c759; }
+.menu-proj-dot.current { background:#007aff; }
+.menu-proj-name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.menu-proj-actions { display:none; gap:4px; flex-shrink:0; }
+.menu-proj-item:hover .menu-proj-actions { display:flex; }
+@media (pointer:coarse) { .menu-proj-actions { display:flex; } }
+.menu-proj-act { background:none; border:none; color:#86868b; font-size:13px; cursor:pointer; padding:4px 6px; border-radius:4px; line-height:1; }
+.menu-proj-act:active { background:rgba(0,0,0,0.06); }
+.menu-proj-act.delete { color:#ff3b30; }
+.menu-proj-rename-input { background:#f0f0f2; border:1.5px solid #007aff; border-radius:6px; color:#1d1d1f; font-size:14px; padding:4px 8px; flex:1; outline:none; font-family:inherit; }
+
 /* Status in menu */
 .menu-status { display:flex; align-items:center; gap:8px; padding:12px 20px; }
 .menu-status .status-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
@@ -1431,7 +1605,10 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 #preview-container.show { display:flex; }
 #preview-bar { display:flex; align-items:center; padding:4px 10px; background:#f5f5f7; gap:6px; flex-shrink:0; border-bottom:1px solid #e5e5ea; flex-wrap:wrap; }
 #preview-bar-actions { display:flex; align-items:center; gap:6px; margin-left:auto; flex-shrink:0; }
-#preview-nav { display:flex; gap:4px; overflow:hidden; min-width:0; flex:1; align-items:center; }
+#preview-nav { display:flex; gap:4px; overflow:hidden; min-width:0; flex:1; align-items:center; transition:all 0.2s; }
+#preview-nav.collapsed { display:none; }
+#preview-nav-toggle { font-size:10px; padding:3px 6px; transition:transform 0.2s; }
+#preview-nav-toggle.collapsed { transform:rotate(-90deg); }
 .preview-pill { padding:4px 8px; border-radius:12px; font-size:11px; cursor:pointer; border:1px solid #d2d2d7; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:120px; background:#e8f0fe; color:#1a73e8; font-family:'SF Mono',Monaco,monospace; transition:all 0.15s; flex-shrink:0; }
 .preview-pill.more-pill { background:#f5f5f7; color:#86868b; border-color:#d2d2d7; font-family:system-ui; max-width:none; position:relative; }
 .preview-more-menu { position:absolute; bottom:100%; left:0; background:#fff; border:1px solid #d2d2d7; border-radius:10px; box-shadow:0 4px 16px rgba(0,0,0,0.12); padding:4px 0; z-index:50; min-width:160px; display:none; }
@@ -1472,6 +1649,14 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 .msg-wrap .msg-sender { font-size:12px; color:#999; margin-bottom:2px; padding-left:4px; }
 .msg-wrap .msg.user { background:#e9e9eb; color:#1d1d1f; border-bottom-right-radius:18px; border-bottom-left-radius:6px; }
 #participants-indicator { font-size:11px; color:#86868b; margin-left:8px; cursor:default; }
+#participants-bar { display:none; padding:6px 12px; background:#f5f5f7; border-bottom:1px solid #e0e0e0; flex-shrink:0; overflow-x:auto; white-space:nowrap; -webkit-overflow-scrolling:touch; }
+#participants-bar .p-chip { display:inline-flex; align-items:center; gap:4px; padding:3px 10px; margin-right:6px; background:#fff; border:1px solid #e0e0e0; border-radius:14px; font-size:12px; color:#1d1d1f; cursor:pointer; user-select:none; transition:background .15s; }
+#participants-bar .p-chip:hover { background:#e8f0fe; border-color:#007aff; }
+#participants-bar .p-chip:active { background:#d0e2ff; }
+#participants-bar .p-chip .p-dot { width:6px; height:6px; border-radius:50%; background:#34c759; flex-shrink:0; }
+#participants-bar .p-chip .p-role { font-size:10px; color:#86868b; }
+#participants-bar .p-chip.offline { opacity:0.5; }
+#participants-bar .p-chip .p-dot.offline { background:#c7c7cc; }
 .mention { color:#007aff; font-weight:500; }
 .msg.mentioned { border-left:3px solid #007aff; padding-left:9px; }
 #mention-dropdown { display:none; position:absolute; bottom:100%; left:0; right:0; background:#fff; border:1px solid #e0e0e0; border-radius:10px; max-height:200px; overflow-y:auto; z-index:1000; margin-bottom:4px; box-shadow:0 -4px 16px rgba(0,0,0,.12); }
@@ -1487,6 +1672,14 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 .msg.assistant.thinking-msg { background:#f5f5f5; color:#8e8e93; font-size:calc(var(--easy-font-size, 15px) - 1px); font-style:italic; }
 .msg.system { align-self:center; background:none; color:#86868b; font-size:12px; text-align:center; padding:4px 8px; }
 .msg.error { align-self:center; background:#fff0f0; color:#ff3b30; border:1px solid #ffcdd2; font-size:13px; }
+.retry-msg { display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:center; }
+.retry-btn { background:#ff3b30; color:#fff; border:none; border-radius:14px; padding:4px 14px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap; }
+.retry-btn:hover { background:#e0332b; }
+.retry-btn:disabled { background:#ccc; cursor:default; }
+.suggest-msg { display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:center; background:#f0f7ff !important; border:1px solid #c8dff8; }
+.suggest-btn { background:#007aff; color:#fff; border:none; border-radius:14px; padding:4px 14px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap; }
+.suggest-btn:hover { background:#0063d1; }
+.suggest-btn:disabled { background:#ccc; cursor:default; }
 
 /* Thinking/loading indicator — inside assistant msg bubble */
 .thinking-placeholder { min-height:36px; display:flex; align-items:center; }
@@ -1528,6 +1721,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 #hold-speak:active, #hold-speak.recording { background:#ffecec; border-color:#ff3b30; color:#ff3b30; }
 #hold-speak.show { display:block; }
 @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.7; } }
+@keyframes guestCtaSlideUp { from { opacity:0; transform:translateX(-50%) translateY(30px); } to { opacity:1; transform:translateX(-50%) translateY(0); } }
 
 /* Resize handles — hidden on mobile */
 .resize-handle { display:none; }
@@ -1599,11 +1793,13 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 #files-panel.collapsed .fp-collapse { transform:rotate(-90deg); }
 #files-panel.collapsed .fp-path,
 #files-panel.collapsed .fp-list,
-#files-panel.collapsed .fp-actions { display:none !important; }
+#files-panel.collapsed .fp-actions,
+#files-panel.collapsed .file-access-request { display:none !important; }
 #files-panel.collapsed { height:auto !important; min-height:0 !important; flex-shrink:0; }
 #files-panel.collapsed + .resize-v { display:none !important; }
 .fp-path { padding:4px 12px; font-size:11px; color:#86868b; background:#fafafa; border-bottom:1px solid #e5e5ea; word-break:break-all; font-family:'SF Mono',Monaco,monospace; }
-.fp-list { flex:1; overflow-y:auto; padding:0; }
+.fp-list { flex:1; overflow-y:auto; padding:0; transition:background 0.15s, box-shadow 0.15s; }
+.fp-list.fp-dragover { background:rgba(0,122,255,0.06); box-shadow:inset 0 0 0 2px #007aff; border-radius:8px; }
 .fp-col-header { display:flex; align-items:center; padding:4px 12px; font-size:11px; color:#86868b; border-bottom:1px solid #e5e5ea; background:#fafafa; user-select:none; }
 .fp-col-header .name { flex:1; }
 .fp-col-header .date { width:90px; text-align:right; flex-shrink:0; }
@@ -1617,6 +1813,18 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 .fp-actions { display:flex; padding:6px 8px; gap:6px; border-top:1px solid #e5e5ea; background:#f5f5f7; }
 .fp-actions button { flex:1; padding:5px; border-radius:6px; border:1px solid #d2d2d7; background:#ffffff; color:#1d1d1f; font-size:12px; cursor:pointer; }
 .fp-actions button:active { background:#e5e5ea; }
+.fp-back .name { color:#60a5fa; font-weight:500; }
+.fp-back:hover { background:#e8f0fe; }
+#files-panel.no-access .fp-actions { display:none; }
+.file-access-request { display:flex; flex-direction:column; align-items:center; justify-content:center; padding:40px 20px; gap:16px; text-align:center; }
+.file-access-icon { font-size:40px; opacity:0.6; }
+.file-access-text { font-size:14px; color:#86868b; line-height:1.5; max-width:260px; }
+.file-access-btn { padding:10px 24px; border-radius:20px; border:none; background:#007aff; color:#fff; font-size:14px; cursor:pointer; font-weight:500; }
+.file-access-btn:active { background:#005ec4; }
+.file-access-status { font-size:13px; color:#86868b; }
+.file-access-grant { display:flex; align-items:center; gap:8px; padding:8px 12px; background:#f0f6ff; border-radius:10px; margin:4px 8px; font-size:13px; color:#1d1d1f; }
+.file-grant-btn { padding:4px 12px; border-radius:12px; border:none; background:#34c759; color:#fff; font-size:12px; cursor:pointer; font-weight:500; white-space:nowrap; }
+.file-grant-btn:active { background:#28a745; }
 
 /* Apps panel */
 #apps-panel { position:fixed; left:0; top:0; bottom:0; width:min(300px,80vw); background:#ffffff; border-right:1px solid #e5e5ea; transform:translateX(-100%); transition:transform 0.25s ease; z-index:100; display:flex; flex-direction:column; }
@@ -1768,6 +1976,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 
   <!-- Tab bar (shown when preview URL exists) -->
   <div id="tab-bar">
+    <span id="guest-badge" style="display:none; background:#ff9500; color:#fff; font-size:11px; font-weight:600; padding:2px 8px; border-radius:10px; margin-right:8px;" data-i18n="guest.badge">Guest</span>
     <div class="tab-item active" id="tab-chat"><span data-i18n="easy.tab.chat">Chat</span><span class="tab-badge" id="chat-badge"></span></div>
     <div class="tab-item" id="tab-preview"><span data-i18n="easy.tab.preview">Preview</span><span class="tab-badge" id="preview-badge"></span></div>
   </div>
@@ -1792,6 +2001,8 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     <div class="resize-handle resize-v" id="resize-files-chat"></div>
     <!-- Welcome screen (placeholder, content moved to preview guide) -->
     <div id="welcome-screen" style="display:none"></div>
+    <!-- Online users bar -->
+    <div id="participants-bar"></div>
     <!-- Chat area -->
     <div id="chat-area">
     </div>
@@ -1808,6 +2019,15 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     <button class="input-btn" id="upload-btn" title="Upload file"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M12 16V8m0 0l-3 3m3-3l3 3"/></svg></button>
     <button class="input-btn" id="send-btn" title="Send"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg></button>
   </div>
+  <!-- Guest CTA popup (hidden, shown after 5 min browsing) -->
+  <div id="guest-cta" style="display:none; position:fixed; bottom:20px; left:50%; transform:translateX(-50%); z-index:200; width:calc(100% - 32px); max-width:380px;">
+    <div style="background:linear-gradient(135deg,#007aff,#5856d6); border-radius:16px; padding:20px; box-shadow:0 8px 32px rgba(0,0,0,0.25); position:relative;">
+      <button id="guest-cta-dismiss" style="position:absolute; top:8px; right:12px; background:none; border:none; color:rgba(255,255,255,0.6); font-size:20px; cursor:pointer; padding:4px;">&times;</button>
+      <div style="color:#fff; font-size:16px; font-weight:600; margin-bottom:4px;" data-i18n="guest.cta_title">Like what you see?</div>
+      <div style="color:rgba(255,255,255,0.8); font-size:13px; margin-bottom:12px;" data-i18n="guest.cta_desc">Sign up to create your own AI-powered projects</div>
+      <a href="/" style="display:inline-block; background:#fff; color:#007aff; padding:10px 28px; border-radius:20px; font-size:15px; font-weight:600; text-decoration:none;" data-i18n="guest.cta_btn">Get Started</a>
+    </div>
+  </div>
   </div><!-- /left-panel -->
   <div class="resize-handle resize-h" id="resize-chat-preview"></div>
   <!-- Preview container -->
@@ -1816,6 +2036,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     <div id="preview-bar">
       <div id="preview-nav"></div>
       <div id="preview-bar-actions">
+        <button class="preview-action" id="preview-nav-toggle" title="Toggle links" style="display:none;">&#x25BC;</button>
         <button class="preview-action" id="preview-swap" title="Swap panels" style="display:none;">&#x21C4;</button>
         <button class="preview-action" id="preview-share" data-i18n-title="easy.preview.share_title" data-i18n="easy.preview.share">Share</button>
         <button class="preview-action" id="preview-fullscreen" data-i18n-title="easy.preview.fullscreen">&#x26F6;</button>
@@ -1883,7 +2104,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   <div class="menu-section">
     <div class="menu-item" id="menu-projects-title" style="cursor:pointer;"><span class="mi-icon">&#x1F4C2;</span><span class="mi-label" data-i18n="easy.menu.projects">Projects</span><span class="mi-arrow" id="menu-projects-arrow" style="font-size:10px;transition:transform 0.2s;">&#x25B8;</span></div>
     <div id="menu-projects-wrap">
-      <div id="menu-projects"></div>
+      <div id="menu-projects" class="menu-proj-list"><div style="padding:8px 20px;color:#86868b;font-size:13px;" data-i18n="loading">Loading...</div></div>
       <div class="menu-item" id="menu-new-project"><span class="mi-icon" style="color:#34c759;">+</span><span class="mi-label" style="color:#34c759;" data-i18n="easy.menu.new_project">New Project</span></div>
     </div>
   </div>
@@ -1958,12 +2179,78 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 <script>
 (function() {
   'use strict';
-  var sessionId = new URLSearchParams(location.search).get('session');
+  var _isGuestMode = ${isGuest ? 'true' : 'false'};
+  var _guestSessionId = ${isGuest ? JSON.stringify(guestOpts!.guestSessionId) : 'null'};
+  var _guestToken = ${isGuest ? JSON.stringify(guestOpts!.guestToken) : 'null'};
+  var _guestExpires = ${isGuest ? JSON.stringify(guestOpts!.guestExpires) : 'null'};
+  // Stable guest ID persisted in localStorage to avoid join/leave churn on reconnect
+  var _guestId = null;
+  if (_isGuestMode) {
+    _guestId = localStorage.getItem('hopcode_guest_id');
+    if (!_guestId) {
+      _guestId = Math.random().toString(36).substring(2, 8);
+      localStorage.setItem('hopcode_guest_id', _guestId);
+    }
+  }
+
+  var sessionId = _isGuestMode ? _guestSessionId : new URLSearchParams(location.search).get('session');
   if (!sessionId) return;
 
-  var username = ${JSON.stringify(auth.username)};
+  var username = _isGuestMode ? ('guest_' + _guestId) : ${JSON.stringify(auth.username)};
   var linuxUser = ${JSON.stringify(auth.linuxUser || '')};
   var homeDir = linuxUser ? (linuxUser === 'root' ? '/root' : '/home/' + linuxUser) : '/root';
+
+  // Session info (set by session_info WS message)
+  var _sessionOwner = '';
+  var _projectDir = '';
+  var _isOwner = ${isGuest ? 'false' : 'true'};
+  var _hasFileAccess = ${isGuest ? 'false' : 'true'};
+
+  // Guest mode: hide interactive elements, delayed CTA
+  if (_isGuestMode) {
+    document.addEventListener('DOMContentLoaded', function() {
+      // Hide input bar
+      // Hide menu and voice buttons, keep input bar for chatting
+      var menuBtn = document.getElementById('menu-btn');
+      if (menuBtn) menuBtn.style.display = 'none';
+      var voiceToggle = document.getElementById('voice-toggle');
+      if (voiceToggle) voiceToggle.style.display = 'none';
+      var uploadBtn = document.getElementById('upload-btn');
+      if (uploadBtn) uploadBtn.style.display = 'none';
+      // Show guest badge
+      var badge = document.getElementById('guest-badge');
+      if (badge) badge.style.display = '';
+      // Delayed CTA: show after 5 minutes of cumulative browsing
+      var GUEST_CTA_DELAY = 5 * 60 * 1000;
+      var storageKey = 'hopcode_guest_time';
+      var dismissKey = 'hopcode_guest_cta_dismissed';
+      if (localStorage.getItem(dismissKey)) return; // already dismissed
+      var elapsed = parseInt(localStorage.getItem(storageKey) || '0', 10);
+      var startedAt = Date.now();
+      var ctaTimer = setInterval(function() {
+        var total = elapsed + (Date.now() - startedAt);
+        localStorage.setItem(storageKey, String(total));
+        if (total >= GUEST_CTA_DELAY) {
+          clearInterval(ctaTimer);
+          var cta = document.getElementById('guest-cta');
+          if (cta && !localStorage.getItem(dismissKey)) {
+            cta.style.display = '';
+            cta.style.animation = 'guestCtaSlideUp 0.3s ease';
+          }
+        }
+      }, 10000); // check every 10s
+      // Dismiss handler
+      var dismissBtn = document.getElementById('guest-cta-dismiss');
+      if (dismissBtn) {
+        dismissBtn.addEventListener('click', function() {
+          var cta = document.getElementById('guest-cta');
+          if (cta) cta.style.display = 'none';
+          localStorage.setItem(dismissKey, '1');
+          clearInterval(ctaTimer);
+        });
+      }
+    });
+  }
 
   // Debug log
   var dbgEl = document.getElementById('debug-log');
@@ -2053,6 +2340,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   menuProjectsTitle.addEventListener('click', function() {
     var isOpen = menuProjectsWrap.classList.toggle('open');
     menuProjectsArrow.style.transform = isOpen ? 'rotate(90deg)' : '';
+    if (isOpen) loadMenuProjects();
   });
   menuOverlay.addEventListener('click', function() { menuHide(); });
   document.getElementById('menu-home').addEventListener('click', function() {
@@ -2226,7 +2514,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     for (var i = 0; i < _currentParticipants.length; i++) {
       var tag = document.createElement('span');
       tag.className = 'invite-user-tag' + (_currentParticipants[i] === username ? ' is-you' : '');
-      tag.textContent = _currentParticipants[i] + (_currentParticipants[i] === username ? ' (you)' : '');
+      tag.textContent = displayName(_currentParticipants[i]) + (_currentParticipants[i] === username ? ' (you)' : '');
       inviteUsersEl.appendChild(tag);
     }
   }
@@ -2466,10 +2754,21 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     }
 
     document.getElementById('preview-bar-actions').style.display = 'flex';
+    var toggleBtn = document.getElementById('preview-nav-toggle');
+    if (toggleBtn) toggleBtn.style.display = previewUrls.length > 1 ? '' : 'none';
   }
 
   // Re-render on resize to adapt pill count
   window.addEventListener('resize', function() { if (previewUrls.length > 0) renderPreviewNav(); });
+
+  // Toggle preview-nav visibility
+  var navToggle = document.getElementById('preview-nav-toggle');
+  var navCollapsed = false;
+  navToggle.addEventListener('click', function() {
+    navCollapsed = !navCollapsed;
+    previewNav.classList.toggle('collapsed', navCollapsed);
+    navToggle.classList.toggle('collapsed', navCollapsed);
+  });
 
   function setPreviewUrl(url, forceReload) {
     if (!url) return;
@@ -2676,6 +2975,8 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         dotCls += ' blue'; text = _t('easy.status.thinking'); break;
       case 'tool_running':
         dotCls += ' blue'; text = _t('easy.status.tool_running'); break;
+      case 'queued':
+        dotCls += ' yellow'; text = _t('easy.status.queued'); break;
       case 'error':
         dotCls += ' red'; text = _t('easy.status.error'); break;
     }
@@ -2684,10 +2985,10 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     if (menuStatusDot) menuStatusDot.className = dotCls;
     if (menuStatusText) menuStatusText.textContent = text;
 
-    // Update input placeholder & disabled state
-    var canInput = (newState === 'ready');
+    // Update input placeholder & disabled state — allow input when queued so users can keep sending
+    var canInput = (newState === 'ready' || newState === 'queued');
     msgInput.disabled = !canInput;
-    if (newState === 'ready') {
+    if (newState === 'ready' || newState === 'queued') {
       msgInput.placeholder = (('ontouchstart' in window || navigator.maxTouchPoints > 0) || window.innerWidth < 768 || msgInput.offsetWidth < 300) ? _t('easy.input.placeholder_mobile') : _t('easy.input.placeholder', {key: /Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Option' : 'Alt'});
     } else if (newState === 'thinking') {
       msgInput.placeholder = _t('easy.input.thinking');
@@ -2696,21 +2997,21 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     }
 
     // Show/hide cancel (stop) button
-    var showCancel = (newState === 'thinking' || newState === 'tool_running');
-    cancelBtn.classList.toggle('show', showCancel);
-    voiceToggle.style.display = showCancel ? 'none' : 'flex';
+    var isBusy = (newState === 'thinking' || newState === 'tool_running' || newState === 'queued');
+    cancelBtn.classList.toggle('show', isBusy);
+    voiceToggle.style.display = isBusy ? 'none' : 'flex';
 
     // Manage stuck timer
     clearTimeout(stuckTimer);
     if (newState === 'thinking' || newState === 'tool_running') {
       stuckTimer = setTimeout(function() {
         if (state === 'thinking' || state === 'tool_running') {
-          addWarningMsg(_t('easy.msg.stuck'));
+          addRetryMsg(_t('easy.msg.stuck'));
         }
       }, 180000);
     }
 
-    // Show thinking animation for thinking & tool_running
+    // Show thinking animation for thinking & tool_running (not queued — that's just waiting)
     if (newState === 'thinking' || newState === 'tool_running') {
       showThinking();
     } else if (prev === 'thinking' || prev === 'tool_running') {
@@ -2735,7 +3036,11 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   function connectWs() {
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     var projectParam = new URLSearchParams(location.search).get('project') || '';
-    ws = new WebSocket(proto + '//' + location.host + '/terminal/ws-easy?session=' + encodeURIComponent(sessionId) + '&project=' + encodeURIComponent(projectParam));
+    var wsUrl = proto + '//' + location.host + '/terminal/ws-easy?session=' + encodeURIComponent(sessionId) + '&project=' + encodeURIComponent(projectParam);
+    if (_isGuestMode && _guestToken) {
+      wsUrl += '&guest_token=' + encodeURIComponent(_guestToken) + '&expires=' + encodeURIComponent(_guestExpires) + '&guest_id=' + encodeURIComponent(_guestId);
+    }
+    ws = new WebSocket(wsUrl);
     ws.onopen = function() {
       wsRetryDelay = 1000;
       dbg('ws connected');
@@ -2791,6 +3096,9 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         if (d.url) {
           setPreviewUrl(d.url, true);
         }
+      } else if (d.type === 'preview_suggest') {
+        // Non-previewable file generated — suggest HTML preview
+        addPreviewSuggest(d.filename);
       } else if (d.type === 'user_message') {
         // Server echo of user message — WeChat group style
         var isSelf = d.sender === username;
@@ -2807,7 +3115,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
           wrap.className = 'msg-wrap';
           var nameTag = document.createElement('div');
           nameTag.className = 'msg-sender';
-          nameTag.textContent = d.sender;
+          nameTag.textContent = displayName(d.sender);
           wrap.appendChild(nameTag);
           var bubble = document.createElement('div');
           bubble.className = 'msg user' + (isMentioned ? ' mentioned' : '');
@@ -2864,8 +3172,27 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
           }
           if (startIdx < d.messages.length) autoScroll();
         }
+      } else if (d.type === 'session_info') {
+        _sessionOwner = d.owner;
+        _projectDir = d.projectDir;
+        _isOwner = d.isOwner;
+        _hasFileAccess = d.hasFileAccess;
+        updateFileAccessUI();
+        // Set page title to project name
+        var projName = d.projectDir ? d.projectDir.split('/').pop() : '';
+        if (projName) {
+          document.title = projName + ' - Hopcode';
+          _originalTitle = document.title;
+        }
+      } else if (d.type === 'file_access_request') {
+        // Owner sees request — show grant prompt
+        showFileAccessRequest(d.user);
+      } else if (d.type === 'file_access_granted') {
+        // User was granted file access
+        _hasFileAccess = true;
+        updateFileAccessUI();
       } else if (d.type === 'error') {
-        addErrorMsg(d.message || _t('error_generic'));
+        addRetryMsg(d.message || _t('error_generic'));
       }
     };
     ws.onclose = function() {
@@ -3109,31 +3436,95 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   });
 
   // ---- Participants ----
+  // Display-friendly name: guest_xxx → "Guest"/"访客"
+  function displayName(u) {
+    if (u && u.startsWith('guest_')) return _t('guest.badge');
+    return u;
+  }
+
   function updateParticipants(users) {
-    // Detect joins and leaves (skip first update)
+    // users is now [{name, online}, ...] — extract online names for join/leave detection
+    var onlineNames = [];
+    for (var i = 0; i < users.length; i++) {
+      if (users[i].online) onlineNames.push(users[i].name);
+    }
+
+    // Detect joins and leaves based on online status changes (skip first update)
     if (_currentParticipants.length > 0) {
-      for (var i = 0; i < users.length; i++) {
-        if (_currentParticipants.indexOf(users[i]) === -1 && users[i] !== username) {
-          showCollabToast(_t('easy.participant.joined', { name: users[i] }));
+      for (var i = 0; i < onlineNames.length; i++) {
+        if (_currentParticipants.indexOf(onlineNames[i]) === -1 && onlineNames[i] !== username) {
+          var name = displayName(onlineNames[i]);
+          showCollabToast(_t('easy.participant.joined', { name: name }));
+          addSystemMsg(_t('easy.participant.joined', { name: name }));
         }
       }
       for (var i = 0; i < _currentParticipants.length; i++) {
-        if (users.indexOf(_currentParticipants[i]) === -1 && _currentParticipants[i] !== username) {
-          showCollabToast(_t('easy.participant.left', { name: _currentParticipants[i] }));
+        if (onlineNames.indexOf(_currentParticipants[i]) === -1 && _currentParticipants[i] !== username) {
+          var name = displayName(_currentParticipants[i]);
+          showCollabToast(_t('easy.participant.left', { name: name }));
+          addSystemMsg(_t('easy.participant.left', { name: name }));
         }
       }
     }
-    _currentParticipants = users;
+    _currentParticipants = onlineNames;
 
-    // Status bar indicator
+    // Status bar indicator — show online count
     var el = document.getElementById('participants-indicator');
     if (el) {
       if (users.length <= 1) {
         el.style.display = 'none';
       } else {
         el.style.display = 'inline';
-        el.textContent = users.length + ' ' + _t('easy.participants');
-        el.title = users.join(', ');
+        var onlineCount = onlineNames.length;
+        el.textContent = onlineCount + '/' + users.length + ' ' + _t('easy.participants');
+        el.title = users.map(function(u) { return displayName(u.name) + (u.online ? '' : ' (offline)'); }).join(', ');
+      }
+    }
+
+    // Participants bar with clickable chips
+    var bar = document.getElementById('participants-bar');
+    if (bar) {
+      if (users.length <= 1) {
+        bar.style.display = 'none';
+      } else {
+        bar.style.display = 'block';
+        bar.innerHTML = '';
+        for (var i = 0; i < users.length; i++) {
+          var u = users[i];
+          var chip = document.createElement('span');
+          chip.className = 'p-chip' + (u.online ? '' : ' offline');
+          var dot = document.createElement('span');
+          dot.className = 'p-dot' + (u.online ? '' : ' offline');
+          chip.appendChild(dot);
+          var nameSpan = document.createElement('span');
+          nameSpan.textContent = displayName(u.name);
+          chip.appendChild(nameSpan);
+          // Role tag
+          var roleText = '';
+          if (_sessionOwner && u.name === _sessionOwner) roleText = _t('easy.participant.owner');
+          else if (u.name === username) roleText = _t('easy.participant.you');
+          if (roleText) {
+            var role = document.createElement('span');
+            role.className = 'p-role';
+            role.textContent = '(' + roleText + ')';
+            chip.appendChild(role);
+          }
+          // Click to @mention (skip self)
+          if (u.name !== username) {
+            chip.dataset.user = u.name;
+            chip.addEventListener('click', function() {
+              var uName = this.dataset.user;
+              var dn = displayName(uName);
+              var cur = msgInput.value;
+              var mention = '@' + dn + ' ';
+              if (cur && !cur.endsWith(' ')) mention = ' ' + mention;
+              msgInput.value = cur + mention;
+              msgInput.focus();
+              updateSendBtn();
+            });
+          }
+          bar.appendChild(chip);
+        }
       }
     }
 
@@ -3240,6 +3631,45 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     autoScroll();
   }
 
+  function addRetryMsg(text) {
+    var div = document.createElement('div');
+    div.className = 'msg error retry-msg';
+    var span = document.createElement('span');
+    span.textContent = text;
+    div.appendChild(span);
+    var btn = document.createElement('button');
+    btn.className = 'retry-btn';
+    btn.textContent = _t('easy.msg.retry');
+    btn.addEventListener('click', function() {
+      btn.disabled = true;
+      btn.textContent = _t('easy.msg.retrying');
+      wsSend({ type: 'retry' });
+    });
+    div.appendChild(btn);
+    chatArea.appendChild(div);
+    autoScroll();
+  }
+
+  function addPreviewSuggest(filename) {
+    var div = document.createElement('div');
+    div.className = 'msg system suggest-msg';
+    var span = document.createElement('span');
+    span.textContent = _t('easy.msg.suggest_preview', { file: filename });
+    div.appendChild(span);
+    var btn = document.createElement('button');
+    btn.className = 'suggest-btn';
+    btn.textContent = _t('easy.msg.suggest_preview_btn');
+    btn.addEventListener('click', function() {
+      btn.disabled = true;
+      btn.textContent = _t('easy.msg.suggest_preview_sent');
+      var prompt = _t('easy.msg.suggest_preview_prompt', { file: filename });
+      wsSend({ type: 'send', text: prompt });
+    });
+    div.appendChild(btn);
+    chatArea.appendChild(div);
+    autoScroll();
+  }
+
   function addExitedMsg() {
     currentAssistantMsg = null;
     var div = document.createElement('div');
@@ -3326,7 +3756,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     var text = msgInput.value.trim();
     dbg('sendMessage: text=' + (text ? text.substring(0, 30) : '(empty)') + ' state=' + state + ' ws=' + (ws ? ws.readyState : 'null'));
     if (!text) return;
-    if (state !== 'ready') return;
+    if (state !== 'ready' && state !== 'queued') return;
 
     // Extract @mentions from text
     var mentionMatches = text.match(/@([\w\u4e00-\u9fff]+)/g);
@@ -3431,7 +3861,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     location.href = '/terminal?session=' + encodeURIComponent(sessionId);
   });
 
-  // ---- Projects ----
+  // ---- Projects (API-based session list) ----
   function renderProjects() {
     // Remove old chips (except new-project-btn)
     var chips = projectBar.querySelectorAll('.project-chip:not(.add)');
@@ -3446,27 +3876,128 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       });
       projectBar.insertBefore(chip, newProjectBtn);
     });
+  }
 
-    // Also render in menu sheet
-    if (menuProjects) {
-      menuProjects.innerHTML = '';
-      projects.forEach(function(p) {
-        var item = document.createElement('div');
-        item.className = 'menu-item' + (p === activeProject ? ' active' : '');
-        item.innerHTML = '<span class="mi-icon">' + (p === activeProject ? '&#x25CF;' : '&#x25CB;') + '</span><span class="mi-label">' + p + '</span>';
-        item.addEventListener('click', function() {
-          menuHide();
-          switchProject(p);
+  function loadMenuProjects() {
+    if (!menuProjects) return;
+    fetch('/terminal/api/sessions', { credentials: 'include' })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var sessions = (data.sessions || []).filter(function(s) { return s.mode === 'easy'; });
+        sessions.sort(function(a, b) { return (b.lastActivity || b.createdAt || 0) - (a.lastActivity || a.createdAt || 0); });
+        menuProjects.innerHTML = '';
+        if (!sessions.length) {
+          menuProjects.innerHTML = '<div style="padding:8px 20px;color:#86868b;font-size:13px;">' + _t('portal.empty_title') + '</div>';
+          return;
+        }
+        sessions.forEach(function(s) {
+          var isCurrent = s.id === sessionId;
+          var item = document.createElement('a');
+          item.className = 'menu-proj-item' + (isCurrent ? ' current' : '');
+          item.href = '/terminal/easy?session=' + encodeURIComponent(s.id) + (s.project ? '&project=' + encodeURIComponent(s.project) : '');
+
+          var dot = document.createElement('span');
+          dot.className = 'menu-proj-dot' + (isCurrent ? ' current' : (s.clientCount > 0 || s.clients > 0 ? ' active' : ''));
+
+          var nameEl = document.createElement('span');
+          nameEl.className = 'menu-proj-name';
+          nameEl.textContent = s.name || s.project || s.id;
+
+          var actions = document.createElement('span');
+          actions.className = 'menu-proj-actions';
+
+          var renameBtn = document.createElement('button');
+          renameBtn.className = 'menu-proj-act';
+          renameBtn.textContent = '✎';
+          renameBtn.addEventListener('click', function(e) {
+            e.preventDefault(); e.stopPropagation();
+            menuProjRename(s.id, item, nameEl);
+          });
+
+          var deleteBtn = document.createElement('button');
+          deleteBtn.className = 'menu-proj-act delete';
+          deleteBtn.textContent = '✕';
+          deleteBtn.addEventListener('click', function(e) {
+            e.preventDefault(); e.stopPropagation();
+            menuProjDelete(s.id, s.name || s.project || s.id, item);
+          });
+
+          actions.appendChild(renameBtn);
+          actions.appendChild(deleteBtn);
+          item.appendChild(dot);
+          item.appendChild(nameEl);
+          item.appendChild(actions);
+          menuProjects.appendChild(item);
         });
-        menuProjects.appendChild(item);
+      })
+      .catch(function() {
+        menuProjects.innerHTML = '<div style="padding:8px 20px;color:#ff3b30;font-size:13px;">' + _t('easy.files.error_load') + '</div>';
       });
+  }
+
+  function menuProjRename(sid, item, nameEl) {
+    var oldName = nameEl.textContent;
+    var input = document.createElement('input');
+    input.className = 'menu-proj-rename-input';
+    input.value = oldName;
+    nameEl.style.display = 'none';
+    var actionsEl = item.querySelector('.menu-proj-actions');
+    if (actionsEl) actionsEl.style.display = 'none';
+    nameEl.parentNode.insertBefore(input, nameEl.nextSibling);
+    input.focus();
+    input.select();
+    function save() {
+      var val = input.value.trim();
+      if (input._done) return; input._done = true;
+      input.remove();
+      nameEl.style.display = '';
+      if (actionsEl) actionsEl.style.display = '';
+      if (val && val !== oldName) {
+        nameEl.textContent = val;
+        fetch('/terminal/rename', {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session: sid, name: val, oldName: oldName })
+        });
+        // Update local project list and page title if current session
+        if (sid === sessionId) {
+          var safeVal = val.replace(/[^a-zA-Z0-9_\\-\\u4e00-\\u9fff]/g, '-');
+          var idx = projects.indexOf(activeProject);
+          if (idx >= 0) projects[idx] = safeVal;
+          activeProject = safeVal;
+          localStorage.setItem('easy_projects_' + username, JSON.stringify(projects));
+          localStorage.setItem('easy_active_project_' + username, safeVal);
+          document.title = val + ' - Hopcode';
+          _originalTitle = document.title;
+          renderProjects();
+        }
+      }
     }
+    input.addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); });
+    input.addEventListener('keydown', function(e) {
+      e.stopPropagation();
+      if (e.key === 'Enter') save();
+      if (e.key === 'Escape') { input._done = true; input.remove(); nameEl.style.display = ''; if (actionsEl) actionsEl.style.display = ''; }
+    });
+    input.addEventListener('blur', save);
+  }
+
+  function menuProjDelete(sid, name, item) {
+    if (!confirm(_t('portal.confirm_delete', { name: name }))) return;
+    item.style.opacity = '0.4';
+    fetch('/terminal/sessions/' + encodeURIComponent(sid), {
+      method: 'DELETE', credentials: 'include'
+    }).then(function(r) {
+      if (r.ok) {
+        item.remove();
+        if (sid === sessionId) location.href = '/terminal';
+      } else { item.style.opacity = ''; }
+    }).catch(function() { item.style.opacity = ''; });
   }
 
   function switchProject(name) {
     activeProject = name;
     localStorage.setItem('easy_active_project_' + username, name);
-    // Navigate to /terminal/easy without session — server auto-creates and redirects
     location.href = '/terminal/easy';
   }
 
@@ -3493,28 +4024,82 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       projects.push(name);
       localStorage.setItem('easy_projects_' + username, JSON.stringify(projects));
     }
-    // Create directory via API
     var codingDir = homeDir + '/coding';
     fetch('/terminal/mkdir?session=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(codingDir) + '&name=' + encodeURIComponent(name) + '&exists=rename', { method: 'POST' })
-      .then(function() {
-        switchProject(name);
-      })
-      .catch(function() {
-        switchProject(name); // Try anyway
-      });
+      .then(function() { switchProject(name); })
+      .catch(function() { switchProject(name); });
   }
 
   renderProjects();
 
   // ---- Files panel ----
+  var _fileAccessPending = false;
+
+  function updateFileAccessUI() {
+    if (_hasFileAccess) {
+      // Has access — show normal file browser
+      filesPanel.classList.remove('no-access');
+      var reqPanel = document.getElementById('file-access-request');
+      if (reqPanel) reqPanel.style.display = 'none';
+      // Reload files if panel is visible
+      if (isDesktop() || filesPanel.classList.contains('open')) {
+        loadFiles('');
+      }
+    } else {
+      // No access — show request UI
+      filesPanel.classList.add('no-access');
+      fpList.innerHTML = '';
+      fpPath.textContent = '';
+      var reqPanel = document.getElementById('file-access-request');
+      if (!reqPanel) {
+        reqPanel = document.createElement('div');
+        reqPanel.id = 'file-access-request';
+        reqPanel.className = 'file-access-request';
+        reqPanel.innerHTML = '<div class="file-access-icon">&#128274;</div>' +
+          '<div class="file-access-text">' + _t('easy.files.no_access') + '</div>' +
+          '<button class="file-access-btn" id="request-access-btn">' + _t('easy.files.request_access') + '</button>' +
+          '<div class="file-access-status" id="file-access-status" style="display:none;">' + _t('easy.files.access_pending') + '</div>';
+        fpList.parentElement.insertBefore(reqPanel, fpList);
+      }
+      reqPanel.style.display = '';
+      var reqBtn = document.getElementById('request-access-btn');
+      var reqStatus = document.getElementById('file-access-status');
+      if (_fileAccessPending) {
+        reqBtn.style.display = 'none';
+        reqStatus.style.display = '';
+      }
+      reqBtn.onclick = function() {
+        wsSend({ type: 'request_file_access' });
+        _fileAccessPending = true;
+        reqBtn.style.display = 'none';
+        reqStatus.style.display = '';
+      };
+    }
+  }
+
+  function showFileAccessRequest(user) {
+    // Owner sees a prompt to grant access
+    var div = document.createElement('div');
+    div.className = 'msg system file-access-grant';
+    div.innerHTML = '<span>' + _t('easy.files.grant_prompt', { user: escHtml(user) }) + '</span>' +
+      '<button class="file-grant-btn" data-user="' + escHtml(user) + '">' + _t('easy.files.grant_btn') + '</button>';
+    chatArea.appendChild(div);
+    autoScroll();
+    div.querySelector('.file-grant-btn').addEventListener('click', function() {
+      wsSend({ type: 'grant_file_access', user: this.getAttribute('data-user') });
+      div.innerHTML = '<span>' + _t('easy.files.granted', { user: escHtml(user) }) + '</span>';
+    });
+  }
+
   function openFiles() {
     if (isDesktop()) {
-      // On desktop, files panel is always visible — just reload
+      if (!_hasFileAccess) { updateFileAccessUI(); return; }
       loadFiles('');
       return;
     }
     filesPanel.classList.add('open');
     filesOverlay.classList.add('show');
+    if (!_hasFileAccess) { updateFileAccessUI(); return; }
     loadFiles('');
   }
   function closeFiles() {
@@ -3537,37 +4122,56 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   }
 
   function loadFiles(dir) {
+    if (!_hasFileAccess) { updateFileAccessUI(); return; }
+    // Sandbox: restrict to project directory (only when projectDir is known)
+    var rootDir = _projectDir || '';
+    if (rootDir && dir && !dir.startsWith(rootDir)) {
+      dir = rootDir;
+    }
+    // Default to project root if no dir specified and we know projectDir
+    if (!dir && rootDir) dir = rootDir;
+
     filePath = dir;
-    fpPath.textContent = dir ? dir.replace(homeDir, '~') : _t('loading');
+    fpPath.textContent = dir ? dir.replace(rootDir, _t('easy.files.project_root')) : _t('loading');
     fpList.innerHTML = '<div style="padding:20px;text-align:center;color:#86868b;">' + _t('loading') + '</div>';
 
     fetch('/terminal/files?session=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(dir))
       .then(function(r) { return r.json(); })
       .then(function(resp) {
-        // Server returns { path, cwd, items }
         var items = resp.items || resp;
         if (resp.path) {
           filePath = resp.path;
           dir = resp.path;
         }
-        fpPath.textContent = dir.replace(homeDir, '~') || '~';
+        // Enforce sandbox — if server returned path above project root, clamp
+        if (rootDir && !dir.startsWith(rootDir)) {
+          loadFiles(rootDir);
+          return;
+        }
+        fpPath.textContent = dir.replace(rootDir, _t('easy.files.project_root')) || _t('easy.files.project_root');
         fpList.innerHTML = '';
         // Column header
         var colHdr = document.createElement('div');
         colHdr.className = 'fp-col-header';
         colHdr.innerHTML = '<span class="name">Name</span><span class="date">Modified</span>';
         fpList.appendChild(colHdr);
-        // Parent dir
-        if (dir !== '/' && dir !== homeDir) {
+        // Back button (visible ← instead of ..)
+        var canGoUp = rootDir ? (dir !== rootDir) : (dir !== '/' && dir !== homeDir);
+        if (canGoUp) {
           var parent = dir.split('/').slice(0, -1).join('/') || '/';
+          // Clamp parent to project root
+          if (rootDir && !parent.startsWith(rootDir)) parent = rootDir;
           var up = document.createElement('div');
-          up.className = 'fp-item';
-          up.innerHTML = '<span class="icon">&#128193;</span><span class="name">..</span><span class="date"></span>';
+          up.className = 'fp-item fp-back';
+          up.innerHTML = '<span class="icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span><span class="name">' + _t('easy.files.back') + '</span><span class="date"></span>';
           up.addEventListener('click', function() { loadFiles(parent); });
           fpList.appendChild(up);
         }
         if (!items || !items.length) {
-          fpList.innerHTML += '<div style="padding:20px;text-align:center;color:#86868b;">' + _t('easy.files.empty') + '</div>';
+          var emptyDiv = document.createElement('div');
+          emptyDiv.style.cssText = 'padding:20px;text-align:center;color:#86868b;';
+          emptyDiv.textContent = _t('easy.files.empty');
+          fpList.appendChild(emptyDiv);
           return;
         }
         // Sort: dirs first, then files
@@ -3585,7 +4189,6 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
             if (item.isDirectory) {
               loadFiles(dir + '/' + item.name);
             } else {
-              // Download file — same approach as Pro Mode
               var a = document.createElement('a');
               a.href = '/terminal/download?session=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(dir + '/' + item.name);
               a.download = item.name;
@@ -3602,7 +4205,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       });
   }
 
-  // Desktop: auto-load files panel
+  // Desktop: auto-load files panel (deferred to session_info for access control)
   window._loadFiles = loadFiles;
   if (isDesktop()) { desktopFilesLoaded = true; loadFiles(''); }
 
@@ -3663,6 +4266,47 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     fileInputHidden.value = '';
   });
 
+  // ---- Drag & drop on files panel ----
+  var _dragCounter = 0;
+  fpList.addEventListener('dragenter', function(e) {
+    e.preventDefault(); e.stopPropagation();
+    _dragCounter++;
+    fpList.classList.add('fp-dragover');
+  });
+  fpList.addEventListener('dragleave', function(e) {
+    e.preventDefault(); e.stopPropagation();
+    _dragCounter--;
+    if (_dragCounter <= 0) { _dragCounter = 0; fpList.classList.remove('fp-dragover'); }
+  });
+  fpList.addEventListener('dragover', function(e) {
+    e.preventDefault(); e.stopPropagation();
+    e.dataTransfer.dropEffect = 'copy';
+  });
+  fpList.addEventListener('drop', function(e) {
+    e.preventDefault(); e.stopPropagation();
+    _dragCounter = 0;
+    fpList.classList.remove('fp-dragover');
+    if (!_hasFileAccess) return;
+    var files = e.dataTransfer.files;
+    if (!files || !files.length) return;
+    for (var i = 0; i < files.length; i++) {
+      uploadFile(files[i], filePath);
+    }
+  });
+  // Also allow drop on the whole files panel (header, path bar, etc.)
+  filesPanel.addEventListener('dragover', function(e) { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'copy'; });
+  filesPanel.addEventListener('drop', function(e) {
+    e.preventDefault(); e.stopPropagation();
+    _dragCounter = 0;
+    fpList.classList.remove('fp-dragover');
+    if (!_hasFileAccess) return;
+    var files = e.dataTransfer.files;
+    if (!files || !files.length) return;
+    for (var i = 0; i < files.length; i++) {
+      uploadFile(files[i], filePath);
+    }
+  });
+
   var pendingUploads = [];
   var uploadBatchTimer = null;
   function uploadFile(file, destDir) {
@@ -3676,7 +4320,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       .then(function(r) { return r.json(); })
       .then(function(data) {
         if (data.error) { addSystemMsg(_t('easy.msg.upload_failed') + file.name + ' - ' + data.error); return; }
-        if (filesPanel.classList.contains('open')) loadFiles(destDir);
+        if (isDesktop() || filesPanel.classList.contains('open')) loadFiles(destDir);
         pendingUploads.push(data.path || (destDir + '/' + file.name));
         clearTimeout(uploadBatchTimer);
         uploadBatchTimer = setTimeout(function() {
@@ -5665,7 +6309,7 @@ const indexHtml = `<!DOCTYPE html>
             name.textContent = s.name || s.id;
             a.appendChild(dot);
             a.appendChild(name);
-            if (currentUser === 'root' && s.owner && s.owner !== 'root') {
+            if (data.isAdmin && s.owner && s.owner !== currentUser) {
               var ownerTag = document.createElement('span');
               ownerTag.className = 'menu-sess-owner';
               ownerTag.textContent = s.owner;
@@ -7467,6 +8111,183 @@ const indexHtml = `<!DOCTYPE html>
 
 // --- Recordings playback page ---
 
+function getAdminHtml(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Admin - Hopcode</title>
+<link rel="icon" type="image/svg+xml" href="./icons/favicon.svg">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:#0f172a; color:#e2e8f0; min-height:100vh; }
+.container { max-width:700px; margin:0 auto; padding:16px; }
+.header { display:flex; align-items:center; justify-content:space-between; margin-bottom:24px; padding-bottom:16px; border-bottom:1px solid #1e293b; }
+.header h1 { font-size:20px; font-weight:600; }
+.back-link { color:#60a5fa; text-decoration:none; font-size:14px; }
+.back-link:hover { color:#93c5fd; }
+
+.create-form { background:#1e293b; border-radius:12px; padding:16px; margin-bottom:24px; }
+.create-form h2 { font-size:15px; font-weight:600; margin-bottom:12px; color:#94a3b8; }
+.form-row { display:flex; gap:10px; flex-wrap:wrap; }
+.form-row input { flex:1; min-width:120px; padding:10px 12px; border-radius:8px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:14px; outline:none; }
+.form-row input:focus { border-color:#60a5fa; }
+.form-row input::placeholder { color:#475569; }
+.create-btn { padding:10px 20px; border-radius:8px; border:none; background:#3b82f6; color:#fff; font-size:14px; font-weight:600; cursor:pointer; white-space:nowrap; }
+.create-btn:hover { background:#2563eb; }
+.create-btn:disabled { opacity:0.5; cursor:not-allowed; }
+.create-btn.loading { display:inline-flex; align-items:center; gap:6px; }
+.spinner { display:inline-block; width:14px; height:14px; border:2px solid rgba(255,255,255,0.3); border-top-color:#fff; border-radius:50%; animation:spin 0.6s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+
+.user-list { display:flex; flex-direction:column; gap:8px; }
+.user-card { display:flex; align-items:center; background:#1e293b; border-radius:10px; padding:12px 16px; gap:12px; }
+.user-card.disabled-user { opacity:0.5; }
+.user-avatar { width:36px; height:36px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:15px; color:#fff; flex-shrink:0; }
+.user-info { flex:1; min-width:0; }
+.user-name { font-size:15px; font-weight:600; display:flex; align-items:center; gap:6px; }
+.user-detail { font-size:12px; color:#64748b; margin-top:2px; }
+.badge { font-size:10px; padding:2px 6px; border-radius:4px; font-weight:600; }
+.badge-admin { background:#3b82f6; color:#fff; }
+.badge-disabled { background:#ef4444; color:#fff; }
+.toggle-btn { padding:6px 14px; border-radius:6px; border:1px solid #334155; background:transparent; color:#94a3b8; font-size:13px; cursor:pointer; white-space:nowrap; }
+.toggle-btn:hover { border-color:#60a5fa; color:#60a5fa; }
+.toggle-btn.enable-btn { border-color:#22c55e; color:#22c55e; }
+.toggle-btn.enable-btn:hover { background:rgba(34,197,94,0.1); }
+
+.toast { position:fixed; bottom:30px; left:50%; transform:translateX(-50%) translateY(20px); background:#1e293b; color:#e2e8f0; padding:10px 24px; border-radius:20px; font-size:14px; opacity:0; transition:all 0.3s; z-index:100; box-shadow:0 4px 12px rgba(0,0,0,0.4); }
+.toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+.toast.error { border:1px solid #ef4444; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1 id="page-title">User Management</h1>
+    <a class="back-link" href="/terminal" id="back-link">← Back</a>
+  </div>
+
+  <div class="create-form">
+    <h2 id="create-title">Create User</h2>
+    <div class="form-row">
+      <input type="text" id="new-username" placeholder="Username" autocomplete="off" autocapitalize="off">
+      <input type="text" id="new-password" placeholder="Password" autocomplete="off">
+      <button class="create-btn" id="create-btn">Create</button>
+    </div>
+  </div>
+
+  <div class="user-list" id="user-list"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+${getI18nScript()}
+(function() {
+  // i18n
+  document.getElementById('page-title').textContent = _t('admin.title');
+  document.getElementById('create-title').textContent = _t('admin.create_user');
+  document.getElementById('back-link').textContent = '← ' + _t('admin.back');
+  document.getElementById('new-username').placeholder = _t('admin.username');
+  document.getElementById('new-password').placeholder = _t('admin.password');
+  document.getElementById('create-btn').textContent = _t('admin.create_user');
+
+  var colors = ['#3b82f6','#8b5cf6','#ec4899','#f59e0b','#10b981','#06b6d4','#ef4444','#84cc16'];
+  function avatarColor(name) { var h = 0; for(var i=0;i<name.length;i++) h = name.charCodeAt(i) + ((h<<5)-h); return colors[Math.abs(h)%colors.length]; }
+
+  function showToast(msg, isError) {
+    var t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = 'toast' + (isError ? ' error' : '');
+    setTimeout(function(){ t.classList.add('show'); }, 10);
+    setTimeout(function(){ t.classList.remove('show'); }, 2500);
+  }
+
+  function loadUsers() {
+    fetch('/terminal/api/admin/users', { credentials: 'include' })
+      .then(function(r) { return r.json(); })
+      .then(function(users) {
+        var list = document.getElementById('user-list');
+        list.innerHTML = '';
+        users.forEach(function(u) {
+          var card = document.createElement('div');
+          card.className = 'user-card' + (u.disabled ? ' disabled-user' : '');
+          var initial = u.username.charAt(0).toUpperCase();
+          var badges = '';
+          if (u.isAdmin) badges += '<span class="badge badge-admin">' + _t('admin.admin_badge') + '</span>';
+          if (u.disabled) badges += '<span class="badge badge-disabled">' + _t('admin.disabled') + '</span>';
+          var btnHtml = '';
+          if (!u.isAdmin) {
+            if (u.disabled) {
+              btnHtml = '<button class="toggle-btn enable-btn" data-user="' + u.username + '">' + _t('admin.enable') + '</button>';
+            } else {
+              btnHtml = '<button class="toggle-btn" data-user="' + u.username + '">' + _t('admin.disable') + '</button>';
+            }
+          }
+          card.innerHTML = '<div class="user-avatar" style="background:' + avatarColor(u.username) + '">' + initial + '</div>' +
+            '<div class="user-info"><div class="user-name">' + u.username + ' ' + badges + '</div>' +
+            '<div class="user-detail">' + u.linuxUser + ' · ' + (u.disabled ? _t('admin.disabled') : _t('admin.enabled')) + '</div></div>' +
+            btnHtml;
+          list.appendChild(card);
+
+          var btn = card.querySelector('.toggle-btn');
+          if (btn) {
+            btn.addEventListener('click', function() {
+              var name = this.getAttribute('data-user');
+              var msg = u.disabled ? _t('admin.confirm_enable', {name: name}) : _t('admin.confirm_disable', {name: name});
+              if (!confirm(msg)) return;
+              fetch('/terminal/api/admin/users/' + encodeURIComponent(name) + '/toggle', {
+                method: 'PUT', credentials: 'include'
+              }).then(function(r) { return r.json(); }).then(function(d) {
+                if (d.success) {
+                  showToast(_t('admin.updated', {name: name}));
+                  loadUsers();
+                } else {
+                  showToast(d.error || 'Error', true);
+                }
+              });
+            });
+          }
+        });
+      });
+  }
+
+  document.getElementById('create-btn').addEventListener('click', function() {
+    var username = document.getElementById('new-username').value.trim();
+    var password = document.getElementById('new-password').value.trim();
+    if (!username || !password) { showToast(_t('admin.error_empty'), true); return; }
+    var btn = this;
+    var origText = btn.textContent;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>' + _t('admin.creating');
+    btn.classList.add('loading');
+    fetch('/terminal/api/admin/users', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: username, password: password })
+    }).then(function(r) { return r.json(); }).then(function(d) {
+      btn.disabled = false;
+      btn.textContent = origText;
+      btn.classList.remove('loading');
+      if (d.success) {
+        showToast(_t('admin.created', {name: username}));
+        document.getElementById('new-username').value = '';
+        document.getElementById('new-password').value = '';
+        loadUsers();
+      } else {
+        showToast(d.error || 'Error', true);
+      }
+    }).catch(function() { btn.disabled = false; btn.textContent = origText; btn.classList.remove('loading'); showToast('Error', true); });
+  });
+
+  loadUsers();
+})();
+</script>
+</body>
+</html>`;
+}
+
 function getRecordingsHtml(): string {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -7723,6 +8544,8 @@ interface EasySessionInfo {
   lastActivity: number;
   connectedUsers: Map<string, Set<WebSocket>>;  // username -> set of WS connections
   sharedWith: Set<string>;  // usernames who have ever joined (excluding owner)
+  _fileAccessUsers: Set<string>;  // non-owner users granted file access
+  _leaveTimers: Map<string, ReturnType<typeof setTimeout>>;  // debounce leave broadcasts
 }
 const easySessions = new Map<string, EasySessionInfo>();
 
@@ -7738,6 +8561,7 @@ interface EasyRegistryEntry {
   lastActivity: number;
   projectDir: string;
   sharedWith?: string[];
+  fileAccessUsers?: string[];
 }
 
 function saveEasyRegistry(): void {
@@ -7753,6 +8577,7 @@ function saveEasyRegistry(): void {
         lastActivity: info.lastActivity,
         projectDir: info.cp.projectDir,
         sharedWith: info.sharedWith.size > 0 ? Array.from(info.sharedWith) : undefined,
+        fileAccessUsers: info._fileAccessUsers.size > 0 ? Array.from(info._fileAccessUsers) : undefined,
       });
     }
     fs.mkdirSync(path.dirname(EASY_REGISTRY_FILE), { recursive: true });
@@ -7781,6 +8606,8 @@ function loadEasyRegistry(): void {
         lastActivity: entry.lastActivity,
         connectedUsers: new Map(),
         sharedWith: new Set(entry.sharedWith || []),
+        _fileAccessUsers: new Set(entry.fileAccessUsers || []),
+        _leaveTimers: new Map(),
       };
       easySessions.set(entry.id, info);
     }
@@ -7832,6 +8659,8 @@ function scanOrphanEasySessions(): void {
             lastActivity: stat.mtimeMs,
             connectedUsers: new Map(),
             sharedWith: new Set(),
+            _fileAccessUsers: new Set(),
+            _leaveTimers: new Map(),
           });
           knownDirs.add(projDir);
           recovered++;
@@ -7942,7 +8771,7 @@ const server = http.createServer(async (req, res) => {
 
         if (isMultiUser) {
           // Multi-user: look up username in config
-          if (username && usersConfig[username] && password === usersConfig[username]!.password) {
+          if (username && usersConfig[username] && password === usersConfig[username]!.password && !usersConfig[username]!.disabled) {
             loginOk = true;
             tokenUsername = username;
           }
@@ -7990,6 +8819,54 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // POST /terminal/api/guest-link — generate guest share link for an Easy Mode session
+  if ((req.url || '').match(/^(?:\/terminal)?\/api\/guest-link$/) && req.method === 'POST') {
+    if (!isAuthenticated(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      req.resume();
+      return;
+    }
+    let body = '';
+    req.on('data', (c: Buffer) => { body += c.toString(); });
+    req.on('end', () => {
+      try {
+        const { sessionId } = JSON.parse(body);
+        if (!sessionId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'sessionId required' }));
+          return;
+        }
+        // Check ownership
+        const info = easySessions.get(sessionId);
+        if (!info) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Session not found' }));
+          return;
+        }
+        const glAuth = getAuthInfo(req);
+        if (info.owner !== glAuth.username && !isAdminUser(glAuth.username)) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Only session owner can share' }));
+          return;
+        }
+        // Generate 48h guest token
+        const expiresAt = Date.now() + 48 * 60 * 60 * 1000;
+        const token = makeGuestToken(sessionId, expiresAt);
+        // Build URL using request host
+        const proto = req.headers['x-forwarded-proto'] || 'http';
+        const host = req.headers['host'] || `localhost:${PORT}`;
+        const url = `${proto}://${host}/terminal/guest?session=${encodeURIComponent(sessionId)}&token=${token}&expires=${expiresAt}`;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ url, expiresAt }));
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid request body' }));
+      }
+    });
+    return;
+  }
+
   // GET /terminal/api/sessions — list sessions as JSON
   if ((req.url || '').match(/^(?:\/terminal)?\/api\/sessions(\?.*)?$/) && req.method === 'GET') {
     if (!isAuthenticated(req)) {
@@ -7999,12 +8876,12 @@ const server = http.createServer(async (req, res) => {
     }
     const auth = getAuthInfo(req);
     try {
-      const ownerParam = isMultiUser && auth.username && auth.username !== 'root' ? `?owner=${encodeURIComponent(auth.username)}` : '';
+      const ownerParam = isMultiUser && auth.username && !isAdminUser(auth.username) ? `?owner=${encodeURIComponent(auth.username)}` : '';
       const resp = await ptyFetch(`/sessions${ownerParam}`);
       const sessions: any[] = await resp.json();
       // Append Easy Mode sessions
       for (const [id, info] of easySessions) {
-        if (isMultiUser && auth.username !== 'root' && info.owner !== auth.username) continue;
+        if (isMultiUser && !isAdminUser(auth.username) && info.owner !== auth.username) continue;
         // Don't duplicate if PTY session with same ID exists
         if (sessions.some((s: any) => s.id === id)) continue;
         sessions.push({
@@ -8018,7 +8895,7 @@ const server = http.createServer(async (req, res) => {
         });
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ currentUser: auth.username, sessions }));
+      res.end(JSON.stringify({ currentUser: auth.username, isAdmin: isAdminUser(auth.username), sessions }));
     } catch {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Internal error' }));
@@ -8191,12 +9068,24 @@ const server = http.createServer(async (req, res) => {
     if (easySessions.has(sessionId)) {
       const easyInfo = easySessions.get(sessionId);
       if (easyInfo) {
-        // Check ownership
-        if (auth.username !== 'root' && easyInfo.owner !== auth.username) {
+        const isOwnerOrAdmin = isAdminUser(auth.username) || easyInfo.owner === auth.username;
+        if (!isOwnerOrAdmin) {
+          // Shared user — just remove from sharedWith (leave session)
+          if (auth.username && easyInfo.sharedWith.has(auth.username)) {
+            easyInfo.sharedWith.delete(auth.username);
+            easyInfo._fileAccessUsers.delete(auth.username);
+            saveEasyRegistry();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, left: true }));
+            return;
+          }
           res.writeHead(403, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: false, error: 'Forbidden' }));
           return;
         }
+        // Owner/admin — actually delete the session
+        const stateFile = path.join(easyInfo.cp.projectDir, '.easy-state.json');
+        try { fs.unlinkSync(stateFile); } catch {}
         easyInfo.cp.dispose();
         easySessions.delete(sessionId);
         saveEasyRegistry();
@@ -8207,7 +9096,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // PTY sessions: check ownership and proxy to PTY service
-    if (auth.username !== 'root') {
+    if (!isAdminUser(auth.username)) {
       try {
         const listResp = await ptyFetch(`/sessions?owner=${encodeURIComponent(auth.username!)}`);
         if (listResp.ok) {
@@ -8232,6 +9121,110 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // --- Admin API (admin only) ---
+
+  // GET /api/admin/users — list users
+  if ((req.url || '').match(/^(?:\/terminal)?\/api\/admin\/users$/) && req.method === 'GET') {
+    if (!isAuthenticated(req)) { res.writeHead(401); res.end('Unauthorized'); return; }
+    const auth = getAuthInfo(req);
+    if (!isAdminUser(auth.username)) { res.writeHead(403); res.end('Forbidden'); return; }
+    const users = Object.entries(usersConfig).map(([name, cfg]) => ({
+      username: name,
+      linuxUser: cfg.linuxUser,
+      disabled: !!cfg.disabled,
+      isAdmin: ADMIN_USERS.has(name),
+    }));
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(users));
+    return;
+  }
+
+  // POST /api/admin/users — create user
+  if ((req.url || '').match(/^(?:\/terminal)?\/api\/admin\/users$/) && req.method === 'POST') {
+    if (!isAuthenticated(req)) { res.writeHead(401); res.end('Unauthorized'); return; }
+    const auth = getAuthInfo(req);
+    if (!isAdminUser(auth.username)) { res.writeHead(403); res.end('Forbidden'); return; }
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', async () => {
+      try {
+        const { username: newUser, password: newPass } = JSON.parse(Buffer.concat(chunks).toString());
+        if (!newUser || !newPass) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Username and password required' }));
+          return;
+        }
+        if (usersConfig[newUser]) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'User already exists' }));
+          return;
+        }
+        // Create Linux user + setup
+        const { execSync } = await import('child_process');
+        try {
+          execSync(`id ${newUser}`, { stdio: 'ignore' });
+        } catch {
+          execSync(`useradd -m -s /bin/bash ${newUser}`);
+          execSync(`echo '${newUser}:${newPass.replace(/'/g, "'\\''")}' | chpasswd`);
+        }
+        // Create coding dir
+        const home = `/home/${newUser}`;
+        fs.mkdirSync(`${home}/coding`, { recursive: true });
+        // Claude CLI permissions
+        const claudeDir = `${home}/.claude`;
+        fs.mkdirSync(claudeDir, { recursive: true });
+        fs.writeFileSync(`${claudeDir}/settings.json`, JSON.stringify({
+          permissions: {
+            allow: ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Bash'],
+            deny: ['Bash(rm -rf *)', 'Bash(git push --force *)', 'Bash(git reset --hard *)', 'Bash(shutdown *)', 'Bash(reboot *)', 'Bash(mkfs *)', 'Bash(userdel *)', 'Bash(passwd *)', 'Bash(chown *)']
+          }
+        }, null, 2) + '\n');
+        // chown
+        try { execSync(`chown -R ${newUser}:${newUser} ${home}/.claude ${home}/coding`); } catch {}
+        // Sudoers (minimal)
+        const sudoersFile = `/etc/sudoers.d/${newUser}`;
+        if (!fs.existsSync(sudoersFile)) {
+          fs.writeFileSync(sudoersFile, `${newUser} ALL=(ALL) NOPASSWD: /usr/sbin/nginx -t\n${newUser} ALL=(ALL) NOPASSWD: /usr/bin/systemctl reload nginx\n`);
+          fs.chmodSync(sudoersFile, 0o440);
+        }
+        // Add to users.json
+        usersConfig[newUser] = { password: newPass, linuxUser: newUser };
+        saveUsersConfig();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: (e as Error).message }));
+      }
+    });
+    return;
+  }
+
+  // PUT /api/admin/users/:username/toggle — enable/disable user
+  const toggleMatch = (req.url || '').match(/^(?:\/terminal)?\/api\/admin\/users\/([^/]+)\/toggle$/);
+  if (toggleMatch && req.method === 'PUT') {
+    if (!isAuthenticated(req)) { res.writeHead(401); res.end('Unauthorized'); return; }
+    const auth = getAuthInfo(req);
+    if (!isAdminUser(auth.username)) { res.writeHead(403); res.end('Forbidden'); return; }
+    const targetUser = decodeURIComponent(toggleMatch[1]!);
+    if (!usersConfig[targetUser]) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'User not found' }));
+      return;
+    }
+    // Don't allow disabling admin users
+    if (ADMIN_USERS.has(targetUser)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Cannot disable admin users' }));
+      return;
+    }
+    usersConfig[targetUser]!.disabled = !usersConfig[targetUser]!.disabled;
+    saveUsersConfig();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true, disabled: !!usersConfig[targetUser]!.disabled }));
+    return;
+  }
+
   // --- Recordings API (root/admin only) ---
 
   // GET /terminal/api/recordings — list recordings
@@ -8242,7 +9235,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const recAuth = getAuthInfo(req);
-    if (recAuth.username !== 'root' && recAuth.username !== 'admin') {
+    if (!isAdminUser(recAuth.username) && recAuth.username !== 'admin') {
       res.writeHead(403, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Forbidden: admin access required' }));
       return;
@@ -8301,7 +9294,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const castAuth = getAuthInfo(req);
-    if (castAuth.username !== 'root' && castAuth.username !== 'admin') {
+    if (!isAdminUser(castAuth.username) && castAuth.username !== 'admin') {
       res.writeHead(403, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Forbidden: admin access required' }));
       return;
@@ -8339,7 +9332,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const delRecAuth = getAuthInfo(req);
-    if (delRecAuth.username !== 'root' && delRecAuth.username !== 'admin') {
+    if (!isAdminUser(delRecAuth.username) && delRecAuth.username !== 'admin') {
       res.writeHead(403, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Forbidden: admin access required' }));
       return;
@@ -8429,6 +9422,33 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // --- Guest route (before auth) ---
+  if (pathname === '/terminal/guest' || pathname === '/guest') {
+    const guestSession = parsedUrl.searchParams.get('session') || '';
+    const guestToken = parsedUrl.searchParams.get('token') || '';
+    const guestExpires = parsedUrl.searchParams.get('expires') || '';
+    const langCookie = (req.headers.cookie || '').match(/hopcode-lang=(\w+)/);
+    const lang = (langCookie && langCookie[1]) ? langCookie[1] : ((req.headers['accept-language'] || '').toLowerCase().startsWith('zh') ? 'zh' : 'en');
+
+    if (!guestSession || !guestToken || !guestExpires) {
+      res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(getGuestErrorHtml(t(lang, 'guest.invalid')));
+      return;
+    }
+    if (!verifyGuestToken(guestSession, guestToken, guestExpires)) {
+      const expiresAt = parseInt(guestExpires, 10);
+      const isExpired = !isNaN(expiresAt) && Date.now() > expiresAt;
+      res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(getGuestErrorHtml(t(lang, isExpired ? 'guest.expired' : 'guest.invalid')));
+      return;
+    }
+    // Valid guest token — serve guest Easy Mode page (can chat, no menu/files/voice)
+    const guestAuth: AuthInfo = { authenticated: true, username: 'guest_' + randomBytes(4).toString('hex'), linuxUser: '' };
+    const guestHtml = getEasyModeHtml(guestAuth, { guestMode: true, guestSessionId: guestSession, guestToken, guestExpires });
+    sendHtml(req, res, guestHtml);
+    return;
+  }
+
   // URL token authentication: ?token=username:hmac → set cookie → redirect
   const tokenParam = parsedUrl.searchParams.get('token');
   if (tokenParam) {
@@ -8468,7 +9488,20 @@ const server = http.createServer(async (req, res) => {
     // Drain any request body
     req.resume();
     try {
-      const parentDir = resolveSafePath(parsedUrl.searchParams.get('path') || '/', auth.linuxUser);
+      // Check easy session file access for shared users
+      const mkSid = parsedUrl.searchParams.get('session');
+      const mkEasy = mkSid ? easySessions.get(mkSid) : null;
+      const mkEasyAccess = mkEasy && (mkEasy.owner === auth.username || isAdminUser(auth.username) || mkEasy._fileAccessUsers.has(auth.username || ''));
+      const mkEasyDir = mkEasyAccess ? mkEasy.cp.projectDir : '';
+
+      let parentDir: string;
+      if (mkEasyAccess && mkEasyDir) {
+        const resolved = path.resolve('/', parsedUrl.searchParams.get('path') || '/');
+        parentDir = (resolved.startsWith(mkEasyDir + '/') || resolved === mkEasyDir) ? resolved : resolveSafePath(parsedUrl.searchParams.get('path') || '/', auth.linuxUser);
+      } else {
+        parentDir = resolveSafePath(parsedUrl.searchParams.get('path') || '/', auth.linuxUser);
+      }
+
       const folderName = (parsedUrl.searchParams.get('name') || '').trim();
       if (!folderName || folderName.includes('/') || folderName.includes('\\')) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -8481,7 +9514,7 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: 'Parent path is not a directory' }));
         return;
       }
-      const posixUser = auth.linuxUser ? getUserPosixInfo(auth.linuxUser) : null;
+      const posixUser = (!mkEasyAccess && auth.linuxUser) ? getUserPosixInfo(auth.linuxUser) : null;
       if (posixUser && !checkPosixAccess(dirStat, posixUser, 'write')) {
         res.writeHead(403, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Permission denied' }));
@@ -8551,6 +9584,15 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // Check Easy Mode session file access — skip posix check if authorized
+      const uploadSid = parsedUrl.searchParams.get('session') || '';
+      const uploadEasyInfo = uploadSid ? easySessions.get(uploadSid) : null;
+      const uploadEasyAccess = uploadEasyInfo && (
+        uploadEasyInfo.owner === auth.username ||
+        isAdminUser(auth.username) ||
+        uploadEasyInfo._fileAccessUsers.has(auth.username || '')
+      );
+
       // Verify target directory exists and is a directory
       const dirStat = await fs.promises.stat(targetDir);
       if (!dirStat.isDirectory()) {
@@ -8560,8 +9602,9 @@ const server = http.createServer(async (req, res) => {
       }
 
       // Permission check: can user write to this directory?
+      // Skip posix check for Easy Mode sessions where user has file access
       const posixUser = auth.linuxUser ? getUserPosixInfo(auth.linuxUser) : null;
-      if (posixUser && !checkPosixAccess(dirStat, posixUser, 'write')) {
+      if (posixUser && !uploadEasyAccess && !checkPosixAccess(dirStat, posixUser, 'write')) {
         res.writeHead(403, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Permission denied' }));
         return;
@@ -8588,9 +9631,13 @@ const server = http.createServer(async (req, res) => {
       const filePath = path.join(targetDir, actualName);
       await fs.promises.writeFile(filePath, body);
 
-      // Multi-user: chown file to user's uid/gid
-      if (posixUser) {
-        try { fs.chownSync(filePath, posixUser.uid, posixUser.gid); } catch {}
+      // Multi-user: chown file to appropriate uid/gid
+      // For Easy Mode uploads, use the session owner's uid/gid so files are owned correctly
+      const chownUser = uploadEasyAccess && uploadEasyInfo
+        ? getUserPosixInfo(uploadEasyInfo.owner)
+        : posixUser;
+      if (chownUser) {
+        try { fs.chownSync(filePath, chownUser.uid, chownUser.gid); } catch {}
       }
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -8607,12 +9654,37 @@ const server = http.createServer(async (req, res) => {
       const sid = parsedUrl.searchParams.get('session');
       if (!sid) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Session not found' })); return; }
 
+      // Check if this is an Easy Mode session and user has file access
+      const easyInfo = easySessions.get(sid);
+      const isEasyWithAccess = easyInfo && (
+        easyInfo.owner === auth.username ||
+        isAdminUser(auth.username) ||
+        easyInfo._fileAccessUsers.has(auth.username || '')
+      );
+      const easyProjectDir = isEasyWithAccess ? easyInfo.cp.projectDir : '';
+
       // Determine user's home directory for fallback
       const userHome = getUserHome(auth.linuxUser);
 
       let requestedPath = parsedUrl.searchParams.get('path') || '';
       let dirPath: string;
-      if (!requestedPath) {
+
+      // For Easy Mode sessions with file access, resolve within project dir (bypass home sandbox)
+      if (isEasyWithAccess && easyProjectDir) {
+        if (!requestedPath) {
+          dirPath = easyProjectDir;
+        } else {
+          const resolved = path.resolve('/', requestedPath);
+          // Allow paths within the project dir; clamp others
+          if (resolved.startsWith(easyProjectDir + '/') || resolved === easyProjectDir) {
+            dirPath = resolved;
+          } else if (isAdminLinuxUser(auth.linuxUser)) {
+            dirPath = resolved;
+          } else {
+            dirPath = easyProjectDir;
+          }
+        }
+      } else if (!requestedPath) {
         // Get CWD from PTY service
         try {
           const cwdResp = await ptyFetch(`/sessions/${encodeURIComponent(sid)}/cwd`);
@@ -8632,7 +9704,7 @@ const server = http.createServer(async (req, res) => {
 
       // Get CWD for response (may differ from dirPath)
       let sessionCwd = dirPath;
-      if (requestedPath) {
+      if (requestedPath && !isEasyWithAccess) {
         try {
           const cwdResp = await ptyFetch(`/sessions/${encodeURIComponent(sid)}/cwd`);
           if (cwdResp.ok) {
@@ -8642,8 +9714,9 @@ const server = http.createServer(async (req, res) => {
         } catch {}
       }
 
-      // Permission check: can user read+execute (list) this directory?
-      const posixUser = auth.linuxUser ? getUserPosixInfo(auth.linuxUser) : null;
+      // Permission check: skip POSIX check for Easy Mode shared users (files owned by session owner)
+      const skipPosixCheck = !!isEasyWithAccess;
+      const posixUser = (!skipPosixCheck && auth.linuxUser) ? getUserPosixInfo(auth.linuxUser) : null;
       if (posixUser) {
         const dirStat = await fs.promises.stat(dirPath);
         if (!checkPosixAccess(dirStat, posixUser, 'read+execute')) {
@@ -8658,10 +9731,11 @@ const server = http.createServer(async (req, res) => {
       const items: any[] = [];
       for (const entry of entries) {
         if (!showHidden && entry.name.startsWith('.')) continue;
+        if (!showHidden && entry.name.toUpperCase() === 'CLAUDE.MD') continue;
         const fullPath = path.join(dirPath, entry.name);
         let stat;
         try { stat = await fs.promises.stat(fullPath); } catch { continue; }
-        // Filter: only show entries the user can at least stat
+        // Filter: only show entries the user can at least stat (skip for easy shared users)
         if (posixUser && !checkPosixAccess(stat, posixUser, 'read')) continue;
         items.push({
           name: entry.name,
@@ -8691,12 +9765,25 @@ const server = http.createServer(async (req, res) => {
     try {
       const requestedPath = parsedUrl.searchParams.get('path') || '';
       if (!requestedPath) { res.writeHead(400); res.end('Path required'); return; }
-      const filePath = resolveSafePath(requestedPath, auth.linuxUser);
+
+      // Check easy session file access for shared users
+      const dlSid = parsedUrl.searchParams.get('session');
+      const dlEasy = dlSid ? easySessions.get(dlSid) : null;
+      const dlEasyAccess = dlEasy && (dlEasy.owner === auth.username || isAdminUser(auth.username) || dlEasy._fileAccessUsers.has(auth.username || ''));
+      const dlEasyDir = dlEasyAccess ? dlEasy.cp.projectDir : '';
+
+      let filePath: string;
+      if (dlEasyAccess && dlEasyDir) {
+        const resolved = path.resolve('/', requestedPath);
+        filePath = (resolved.startsWith(dlEasyDir + '/') || resolved === dlEasyDir) ? resolved : resolveSafePath(requestedPath, auth.linuxUser);
+      } else {
+        filePath = resolveSafePath(requestedPath, auth.linuxUser);
+      }
 
       const stat = await fs.promises.stat(filePath);
       if (stat.isDirectory()) { res.writeHead(400); res.end('Cannot download directory'); return; }
 
-      const posixUser = auth.linuxUser ? getUserPosixInfo(auth.linuxUser) : null;
+      const posixUser = (!dlEasyAccess && auth.linuxUser) ? getUserPosixInfo(auth.linuxUser) : null;
       if (posixUser && !checkPosixAccess(stat, posixUser, 'read')) {
         res.writeHead(403); res.end('Permission denied'); return;
       }
@@ -8843,12 +9930,25 @@ const server = http.createServer(async (req, res) => {
     try {
       const requestedPath = parsedUrl.searchParams.get('path') || '';
       if (!requestedPath) { res.writeHead(400); res.end('Path required'); return; }
-      const filePath = resolveSafePath(requestedPath, auth.linuxUser);
+
+      // Check easy session file access for shared users
+      const pvSid = parsedUrl.searchParams.get('session');
+      const pvEasy = pvSid ? easySessions.get(pvSid) : null;
+      const pvEasyAccess = pvEasy && (pvEasy.owner === auth.username || isAdminUser(auth.username) || pvEasy._fileAccessUsers.has(auth.username || ''));
+      const pvEasyDir = pvEasyAccess ? pvEasy.cp.projectDir : '';
+
+      let filePath: string;
+      if (pvEasyAccess && pvEasyDir) {
+        const resolved = path.resolve('/', requestedPath);
+        filePath = (resolved.startsWith(pvEasyDir + '/') || resolved === pvEasyDir) ? resolved : resolveSafePath(requestedPath, auth.linuxUser);
+      } else {
+        filePath = resolveSafePath(requestedPath, auth.linuxUser);
+      }
 
       const stat = await fs.promises.stat(filePath);
       if (stat.isDirectory()) { res.writeHead(400); res.end('Cannot preview directory'); return; }
 
-      const posixUser = auth.linuxUser ? getUserPosixInfo(auth.linuxUser) : null;
+      const posixUser = (!pvEasyAccess && auth.linuxUser) ? getUserPosixInfo(auth.linuxUser) : null;
       if (posixUser && !checkPosixAccess(stat, posixUser, 'read')) {
         res.writeHead(403); res.end('Permission denied'); return;
       }
@@ -9033,9 +10133,20 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Admin page: /terminal/admin (admin only)
+  if (pathname === '/terminal/admin' || pathname === '/admin') {
+    if (!isAdminUser(auth.username)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain' });
+      res.end('Forbidden: admin access required');
+      return;
+    }
+    sendHtml(req, res, getAdminHtml());
+    return;
+  }
+
   // Recordings page: /terminal/recordings (root/admin only)
   if (pathname === '/terminal/recordings' || pathname === '/recordings') {
-    if (auth.username !== 'root' && auth.username !== 'admin') {
+    if (!isAdminUser(auth.username) && auth.username !== 'admin') {
       res.writeHead(403, { 'Content-Type': 'text/plain' });
       res.end('Forbidden: admin access required');
       return;
@@ -9098,7 +10209,7 @@ terminalWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) =>
   const sessionId = url.searchParams.get('session') || 'default';
   const wsAuth = getAuthInfo(req);
   // Connect to PTY service WebSocket, include owner for verification (root bypasses)
-  const ownerQuery = isMultiUser && wsAuth.username !== 'root' ? `?owner=${encodeURIComponent(wsAuth.username)}` : '';
+  const ownerQuery = isMultiUser && !isAdminUser(wsAuth.username) ? `?owner=${encodeURIComponent(wsAuth.username)}` : '';
   const ptyWsUrl = `ws://127.0.0.1:${PTY_SERVICE_PORT}/ws/${encodeURIComponent(sessionId)}${ownerQuery}`;
   const ptyWs = new WebSocket(ptyWsUrl, {
     headers: { [PTY_INTERNAL_TOKEN_HEADER]: PTY_INTERNAL_TOKEN },
@@ -9168,7 +10279,16 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
   const url = new URL(req.url!, `http://${req.headers.host}`);
   const sessionId = url.searchParams.get('session') || 'default';
   const projectParam = url.searchParams.get('project') || '';
-  const wsAuth = getAuthInfo(req);
+  const isGuestWs = !!(req as any)._guestMode;
+  const wsAuth = isGuestWs
+    ? { authenticated: true, username: (req as any)._guestUsername || 'guest', linuxUser: '' }
+    : getAuthInfo(req);
+
+  // Guest: session must already exist
+  if (isGuestWs && !easySessions.has(sessionId)) {
+    clientWs.close(4004, 'Session not found');
+    return;
+  }
 
   // Get or create ClaudeProcess for this session
   let info = easySessions.get(sessionId);
@@ -9189,7 +10309,7 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
       ? `${homeDir}/coding/${projectParam}`
       : `${homeDir}`;
     cp = new ClaudeProcess(sessionId, projectDir, sendToClient);
-    info = { cp, owner: wsAuth.username, project: projectParam, name: projectParam || sessionId, createdAt: Date.now(), lastActivity: Date.now(), connectedUsers: new Map(), sharedWith: new Set() };
+    info = { cp, owner: wsAuth.username, project: projectParam, name: projectParam || sessionId, createdAt: Date.now(), lastActivity: Date.now(), connectedUsers: new Map(), sharedWith: new Set(), _fileAccessUsers: new Set(), _leaveTimers: new Map() };
     easySessions.set(sessionId, info);
     saveEasyRegistry();
     console.log(`[easy] Created ClaudeProcess for ${sessionId} in ${projectDir}`);
@@ -9202,14 +10322,28 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
 
   // Track connected user
   const connUser = wsAuth.username || 'anonymous';
+  // Cancel any pending leave timer for this user (reconnect before timeout)
+  const pendingLeave = info._leaveTimers.get(connUser);
+  if (pendingLeave) {
+    clearTimeout(pendingLeave);
+    info._leaveTimers.delete(connUser);
+  }
+  const wasConnected = info.connectedUsers.has(connUser) && info.connectedUsers.get(connUser)!.size > 0;
   if (!info.connectedUsers.has(connUser)) {
     info.connectedUsers.set(connUser, new Set());
   }
   info.connectedUsers.get(connUser)!.add(clientWs);
 
   // Broadcast updated participants list to all connected clients
+  // Includes all known users (owner + sharedWith) with online/offline status
   const broadcastParticipants = () => {
-    const users = Array.from(info!.connectedUsers.keys());
+    const onlineSet = new Set(info!.connectedUsers.keys());
+    // Collect all known users: owner first, then others
+    const allUsers = new Set<string>();
+    allUsers.add(info!.owner);
+    for (const u of onlineSet) allUsers.add(u);
+    for (const u of info!.sharedWith) allUsers.add(u);
+    const users = Array.from(allUsers).map(name => ({ name, online: onlineSet.has(name) }));
     const msg = JSON.stringify({ type: 'participants', users });
     for (const wsSet of info!.connectedUsers.values()) {
       for (const ws of wsSet) {
@@ -9217,15 +10351,30 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
       }
     }
   };
-  broadcastParticipants();
+  // Only broadcast if this is a genuinely new user (not a reconnect)
+  if (!wasConnected) {
+    broadcastParticipants();
+  }
 
   // Track shared users (non-owner who joined)
-  if (info && connUser !== info.owner && connUser !== 'anonymous') {
+  if (info && connUser !== info.owner && connUser !== 'anonymous' && !connUser.startsWith('guest_')) {
     if (!info.sharedWith.has(connUser)) {
       info.sharedWith.add(connUser);
       saveEasyRegistry();
     }
   }
+
+  // Send session info (owner, projectDir, file access)
+  const isOwner = connUser === info.owner;
+  const fileAccessUsers = info._fileAccessUsers || new Set<string>();
+  const hasFileAccess = isOwner || fileAccessUsers.has(connUser);
+  clientWs.send(JSON.stringify({
+    type: 'session_info',
+    owner: info.owner,
+    projectDir: cp.projectDir,
+    isOwner,
+    hasFileAccess,
+  }));
 
   // Send current state + history on connect
   const history = cp.getHistory();
@@ -9240,8 +10389,13 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
     state: initialState,
   }));
 
-  // Send last preview URL if any
-  if (cp.lastPreviewUrl) {
+  // Send all preview URLs so joining users see the same preview state
+  if (cp.previewUrls && cp.previewUrls.length > 0) {
+    // Send all URLs (oldest first so newest ends up on top in client)
+    for (let i = cp.previewUrls.length - 1; i >= 0; i--) {
+      clientWs.send(JSON.stringify({ type: 'preview_hint', url: cp.previewUrls[i] }));
+    }
+  } else if (cp.lastPreviewUrl) {
     clientWs.send(JSON.stringify({ type: 'preview_hint', url: cp.lastPreviewUrl }));
   }
 
@@ -9265,6 +10419,31 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
         cp!.sendMessage(msg.text, connUser, mentions, participantCount);
       } else if (msg.type === 'cancel') {
         cp!.cancel();
+      } else if (msg.type === 'retry') {
+        cp!.retry();
+      } else if (msg.type === 'request_file_access') {
+        // Non-owner requests file access — notify all owner connections
+        if (info && connUser !== info.owner) {
+          const ownerSockets = info.connectedUsers.get(info.owner);
+          if (ownerSockets) {
+            const notification = JSON.stringify({ type: 'file_access_request', user: connUser });
+            ownerSockets.forEach((ws) => { try { ws.send(notification); } catch(_){} });
+          }
+        }
+      } else if (msg.type === 'grant_file_access') {
+        // Owner grants file access to a user
+        if (info && connUser === info.owner && msg.user) {
+          info._fileAccessUsers.add(msg.user);
+          saveEasyRegistry();
+          // Notify all connections of the granted user
+          const grantedSockets = info.connectedUsers.get(msg.user);
+          if (grantedSockets) {
+            const notification = JSON.stringify({ type: 'file_access_granted', user: msg.user });
+            grantedSockets.forEach((ws) => { try { ws.send(notification); } catch(_){} });
+          }
+          // Also confirm to the owner
+          clientWs.send(JSON.stringify({ type: 'file_access_granted', user: msg.user }));
+        }
       }
     } catch (e) {
       console.error(`[easy] ${sessionId} message parse error:`, (e as Error).message);
@@ -9274,13 +10453,26 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
   clientWs.on('close', () => {
     console.log(`[easy] Client disconnected: ${sessionId} user=${connUser}`);
     cp!.removeListener(sendToClient);
-    // Remove from connected users tracking
+    // Remove this WS from connected users tracking
     const wsSet = info?.connectedUsers.get(connUser);
     if (wsSet) {
       wsSet.delete(clientWs);
-      if (wsSet.size === 0) info!.connectedUsers.delete(connUser);
+      // If user has no more connections, debounce the leave broadcast
+      // so reconnects don't trigger false join/leave notifications
+      if (wsSet.size === 0 && info) {
+        info.connectedUsers.delete(connUser);
+        // Wait 60s before broadcasting leave — gives time to reconnect
+        const timer = setTimeout(() => {
+          info!._leaveTimers.delete(connUser);
+          // Check they haven't reconnected in the meantime
+          if (!info!.connectedUsers.has(connUser) || info!.connectedUsers.get(connUser)!.size === 0) {
+            info!.connectedUsers.delete(connUser);
+            broadcastParticipants();
+          }
+        }, 60000);
+        info._leaveTimers.set(connUser, timer);
+      }
     }
-    broadcastParticipants();
     // Don't dispose ClaudeProcess — keep it alive for reconnect
   });
 
@@ -9352,19 +10544,42 @@ voiceWss.on('connection', (ws) => {
 
 // Handle WebSocket upgrade
 server.on('upgrade', (request, socket, head) => {
+  const url = new URL(request.url!, `http://${request.headers.host}`);
+  const p = url.pathname;
+
+  // Allow guest token auth for /ws-easy
+  if (p === '/ws-easy' || p === '/terminal/ws-easy') {
+    const guestToken = url.searchParams.get('guest_token');
+    const guestExpires = url.searchParams.get('expires');
+    const guestSession = url.searchParams.get('session');
+    if (guestToken && guestExpires && guestSession) {
+      if (verifyGuestToken(guestSession, guestToken, guestExpires)) {
+        easyWss.handleUpgrade(request, socket, head, (ws) => {
+          (request as any)._guestMode = true;
+          // Use client-supplied stable guest_id, fallback to random
+          const gid = url.searchParams.get('guest_id') || randomBytes(4).toString('hex');
+          (request as any)._guestUsername = 'guest_' + gid;
+          easyWss.emit('connection', ws, request);
+        });
+        return;
+      }
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+  }
+
   // Verify authentication before allowing WebSocket upgrade
   if (!isAuthenticated(request)) {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
     return;
   }
-  const url = new URL(request.url!, `http://${request.headers.host}`);
 
   // Accept both direct paths and proxy-rewritten paths:
   // Direct: /terminal/ws, /terminal/ws-voice
   // Via proxy (strips /terminal): /ws, /ws-voice
   // Legacy: /ws/terminal, /ws/voice
-  const p = url.pathname;
   if (p === '/ws' || p === '/terminal/ws' || p === '/ws/terminal') {
     terminalWss.handleUpgrade(request, socket, head, (ws) => {
       terminalWss.emit('connection', ws, request);
