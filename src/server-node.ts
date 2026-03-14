@@ -862,8 +862,8 @@ function getLoginHtml(): string {
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Hopcode">
   <link rel="manifest" href="./manifest.json">
-  <link rel="icon" type="image/png" href="./icons/logo-horse.png?v=4">
-  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png?v=4">
+  <link rel="icon" type="image/png" href="./icons/logo-horse.png?v=7">
+  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png?v=7">
   <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
   <title>Hopcode - Login</title>
   <script>${getI18nScript()}</script>
@@ -1031,8 +1031,8 @@ async function buildSessionsHtml(username?: string): Promise<string> {
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Hopcode">
   <link rel="manifest" href="./manifest.json">
-  <link rel="icon" type="image/png" href="./icons/logo-horse.png?v=4">
-  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png?v=4">
+  <link rel="icon" type="image/png" href="./icons/logo-horse.png?v=7">
+  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png?v=7">
   <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
   <title>Hopcode - Sessions</title>
   <script>${getI18nScript()}</script>
@@ -1201,7 +1201,7 @@ async function buildSessionsHtml(username?: string): Promise<string> {
     <div class="header">
       <div class="header-row1">
         <div class="header-brand">
-          <img src="./icons/logo-horse.png?v=4" alt="">
+          <img src="./icons/logo-horse-portal.png?v=7" alt="">
           <h1 data-i18n="portal.heading">Hopcode</h1>
         </div>
         <div class="header-meta">
@@ -1504,7 +1504,7 @@ function getGuestLandingHtml(lang: string, sessionName: string, ownerName: strin
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Hopcode - ${esc(t(lang, 'guest.landing_title'))}</title>
 <script>${getI18nScript()}</script>
-<link rel="icon" type="image/png" href="./icons/logo-horse.png?v=4">
+<link rel="icon" type="image/png" href="./icons/logo-horse.png?v=7">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,system-ui,'Segoe UI',sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);padding:20px}
@@ -1556,8 +1556,8 @@ function getEasyModeHtml(auth: AuthInfo, guestOpts?: GuestOptions): string {
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Hopcode Easy Mode</title>
 <script>${getI18nScript()}</script>
-<link rel="icon" type="image/png" href="./icons/logo-horse.png?v=4">
-<link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png?v=4">
+<link rel="icon" type="image/png" href="./icons/logo-horse.png?v=7">
+<link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png?v=7">
 <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
@@ -1785,6 +1785,12 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 #send-btn svg { width:20px; height:20px; }
 #send-btn:active { background:#0055d4; }
 #send-btn.show { display:flex; }
+#pending-files { display:none; flex-wrap:wrap; gap:6px; padding:6px 10px 0; background:#fff; }
+#pending-files.show { display:flex; }
+.pf-thumb { position:relative; width:56px; height:56px; border-radius:8px; overflow:hidden; border:1px solid #d2d2d7; }
+.pf-thumb img { width:100%; height:100%; object-fit:cover; }
+.pf-thumb .pf-name { position:absolute; bottom:0; left:0; right:0; background:rgba(0,0,0,0.5); color:#fff; font-size:9px; padding:1px 3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.pf-thumb .pf-remove { position:absolute; top:-2px; right:-2px; width:18px; height:18px; border-radius:50%; background:#ff3b30; color:#fff; border:none; font-size:12px; line-height:18px; text-align:center; cursor:pointer; padding:0; }
 #voice-toggle { background:none; border:none; color:#86868b; }
 #voice-toggle svg { width:26px; height:26px; }
 #voice-toggle:active { color:#1d1d1f; }
@@ -1870,7 +1876,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 #files-panel.collapsed .fp-list,
 #files-panel.collapsed .fp-actions,
 #files-panel.collapsed .file-access-request { display:none !important; }
-#files-panel.collapsed { height:auto !important; min-height:0 !important; flex-shrink:0; }
+#files-panel.collapsed { height:auto !important; min-height:0 !important; flex:none !important; }
 #files-panel.collapsed + .resize-v { display:none !important; }
 .fp-path { padding:4px 12px; font-size:11px; color:#86868b; background:#fafafa; border-bottom:1px solid #e5e5ea; word-break:break-all; font-family:'SF Mono',Monaco,monospace; }
 .fp-list { flex:1; overflow-y:auto; padding:0; transition:background 0.15s, box-shadow 0.15s; }
@@ -2034,7 +2040,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 <div id="app">
   <!-- Top bar -->
   <div id="top-bar">
-    <img class="logo" src="./icons/logo-horse.png?v=4" alt="Hopcode" style="width:28px;height:28px;border-radius:6px;">
+    <img class="logo" src="./icons/logo-horse.png?v=7" alt="Hopcode" style="width:38px;height:38px;border-radius:9px;">
     <span class="title">Hopcode<span class="subtitle">Easy</span></span>
     <button class="top-btn" id="apps-btn" title="My Apps">Apps</button>
     <button class="top-btn primary" id="pro-btn" title="Switch to Pro Mode">Pro</button>
@@ -2087,10 +2093,12 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     </div>
     <!-- Quick actions -->
     <div id="quick-actions"></div>
+    <!-- Pending files preview -->
+    <div id="pending-files"></div>
     <!-- Input bar -->
     <div id="input-bar" style="position:relative;">
     <div id="mention-dropdown"></div>
-    <button class="input-btn" id="menu-btn" title="Menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
+    <button class="input-btn" id="menu-btn" title="Menu" style="background:#e5e7eb;border-radius:8px;padding:3px;"><img src="./icons/logo-horse-portal.png?v=7" style="width:28px;height:28px;object-fit:contain;"></button>
     <button class="input-btn" id="voice-toggle" title="Voice/Keyboard"><svg id="vt-mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg><svg id="vt-kb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display:none"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="6" y1="8" x2="6" y2="8.01"/><line x1="10" y1="8" x2="10" y2="8.01"/><line x1="14" y1="8" x2="14" y2="8.01"/><line x1="18" y1="8" x2="18" y2="8.01"/><line x1="6" y1="12" x2="6" y2="12.01"/><line x1="10" y1="12" x2="10" y2="12.01"/><line x1="14" y1="12" x2="14" y2="12.01"/><line x1="18" y1="12" x2="18" y2="12.01"/><line x1="8" y1="16" x2="16" y2="16"/></svg></button>
     <button class="input-btn" id="cancel-btn" title="Stop"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>
     <button id="hold-speak">Hold to speak</button>
@@ -2812,8 +2820,8 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     newFrame.className = previewFrame.className;
     var sep = url.indexOf('?') >= 0 ? '&' : '?';
     var finalUrl = url + sep + '_t=' + Date.now();
-    // PDF: mobile browsers can't render PDF in iframe — use server-side PDF viewer page
-    if (/\\.pdf(\\?|$)/i.test(url)) {
+    // PDF on mobile: use PDF.js viewer (Android Chrome can't render PDF in iframe)
+    if (/\\.pdf(\\?|$)/i.test(url) && !isDesktop()) {
       finalUrl = '/terminal/pdf-viewer?url=' + encodeURIComponent(url);
     }
     newFrame.src = finalUrl;
@@ -3097,11 +3105,11 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   function detectPreviewUrl(text) {
     var fixed = joinSplitUrls(text);
     // Check for /serve/ relative paths first (our built-in static serving)
-    var serveMatch = fixed.match(/\\/serve\\/[^\\s<>'"\`]+/g);
+    var serveMatch = fixed.match(/\\/serve\\/[^\\s<>'"]+/g);
     if (serveMatch) {
-      return serveMatch[0].replace(/[.,;:!?)\`]+$/, '');
+      return serveMatch[0].replace(/[.,;:!?)]+$/, '');
     }
-    var urlMatch = fixed.match(/https?:\\/\\/[^\\s<>'"\`]+/g);
+    var urlMatch = fixed.match(/https?:\\/\\/[^\\s<>'"]+/g);
     if (!urlMatch) return null;
     for (var i = 0; i < urlMatch.length; i++) {
       var u = urlMatch[i].replace(/[.,;:!?)]+$/, '');
@@ -3179,47 +3187,77 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 
   // Share button — create shareable tunnel link
   var shareBtn = document.getElementById('preview-share');
-  var shareTunnels = {}; // port → { url, pid }
-  shareBtn.addEventListener('click', function() {
-    if (!currentPreviewUrl) return;
-    try {
-      var u = new URL(currentPreviewUrl);
-      var port = u.port || (u.protocol === 'https:' ? '443' : '80');
-      if (shareTunnels[port]) {
-        // Already tunneled — copy URL
-        navigator.clipboard.writeText(shareTunnels[port]).then(function() {
-          shareBtn.textContent = _t('copied');
-          setTimeout(function() { shareBtn.textContent = _t('easy.preview.share'); }, 2000);
-        });
-        return;
-      }
-      shareBtn.textContent = _t('creating');
-      shareBtn.disabled = true;
-      fetch('/terminal/share', {
-        method: 'POST', credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ port: port })
-      }).then(function(r) { return r.json(); }).then(function(data) {
-        shareBtn.disabled = false;
-        if (data.url) {
-          shareTunnels[port] = data.url;
-          navigator.clipboard.writeText(data.url).then(function() {
-            shareBtn.textContent = _t('copied');
-            setTimeout(function() { shareBtn.textContent = _t('easy.preview.share'); }, 2000);
-          });
-          // Also add tunnel URL as a preview pill
-          setPreviewUrl(data.url);
-        } else {
-          shareBtn.textContent = 'Failed';
-          setTimeout(function() { shareBtn.textContent = _t('easy.preview.share'); }, 2000);
-        }
-      }).catch(function() {
-        shareBtn.disabled = false;
-        shareBtn.textContent = 'Failed';
-        setTimeout(function() { shareBtn.textContent = _t('easy.preview.share'); }, 2000);
+  var _easyShareModal = null;
+
+  function getShareUrl() {
+    if (!currentPreviewUrl) return null;
+    if (/^https?:\\/\\//.test(currentPreviewUrl)) return currentPreviewUrl;
+    var path = currentPreviewUrl;
+    if (path.charAt(0) === '/' && !/^\\/terminal\\//.test(path)) path = '/terminal' + path;
+    return location.protocol + '//' + location.host + path;
+  }
+
+  function showShareQR() {
+    var shareUrl = getShareUrl();
+    if (!shareUrl) return;
+
+    if (!_easyShareModal) {
+      _easyShareModal = document.createElement('div');
+      _easyShareModal.id = 'easy-share-modal';
+      _easyShareModal.innerHTML = '<div class="share-backdrop"></div>'
+        + '<div class="share-box">'
+        + '<div class="share-close">&times;</div>'
+        + '<div class="share-title">' + _t('easy.preview.share') + '</div>'
+        + '<div class="share-qr" id="easy-share-qr"></div>'
+        + '<div class="share-url" id="easy-share-url" style="font-size:12px;color:#9ca3af;word-break:break-all;margin-bottom:12px;padding:0 8px;"></div>'
+        + '<div class="share-desc">' + _t('portal.share_scan') + '</div>'
+        + '<div class="share-actions">'
+        + '<button class="share-copy-btn" id="easy-share-copy">' + _t('portal.share_copy') + '</button>'
+        + '</div></div>';
+      document.body.appendChild(_easyShareModal);
+      var st = document.createElement('style');
+      st.textContent = '#easy-share-modal{position:fixed;inset:0;z-index:3000;display:flex;align-items:center;justify-content:center}#easy-share-modal .share-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.6)}#easy-share-modal .share-box{position:relative;background:#1f2937;border:1px solid #374151;border-radius:16px;padding:24px;max-width:340px;width:calc(100% - 40px);text-align:center;z-index:1}#easy-share-modal .share-close{position:absolute;top:10px;right:14px;font-size:22px;color:#6b7280;cursor:pointer}#easy-share-modal .share-close:hover{color:#f3f4f6}#easy-share-modal .share-title{font-size:16px;font-weight:600;color:#f3f4f6;margin-bottom:16px}#easy-share-modal .share-qr{display:flex;justify-content:center;margin-bottom:12px}#easy-share-modal .share-qr canvas,#easy-share-modal .share-qr img{border-radius:8px}#easy-share-modal .share-desc{font-size:13px;color:#9ca3af;margin-bottom:16px}#easy-share-modal .share-actions{display:flex;gap:10px;justify-content:center}#easy-share-modal .share-copy-btn{padding:10px 24px;background:#3b82f6;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit}#easy-share-modal .share-copy-btn:hover{background:#2563eb}#easy-share-modal .share-copy-btn.copied{background:#22c55e}';
+      document.head.appendChild(st);
+      _easyShareModal.querySelector('.share-backdrop').addEventListener('click', function() { _easyShareModal.style.display = 'none'; });
+      _easyShareModal.querySelector('.share-close').addEventListener('click', function() { _easyShareModal.style.display = 'none'; });
+    }
+
+    _easyShareModal.style.display = 'flex';
+    var qrContainer = document.getElementById('easy-share-qr');
+    var urlEl = document.getElementById('easy-share-url');
+    urlEl.textContent = shareUrl;
+    qrContainer.innerHTML = '<div style="color:#6b7280;padding:20px;">Loading...</div>';
+
+    function renderQR(url) {
+      var qr = window.qrcode(0, 'M');
+      qr.addData(url);
+      qr.make();
+      qrContainer.innerHTML = qr.createSvgTag(5, 8);
+      var svg = qrContainer.querySelector('svg');
+      if (svg) { svg.style.borderRadius = '8px'; svg.style.background = '#fff'; svg.style.padding = '8px'; }
+    }
+
+    if (window.qrcode) {
+      renderQR(shareUrl);
+    } else {
+      var sc = document.createElement('script');
+      sc.src = 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js';
+      sc.onload = function() { renderQR(shareUrl); };
+      sc.onerror = function() { qrContainer.innerHTML = '<div style="color:#f87171">Failed to load QR library</div>'; };
+      document.head.appendChild(sc);
+    }
+
+    var copyBtn = document.getElementById('easy-share-copy');
+    copyBtn.onclick = function() {
+      navigator.clipboard.writeText(shareUrl).then(function() {
+        copyBtn.textContent = _t('copied');
+        copyBtn.classList.add('copied');
+        setTimeout(function() { copyBtn.textContent = _t('portal.share_copy'); copyBtn.classList.remove('copied'); }, 2000);
       });
-    } catch(e) {}
-  });
+    };
+  }
+
+  shareBtn.addEventListener('click', showShareQR);
 
   // State
   var ws = null;
@@ -3348,6 +3386,8 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   // ---- WebSocket (connects to /ws-easy for structured JSON messaging) ----
   var wsRetryDelay = 1000;
   var _initialPreviewSync = false; // true during initial WS connect — preview_hints add to list without switching
+  var _easyReconnectMsgTimer = null;
+  var _easyIsReconnect = false;
 
   function connectWs() {
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -3359,6 +3399,8 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     ws = new WebSocket(wsUrl);
     ws.onopen = function() {
       wsRetryDelay = 1000;
+      // Cancel pending "reconnecting" message if we reconnected fast
+      if (_easyReconnectMsgTimer) { clearTimeout(_easyReconnectMsgTimer); _easyReconnectMsgTimer = null; }
       // If user already has a saved preview, don't let reconnect hints override it
       _initialPreviewSync = currentPreviewUrl ? true : false;
       setTimeout(function() { _initialPreviewSync = false; }, 2000);
@@ -3538,8 +3580,17 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       }
     };
     ws.onclose = function() {
-      statusText.textContent = _t('easy.status.reconnecting');
-      statusDot.className = 'status-dot yellow';
+      _easyIsReconnect = true;
+      // Delay showing "reconnecting" by 3s — brief reconnects are invisible to user
+      if (!_easyReconnectMsgTimer) {
+        _easyReconnectMsgTimer = setTimeout(function() {
+          _easyReconnectMsgTimer = null;
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            statusText.textContent = _t('easy.status.reconnecting');
+            statusDot.className = 'status-dot yellow';
+          }
+        }, 3000);
+      }
       setTimeout(connectWs, wsRetryDelay);
       wsRetryDelay = Math.min(wsRetryDelay * 1.5, 15000);
     };
@@ -3772,7 +3823,13 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   function linkify(text) {
     var fixed = joinSplitUrls(text);
     var escaped = escHtml(fixed);
-    var withLinks = escaped.replace(/(https?:\\/\\/[^\\s<>'"]+)/g, '<a href="$1" class="chat-link" style="color:#007aff;word-break:break-all;text-decoration:underline;">$1</a>');
+    var withLinks = escaped.replace(/(https?:\\/\\/[^\\s<>'"\\u3000-\\u303F\\uFF00-\\uFF60]+)/g, function(m) {
+      // Strip trailing punctuation (ASCII + CJK) that is not part of the URL
+      var url = m.replace(/[).,;:!?\\]}>\\u3001\\u3002\\uFF01\\uFF09\\uFF0C\\uFF0E\\uFF1A\\uFF1B\\uFF1F\\uFF5E]+$/, '');
+      if (!url) url = m;
+      var trail = m.substring(url.length);
+      return '<a href="' + url + '" class="chat-link" style="color:#007aff;word-break:break-all;text-decoration:underline;">' + url + '</a>' + trail;
+    });
     // Highlight @mentions
     return withLinks.replace(/@([\w\u4e00-\u9fff]+)/g, '<span class="mention">@$1</span>');
   }
@@ -4145,24 +4202,72 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   // ---- Send message ----
   function sendMessage() {
     var text = msgInput.value.trim();
-    dbg('sendMessage: text=' + (text ? text.substring(0, 30) : '(empty)') + ' state=' + state + ' ws=' + (ws ? ws.readyState : 'null'));
-    if (!text) return;
+    var filesToUpload = _pendingFiles.slice();
+    dbg('sendMessage: text=' + (text ? text.substring(0, 30) : '(empty)') + ' files=' + filesToUpload.length + ' state=' + state + ' ws=' + (ws ? ws.readyState : 'null'));
+    if (!text && !filesToUpload.length) return;
     if (state === 'initializing' || state === 'exited') return;
 
+    // Clear input immediately
+    msgInput.value = '';
+    msgInput.style.height = 'auto';
+    _pendingFiles = [];
+    renderPendingFiles();
+    hideMentionDropdown();
+    updateSendBtn();
+
+    if (filesToUpload.length === 0) {
+      // No files, send text directly
+      doSendText(text);
+    } else {
+      // Upload files first, then send text + paths
+      if (filesToUpload.length > 0) addSystemMsg(_t('easy.msg.uploading', {n: filesToUpload.length}));
+      var uploaded = [];
+      var done = 0;
+      filesToUpload.forEach(function(file) {
+        var url = '/terminal/file-upload?session=' + encodeURIComponent(sessionId) + '&path=';
+        fetch(url, {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'X-Filename': encodeURIComponent(file.name) },
+          body: file,
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.path) uploaded.push(data.path);
+          done++;
+          if (done === filesToUpload.length) {
+            var fullText = text || '';
+            if (uploaded.length > 0) {
+              var filePart = _t('easy.msg.uploaded') + uploaded.join(', ');
+              fullText = fullText ? fullText + ' | ' + filePart : filePart;
+            }
+            if (fullText) doSendText(fullText);
+          }
+        })
+        .catch(function() {
+          addSystemMsg(_t('easy.msg.upload_failed') + file.name);
+          done++;
+          if (done === filesToUpload.length && (text || uploaded.length)) {
+            var fullText = text || '';
+            if (uploaded.length > 0) {
+              var filePart = _t('easy.msg.uploaded') + uploaded.join(', ');
+              fullText = fullText ? fullText + ' | ' + filePart : filePart;
+            }
+            if (fullText) doSendText(fullText);
+          }
+        });
+      });
+    }
+  }
+
+  function doSendText(text) {
     // Extract @mentions from text
     var mentionMatches = text.match(/@([\w\u4e00-\u9fff]+)/g);
     var mentions = mentionMatches ? mentionMatches.map(function(m) { return m.substring(1); }) : [];
-
-    // Don't render locally — wait for server echo (user_message) for multi-user consistency
     currentAssistantMsg = null;
     var msg = { type: 'send', text: text };
     if (mentions.length > 0) msg.mentions = mentions;
     wsSend(msg);
-    msgInput.value = '';
-    msgInput.style.height = 'auto';
-    hideMentionDropdown();
-    updateSendBtn();
-    // State will be set to 'thinking' by the server response
   }
 
   // Cancel button
@@ -4174,8 +4279,8 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 
   // Input handlers
   function updateSendBtn() {
-    var hasText = !!msgInput.value.trim();
-    sendBtn.classList.toggle('show', hasText);
+    var hasContent = !!msgInput.value.trim() || _pendingFiles.length > 0;
+    sendBtn.classList.toggle('show', hasContent);
   }
   msgInput.addEventListener('input', function() {
     updateSendBtn();
@@ -4705,10 +4810,184 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     fileInputHidden.dataset.dest = 'panel';
     fileInputHidden.click();
   });
-  // Upload button in input bar — uses empty path so server resolves to PTY CWD
-  document.getElementById('upload-btn').addEventListener('click', function() {
-    fileInputHidden.dataset.dest = 'cwd';
-    fileInputHidden.click();
+  // Upload button in input bar — stage files for sending with message
+  var _pendingFiles = [];
+  var _pendingFilesEl = document.getElementById('pending-files');
+  var _inputUploadInput = document.createElement('input');
+  _inputUploadInput.type = 'file';
+  _inputUploadInput.multiple = true;
+  _inputUploadInput.accept = 'image/*,application/pdf,.txt,.csv,.json,.js,.ts,.html,.css,.py,.md';
+  _inputUploadInput.style.display = 'none';
+  document.body.appendChild(_inputUploadInput);
+
+  function addPendingFile(file) {
+    _pendingFiles.push(file);
+    renderPendingFiles();
+    updateSendBtn();
+  }
+  function removePendingFile(idx) {
+    _pendingFiles.splice(idx, 1);
+    renderPendingFiles();
+    updateSendBtn();
+  }
+  function renderPendingFiles() {
+    _pendingFilesEl.innerHTML = '';
+    _pendingFilesEl.classList.toggle('show', _pendingFiles.length > 0);
+    _pendingFiles.forEach(function(file, i) {
+      var thumb = document.createElement('div');
+      thumb.className = 'pf-thumb';
+      if (file.type && file.type.startsWith('image/')) {
+        var img = document.createElement('img');
+        img.src = URL.createObjectURL(file);
+        thumb.appendChild(img);
+      } else {
+        var nameEl = document.createElement('div');
+        nameEl.className = 'pf-name';
+        nameEl.style.cssText = 'position:static;background:#f0f0f2;color:#333;height:100%;display:flex;align-items:center;justify-content:center;font-size:10px;padding:4px;word-break:break-all;';
+        nameEl.textContent = file.name;
+        thumb.appendChild(nameEl);
+      }
+      var rm = document.createElement('button');
+      rm.className = 'pf-remove';
+      rm.textContent = '\u00d7';
+      rm.onclick = function() { removePendingFile(i); };
+      thumb.appendChild(rm);
+      _pendingFilesEl.appendChild(thumb);
+    });
+  }
+
+  // ---- Paste popup (like pro mode) ----
+  var easyPasteOverlay = document.createElement('div');
+  easyPasteOverlay.style.cssText = 'display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:500;background:rgba(0,0,0,0.3);flex-direction:column;align-items:center;justify-content:center;padding:20px;';
+  easyPasteOverlay.innerHTML = '<div style="width:100%;max-width:480px;background:#ffffff;border:1px solid #d2d2d7;border-radius:14px;padding:16px;display:flex;flex-direction:column;gap:12px;box-shadow:0 10px 40px rgba(0,0,0,0.15);">'
+    + '<div style="color:#1d1d1f;font-size:14px;font-family:system-ui;">' + _t('pro.paste.title') + '</div>'
+    + '<textarea id="easy-paste-input" style="width:100%;height:120px;background:#f5f5f7;color:#1d1d1f;border:1px solid #d2d2d7;border-radius:8px;padding:10px;font-family:system-ui;font-size:14px;resize:vertical;outline:none;" placeholder="' + _t('pro.paste.placeholder') + '"></textarea>'
+    + '<div id="easy-paste-file-preview" style="display:none;text-align:center;"><img id="easy-paste-file-thumb" style="max-width:100%;max-height:120px;border-radius:6px;border:1px solid #d2d2d7;"><div id="easy-paste-file-icon" style="display:none;font-size:40px;padding:10px;">&#x1F4CE;</div><div id="easy-paste-file-name" style="font-size:12px;color:#86868b;margin-top:4px;"></div></div>'
+    + '<div style="display:flex;gap:8px;justify-content:flex-end;align-items:center;">'
+    + '<button id="easy-paste-file-btn" style="padding:8px 12px;background:#f0f0f2;color:#1d1d1f;border:1px solid #d2d2d7;border-radius:6px;font-size:13px;cursor:pointer;margin-right:auto;">' + _t('pro.paste.btn_file') + '</button>'
+    + '<input type="file" id="easy-paste-file-input" style="display:none;" accept="image/*,application/pdf,.txt,.csv,.json,.js,.ts,.html,.css,.py,.md">'
+    + '<button id="easy-paste-cancel" style="padding:8px 16px;background:#e5e5ea;color:#1d1d1f;border:none;border-radius:6px;font-size:14px;cursor:pointer;">' + _t('cancel') + '</button>'
+    + '<button id="easy-paste-send" style="padding:8px 16px;background:#007aff;color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer;">' + _t('send') + '</button>'
+    + '</div></div>';
+  document.body.appendChild(easyPasteOverlay);
+
+  var easyPasteFileInput = document.getElementById('easy-paste-file-input');
+  var easyPasteFilePreview = document.getElementById('easy-paste-file-preview');
+  var easyPasteFileThumb = document.getElementById('easy-paste-file-thumb');
+  var easyPasteFileIcon = document.getElementById('easy-paste-file-icon');
+  var easyPasteFileName = document.getElementById('easy-paste-file-name');
+  var easyPasteFile = null;
+
+  function easyPasteReset() {
+    easyPasteFile = null;
+    easyPasteFilePreview.style.display = 'none';
+    easyPasteFileThumb.style.display = 'none';
+    easyPasteFileThumb.src = '';
+    easyPasteFileIcon.style.display = 'none';
+    easyPasteFileName.textContent = '';
+    easyPasteFileInput.value = '';
+  }
+  function easyPasteShow() {
+    easyPasteReset();
+    var inp = document.getElementById('easy-paste-input');
+    inp.value = '';
+    easyPasteOverlay.style.display = 'flex';
+    setTimeout(function() { inp.focus(); }, 50);
+  }
+  function easyPasteHide() {
+    easyPasteOverlay.style.display = 'none';
+    easyPasteReset();
+  }
+
+  document.getElementById('upload-btn').addEventListener('click', function(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    easyPasteShow();
+  });
+
+  document.getElementById('easy-paste-send').addEventListener('click', function() {
+    var text = document.getElementById('easy-paste-input').value.trim();
+    var file = easyPasteFile;
+    easyPasteHide();
+    if (file) {
+      addPendingFile(file);
+    }
+    if (text) {
+      msgInput.value = (msgInput.value ? msgInput.value + ' ' : '') + text;
+    }
+    if (file || text) {
+      sendMessage();
+    }
+  });
+
+  document.getElementById('easy-paste-cancel').addEventListener('click', easyPasteHide);
+  easyPasteOverlay.addEventListener('click', function(e) {
+    if (e.target === easyPasteOverlay) easyPasteHide();
+  });
+
+  document.getElementById('easy-paste-file-btn').addEventListener('click', function(e) {
+    e.preventDefault();
+    easyPasteFileInput.click();
+  });
+
+  easyPasteFileInput.addEventListener('change', function() {
+    var file = easyPasteFileInput.files && easyPasteFileInput.files[0];
+    if (!file) return;
+    easyPasteFile = file;
+    easyPasteFileName.textContent = file.name;
+    if (file.type && file.type.indexOf('image/') === 0) {
+      var reader = new FileReader();
+      reader.onload = function(ev) {
+        easyPasteFileThumb.src = ev.target.result;
+        easyPasteFileThumb.style.display = '';
+        easyPasteFileIcon.style.display = 'none';
+        easyPasteFilePreview.style.display = 'block';
+      };
+      reader.readAsDataURL(file);
+    } else {
+      easyPasteFileThumb.style.display = 'none';
+      easyPasteFileIcon.style.display = 'block';
+      easyPasteFilePreview.style.display = 'block';
+    }
+  });
+
+  // Also handle paste in the popup textarea
+  document.getElementById('easy-paste-input').addEventListener('paste', function(e) {
+    var items = (e.clipboardData || {}).items;
+    if (!items) return;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf('image') !== -1) {
+        var blob = items[i].getAsFile();
+        if (blob) {
+          e.preventDefault();
+          easyPasteFile = new File([blob], 'pasted-image.png', { type: blob.type });
+          easyPasteFileName.textContent = 'pasted-image.png';
+          var reader = new FileReader();
+          reader.onload = function(ev) {
+            easyPasteFileThumb.src = ev.target.result;
+            easyPasteFileThumb.style.display = '';
+            easyPasteFileIcon.style.display = 'none';
+            easyPasteFilePreview.style.display = 'block';
+          };
+          reader.readAsDataURL(blob);
+        }
+      }
+    }
+  });
+
+  // Paste image into msg-input (main textarea)
+  msgInput.addEventListener('paste', function(e) {
+    var items = (e.clipboardData || {}).items;
+    if (!items) return;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf('image') !== -1) {
+        var blob = items[i].getAsFile();
+        if (blob) {
+          e.preventDefault();
+          addPendingFile(new File([blob], 'pasted-image.png', { type: blob.type }));
+        }
+      }
+    }
   });
   fileInputHidden.addEventListener('change', function() {
     var files = fileInputHidden.files;
@@ -5326,8 +5605,8 @@ const indexHtml = `<!DOCTYPE html>
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Hopcode">
   <link rel="manifest" href="./manifest.json">
-  <link rel="icon" type="image/png" href="./icons/logo-horse.png?v=4">
-  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png?v=4">
+  <link rel="icon" type="image/png" href="./icons/logo-horse.png?v=7">
+  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png?v=7">
   <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
   <title>Hopcode</title>
   <script>${getI18nScript()}</script>
@@ -5522,28 +5801,33 @@ const indexHtml = `<!DOCTYPE html>
       font-family: system-ui; -webkit-tap-highlight-color: transparent;
     }
     #chat-bar .chat-input-row {
-      display: flex; align-items: stretch; gap: 6px; width: 100%;
+      display: flex; align-items: flex-end; gap: 6px; width: 100%;
+    }
+    #chat-bar .chat-input-row > button,
+    #chat-bar .chat-input-row > #chat-send-btn {
+      height: 38px; min-height: 38px; max-height: 38px;
     }
     body.mobile #chat-menu-btn2 { display: none !important; }
     #chat-input {
-      flex: 1; background: #111827; color: #e0e0e0; border: 1px solid #333;
-      border-radius: 8px; padding: 10px 14px; font-size: 15px; font-family: system-ui;
-      outline: none; resize: none; min-height: 40px; max-height: 120px;
+      flex: 1; background: #3a3f4b; color: #fff; border: none;
+      border-radius: 6px; padding: 8px 14px; font-size: 15px; font-family: system-ui;
+      outline: none; resize: none; min-height: 38px; max-height: 120px; box-sizing: border-box;
       line-height: 1.4; overflow-y: auto; scrollbar-width: none;
     }
     #chat-input::-webkit-scrollbar { display: none; }
-    #chat-input:focus { border-color: #4ade80; }
-    #chat-input::placeholder { color: #555; }
+    #chat-input:focus { box-shadow: 0 0 0 1px #4ade80; }
+    #chat-input::placeholder { color: #888; }
     #chat-send-btn {
-      padding: 0 14px; border-radius: 6px; border: none;
+      padding: 0 10px; border-radius: 6px; border: none; height: 38px;
       background: #4ade80; color: #000; font-size: 14px; font-weight: 600; cursor: pointer;
       display: flex; align-items: center; justify-content: center; flex-shrink: 0;
       -webkit-tap-highlight-color: transparent;
     }
     #chat-send-btn:active { background: #22c55e; }
-    #chat-send-btn:disabled { background: #333; color: #666; cursor: default; }
-    #chat-voice-toggle.active { border-color: #4ade80; color: #4ade80; }
-    #chat-hold-speak.recording { background: #4ade80; color: #000; border-color: #4ade80; }
+    #chat-send-btn:disabled { background: #333; color: #888; cursor: default; }
+    #chat-voice-toggle.active { background: #1a3a1a; color: #4ade80; }
+    #chat-hold-speak { background: #333 !important; color: #fff !important; border: none !important; border-radius: 6px !important; }
+    #chat-hold-speak.recording { background: #4ade80 !important; color: #000; border-color: #4ade80; }
     #chat-quick-actions {
       display: none; flex-wrap: wrap; gap: 6px; padding: 0 4px;
     }
@@ -5558,8 +5842,9 @@ const indexHtml = `<!DOCTYPE html>
     .chat-quick-btn.danger { border-color: #f87171; color: #f87171; }
     #menu-chat-toggle { cursor: pointer; }
     body.light-mode #chat-bar { background:rgba(240,240,240,0.95);border-top-color:#ccc; }
-    body.light-mode #chat-input { background:#fff; color:#333; border-color:#ccc; }
+    body.light-mode #chat-input { background:#e5e5ea; color:#333; }
     body.light-mode #chat-input::placeholder { color:#999; }
+    body.light-mode #chat-input:focus { box-shadow: 0 0 0 1px #007aff; }
     body.light-mode .chat-quick-btn { background:#f0f0f0; color:#333; border-color:#ccc; }
     @supports (padding-top: env(safe-area-inset-top)) {
       #chat-bar { padding-bottom: max(8px, env(safe-area-inset-bottom)); }
@@ -5570,6 +5855,8 @@ const indexHtml = `<!DOCTYPE html>
     body.mobile #text { display: none; }
     body.mobile #font-controls { display: none; }
     body.mobile .desktop-paste-btn { display: none; }
+    body.mobile .chat-special-key { display: none !important; }
+    body.mobile #chat-paste-btn { display: none !important; }
     body.mobile .key-btn { min-width: 0; flex: 1; padding: 0 4px; height: 34px; font-size: 14px; }
     .mobile-only { display: none; }
     body.mobile .mobile-only { display: inline-block; }
@@ -5685,15 +5972,15 @@ const indexHtml = `<!DOCTYPE html>
     </div>
     <div id="voice-bar">
       <div id="bar-row1">
-        <button id="menu-btn" class="key-btn" style="min-width:28px;padding:2px 4px;"><svg viewBox="0 0 512 512" fill="none" style="width:24px;height:24px;vertical-align:middle;"><circle cx="185" cy="175" r="42" fill="#4ade80"/><circle cx="327" cy="175" r="42" fill="#4ade80"/><circle cx="185" cy="175" r="16" fill="#1a1a2e"/><circle cx="327" cy="175" r="16" fill="#1a1a2e"/><rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/><path d="M205 218L230 240L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M242 240L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/><rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/><rect x="165" y="340" width="50" height="20" rx="10" fill="#22c55e"/><rect x="297" y="340" width="50" height="20" rx="10" fill="#22c55e"/></svg></button>
+        <button id="menu-btn" class="key-btn" style="min-width:32px;padding:2px 2px 2px 0;"><img src="./icons/logo-horse-portal.png?v=7" style="width:30px;height:30px;object-fit:contain;vertical-align:middle;margin-left:-2px;"></button>
         <div id="special-keys">
-          <button id="chat-menu-btn" class="key-btn" style="min-width:28px;padding:2px 4px;"><svg viewBox="0 0 512 512" fill="none" style="width:24px;height:24px;vertical-align:middle;"><circle cx="185" cy="175" r="42" fill="#4ade80"/><circle cx="327" cy="175" r="42" fill="#4ade80"/><circle cx="185" cy="175" r="16" fill="#1a1a2e"/><circle cx="327" cy="175" r="16" fill="#1a1a2e"/><rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/><path d="M205 218L230 240L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M242 240L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/><rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/><rect x="165" y="340" width="50" height="20" rx="10" fill="#22c55e"/><rect x="297" y="340" width="50" height="20" rx="10" fill="#22c55e"/></svg></button>
+          <button id="chat-menu-btn" class="key-btn" style="min-width:32px;padding:2px 2px 2px 0;"><img src="./icons/logo-horse-portal.png?v=7" style="width:30px;height:30px;object-fit:contain;vertical-align:middle;margin-left:-2px;"></button>
           <button class="key-btn" data-key="esc">Esc</button>
           <button class="key-btn" data-key="tab">Tab</button>
           <button class="key-btn" data-key="up">&#x25B2;</button>
           <button class="key-btn" data-key="down">&#x25BC;</button>
           <button class="key-btn" id="return-btn" title="Return" style="font-size:20px;">&#x23CE;</button>
-          <button class="key-btn" id="paste-btn" title="Paste" style="font-size:16px;">&#x2398;</button>
+          <button class="key-btn" id="paste-btn" title="Upload" style="display:flex;align-items:center;justify-content:center;"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M12 16V8m0 0l-3 3m3-3l3 3"/></svg></button>
           <button class="key-btn" id="copy-btn" title="Select/Copy text">Sel</button>
           <button class="key-btn" id="scroll-bottom" title="Scroll to bottom" style="font-size:20px;">&#x21E9;</button>
         </div>
@@ -5709,12 +5996,16 @@ const indexHtml = `<!DOCTYPE html>
       <div id="text" style="display:none"></div>
       <div id="chat-quick-actions"></div>
       <div class="chat-input-row">
-        <button id="chat-menu-btn2" class="key-btn" style="min-width:28px;padding:2px 4px;width:34px;height:34px;border-radius:6px;border:1px solid #374151;background:transparent;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;"><svg viewBox="0 0 512 512" fill="none" style="width:24px;height:24px;"><circle cx="185" cy="175" r="42" fill="#4ade80"/><circle cx="327" cy="175" r="42" fill="#4ade80"/><circle cx="185" cy="175" r="16" fill="#1a1a2e"/><circle cx="327" cy="175" r="16" fill="#1a1a2e"/><rect x="150" y="195" width="212" height="80" rx="40" fill="#4ade80"/><path d="M205 218L230 240L205 262" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M242 240L282 240" stroke="#1a1a2e" stroke-width="8" stroke-linecap="round"/><rect x="175" y="290" width="162" height="45" rx="22" fill="#22c55e"/><rect x="165" y="340" width="50" height="20" rx="10" fill="#22c55e"/><rect x="297" y="340" width="50" height="20" rx="10" fill="#22c55e"/></svg></button>
-        <button id="chat-voice-toggle" title="Switch voice/keyboard" style="width:34px;height:34px;border-radius:6px;border:1px solid #374151;background:transparent;color:#9ca3af;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;"><svg id="cvt-mic-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg><svg id="cvt-kb-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display:none"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="6" y1="8" x2="6" y2="8.01"/><line x1="10" y1="8" x2="10" y2="8.01"/><line x1="14" y1="8" x2="14" y2="8.01"/><line x1="18" y1="8" x2="18" y2="8.01"/><line x1="6" y1="12" x2="6" y2="12.01"/><line x1="10" y1="12" x2="10" y2="12.01"/><line x1="14" y1="12" x2="14" y2="12.01"/><line x1="18" y1="12" x2="18" y2="12.01"/><line x1="8" y1="16" x2="16" y2="16"/></svg></button>
+        <button id="chat-menu-btn2" class="key-btn" style="min-width:38px;padding:0 2px 0 0;width:38px;height:38px;border-radius:8px;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;"><img src="./icons/logo-horse-portal.png?v=7" style="width:28px;height:28px;object-fit:contain;margin-left:-2px;"></button>
+        <button class="key-btn chat-special-key" data-chat-key="esc" style="height:38px;min-width:38px;font-size:12px;">Esc</button>
+        <button class="key-btn chat-special-key" data-chat-key="tab" style="height:38px;min-width:38px;font-size:12px;">Tab</button>
+        <button class="key-btn chat-special-key" data-chat-key="up" style="height:38px;min-width:38px;font-size:16px;">&#x25B2;</button>
+        <button class="key-btn chat-special-key" data-chat-key="down" style="height:38px;min-width:38px;font-size:16px;">&#x25BC;</button>
+        <button class="key-btn" id="chat-paste-btn" title="Upload" style="height:38px;min-width:38px;display:flex;align-items:center;justify-content:center;"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M12 16V8m0 0l-3 3m3-3l3 3"/></svg></button>
+        <button id="chat-voice-toggle" title="Switch voice/keyboard" style="width:38px;height:38px;border-radius:6px;border:none;background:#333;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;"><svg id="cvt-mic-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg><svg id="cvt-kb-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display:none"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="6" y1="8" x2="6" y2="8.01"/><line x1="10" y1="8" x2="10" y2="8.01"/><line x1="14" y1="8" x2="14" y2="8.01"/><line x1="18" y1="8" x2="18" y2="8.01"/><line x1="6" y1="12" x2="6" y2="12.01"/><line x1="10" y1="12" x2="10" y2="12.01"/><line x1="14" y1="12" x2="14" y2="12.01"/><line x1="18" y1="12" x2="18" y2="12.01"/><line x1="8" y1="16" x2="16" y2="16"/></svg></button>
         <label for="chat-input" style="position:absolute;left:-9999px">Chat input</label>
         <textarea id="chat-input" name="chat-input" rows="1" placeholder="Message..." autocomplete="off"></textarea>
-        <button id="chat-hold-speak" style="display:none;flex:1;height:34px;border-radius:8px;border:1px solid #374151;background:#1e293b;color:#9ca3af;font-size:14px;font-family:system-ui;cursor:pointer;-webkit-tap-highlight-color:transparent;-webkit-user-select:none;user-select:none;" data-i18n="pro.chat.hold_to_speak">Hold to speak</button>
-        <button id="chat-upload-btn" title="Upload file" style="width:34px;height:34px;border-radius:6px;border:1px solid #374151;background:transparent;color:#9ca3af;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3m0 0l-4 4m4-4l4 4"/><path d="M2 17l.621 2.485A2 2 0 004.561 21h14.878a2 2 0 001.94-1.515L22 17"/></svg></button>
+        <button id="chat-hold-speak" style="display:none;flex:1;height:38px;border-radius:8px;border:1px solid #374151;background-color:#1e293b;color:#9ca3af;font-size:14px;font-family:system-ui;cursor:pointer;-webkit-tap-highlight-color:transparent;-webkit-user-select:none;user-select:none;-webkit-appearance:none;appearance:none;" data-i18n="pro.chat.hold_to_speak">Hold to speak</button>
         <input type="file" id="chat-upload-input" multiple style="display:none;">
         <button id="chat-send-btn" disabled data-i18n="pro.chat.btn_send">Send</button>
       </div>
@@ -6042,9 +6333,14 @@ const indexHtml = `<!DOCTYPE html>
     var termWs = null;
     var isReconnect = false;
     var outputRefocusTimer = null;
-    var reconnectDelay = 2000;
+    var reconnectDelay = 1000;
+    var reconnectMsgTimer = null;
     function connectTerminal() {
-      setStatus(isReconnect ? _t('pro.status.reconnecting') : _t('pro.status.connecting'));
+      // Only show "connecting" on first connect; for reconnects, delay the message
+      // so brief reconnections (e.g. server restart) are invisible to the user
+      if (!isReconnect) {
+        setStatus(_t('pro.status.connecting'));
+      }
       termWs = new WebSocket(wsUrl);
       termWs.onmessage = (e) => {
         const msg = JSON.parse(e.data);
@@ -6087,19 +6383,31 @@ const indexHtml = `<!DOCTYPE html>
         }
       };
       termWs.onopen = () => {
+        // Cancel any pending "reconnecting" message
+        if (reconnectMsgTimer) { clearTimeout(reconnectMsgTimer); reconnectMsgTimer = null; }
         setStatus(defaultStatusText);
-        reconnectDelay = 2000; // reset backoff on successful connection
+        reconnectDelay = 1000; // reset backoff on successful connection
         lastCols = 0; lastRows = 0; sendResize();
       };
       termWs.onerror = () => {
+        // Only show error if reconnect message is already visible (i.e. slow reconnect)
+        if (reconnectMsgTimer === null && isReconnect) return;
         setStatus(_t('pro.status.ws_error'), '#f87171');
       };
       termWs.onclose = (e) => {
         if (termWs.sessionExited) return;
-        setStatus(_t('pro.status.reconnecting'), '#6b7280');
         isReconnect = true;
+        // Delay showing "reconnecting" by 3s — if we reconnect faster, user never sees it
+        if (!reconnectMsgTimer) {
+          reconnectMsgTimer = setTimeout(function() {
+            reconnectMsgTimer = null;
+            if (termWs && termWs.readyState !== WebSocket.OPEN) {
+              setStatus(_t('pro.status.reconnecting'), '#6b7280');
+            }
+          }, 3000);
+        }
         setTimeout(connectTerminal, reconnectDelay);
-        reconnectDelay = Math.min(reconnectDelay * 1.5, 30000); // backoff up to 30s
+        reconnectDelay = Math.min(reconnectDelay * 1.5, 15000); // backoff up to 15s
       };
     }
     connectTerminal();
@@ -7149,6 +7457,12 @@ const indexHtml = `<!DOCTYPE html>
     var vpText = document.getElementById('vp-text');
     var vpHint = document.getElementById('vp-hint');
     var vpActions = document.getElementById('vp-actions');
+    // Prevent xterm from stealing focus when clicking inside voice popup
+    vpEl.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+    vpEl.addEventListener('touchstart', function(e) { e.stopPropagation(); });
+    vpEl.addEventListener('keydown', function(e) { e.stopPropagation(); });
+    vpEl.addEventListener('keyup', function(e) { e.stopPropagation(); });
+    vpEl.addEventListener('keypress', function(e) { e.stopPropagation(); });
     function vpShow() {
       vpText.textContent = '';
       vpText.classList.add('listening');
@@ -7185,6 +7499,8 @@ const indexHtml = `<!DOCTYPE html>
       vpEl.classList.remove('cancel', 'send-ready');
       vpConfirmVisible = true;
       vpText.contentEditable = 'true';
+      // Disable xterm textarea to prevent it stealing keystrokes
+      if (xtermTextarea) { xtermTextarea.disabled = true; xtermTextarea.blur(); }
       // Delay focus to avoid Alt keyup stealing focus on Windows
       setTimeout(function() { vpText.focus(); }, 100);
       // Place cursor at end of text
@@ -7205,6 +7521,7 @@ const indexHtml = `<!DOCTYPE html>
     function vpSend() {
       vpConfirmVisible = false;
       vpText.contentEditable = 'false';
+      if (xtermTextarea) xtermTextarea.disabled = false;
       // Read edited text from popup
       var finalText = vpText.textContent.trim();
       if (finalText && termWs && termWs.readyState === 1) {
@@ -7223,6 +7540,7 @@ const indexHtml = `<!DOCTYPE html>
     function vpDismiss() {
       vpConfirmVisible = false;
       vpText.contentEditable = 'false';
+      if (xtermTextarea) xtermTextarea.disabled = false;
       pendingAsrText = '';
       asrFlushed = true;
       status.textContent = defaultStatusText;
@@ -7719,6 +8037,8 @@ const indexHtml = `<!DOCTYPE html>
       var pasteKey = isMac ? 'Cmd' : 'Ctrl';
       chatInput.placeholder = _t('pro.chat.placeholder', {key: holdKeyName, paste: pasteKey});
     }
+    // Auto-focus chat input on desktop
+    if (!isMobile) { setTimeout(function() { chatInput.focus(); }, 300); }
     var chatSendBtn = document.getElementById('chat-send-btn');
     var chatMicBtn = null; // removed from UI
     var chatQuickActions = document.getElementById('chat-quick-actions');
@@ -7754,7 +8074,7 @@ const indexHtml = `<!DOCTYPE html>
     chatSendBtn.addEventListener('click', chatSend);
     chatInput.addEventListener('keydown', function(e) {
       e.stopPropagation(); // Prevent xterm from stealing keystrokes
-      if (e.key === 'Enter' && !e.shiftKey) {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
         e.preventDefault();
         chatSend();
       }
@@ -7768,6 +8088,27 @@ const indexHtml = `<!DOCTYPE html>
     chatInput.addEventListener('blur', function() {
       if (xtermTextarea) xtermTextarea.disabled = false;
     });
+
+    // Chat bar special keys (Esc/Tab/Up/Down) — send to terminal
+    var chatKeyMap = { esc: String.fromCharCode(27), tab: String.fromCharCode(9), up: String.fromCharCode(27) + '[A', down: String.fromCharCode(27) + '[B' };
+    document.querySelectorAll('.chat-special-key').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        e.preventDefault();
+        var seq = chatKeyMap[btn.getAttribute('data-chat-key')];
+        if (seq) sendInput(seq);
+        term.focus();
+      });
+    });
+
+    // Chat bar paste button — open paste popup
+    var chatPasteBtn = document.getElementById('chat-paste-btn');
+    if (chatPasteBtn) {
+      chatPasteBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        pasteShow();
+      });
+    }
 
     // Voice toggle: switch between text input and hold-to-speak
     var chatVoiceMode = false;
@@ -8192,7 +8533,8 @@ const indexHtml = `<!DOCTYPE html>
     });
     // Chat upload button — pick files then show upload chooser dialog
     var chatUploadInput = document.getElementById('chat-upload-input');
-    document.getElementById('chat-upload-btn').addEventListener('click', function() { chatUploadInput.click(); });
+    var chatUploadBtn = document.getElementById('chat-upload-btn');
+    if (chatUploadBtn) chatUploadBtn.addEventListener('click', function() { chatUploadInput.click(); });
     chatUploadInput.addEventListener('change', function() {
       if (!chatUploadInput.files || chatUploadInput.files.length === 0) return;
       uploadChooserShow(chatUploadInput.files, null);
@@ -8598,7 +8940,7 @@ function getAdminHtml(): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Admin - Hopcode</title>
-<link rel="icon" type="image/png" href="./icons/logo-horse.png?v=4">
+<link rel="icon" type="image/png" href="./icons/logo-horse.png?v=7">
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
 body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:#0f172a; color:#e2e8f0; min-height:100vh; }
@@ -9876,10 +10218,11 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (assetPath === '/manifest.json' || assetPath === '/sw.js' ||
-      assetPath.startsWith('/icons/') || assetPath === '/favicon.ico') {
+      assetPath.startsWith('/icons/') || assetPath.startsWith('/lib/') || assetPath === '/favicon.ico') {
     const MIME_TYPES: Record<string, string> = {
       '.json': 'application/json',
       '.js': 'application/javascript',
+      '.mjs': 'application/javascript',
       '.png': 'image/png',
       '.svg': 'image/svg+xml',
       '.ico': 'image/x-icon',
@@ -9999,7 +10342,12 @@ canvas{display:block;margin:4px auto;box-shadow:0 2px 8px rgba(0,0,0,.3)}
 .bar button{background:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:14px;cursor:pointer;min-width:36px}
 .bar button:active{background:#ddd}
 .bar span{color:#fff;font-size:13px;white-space:nowrap}
+#loading{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;z-index:5}
+#loading .spinner{width:40px;height:40px;border:3px solid rgba(255,255,255,.2);border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite}
+#loading .text{color:rgba(255,255,255,.7);font-size:14px}
+@keyframes spin{to{transform:rotate(360deg)}}
 </style></head><body>
+<div id="loading"><div class="spinner"></div><div class="text">Loading PDF...</div></div>
 <div id="page-container"></div>
 <div class="bar">
   <button id="prev">&#8592;</button>
@@ -10010,18 +10358,18 @@ canvas{display:block;margin:4px auto;box-shadow:0 2px 8px rgba(0,0,0,.3)}
   <button id="zin">+</button>
 </div>
 <script type="module">
-import{getDocument,GlobalWorkerOptions}from"https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.min.mjs";
-GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.worker.min.mjs";
+import{getDocument,GlobalWorkerOptions}from"/terminal/lib/pdf.min.mjs";
+GlobalWorkerOptions.workerSrc="/terminal/lib/pdf.worker.min.mjs";
 var pdfUrl=${JSON.stringify(pdfUrl)};
 var container=document.getElementById("page-container");
 var pdf=null,pageNum=1,scale=0,fitScale=1;
 async function load(){
   pdf=await getDocument(pdfUrl).promise;
-  // fit-width scale
   var p=await pdf.getPage(1);
   var vp=p.getViewport({scale:1});
   fitScale=Math.min((window.innerWidth-16)/vp.width,3);
   scale=fitScale;
+  document.getElementById("loading").style.display="none";
   render();
 }
 async function render(){
@@ -10082,18 +10430,8 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
       }
       const filePath = path.resolve(projectRoot, '.' + filePart);
 
-      // Security: if workspace/ exists, restrict serving to workspace/ only
-      const wsExists = (() => { try { fs.statSync(path.join(projectRoot, 'workspace')); return true; } catch { return false; } })();
-      const serveRoot = wsExists ? path.join(projectRoot, 'workspace') : projectRoot;
-      if (!filePath.startsWith(serveRoot + '/') && filePath !== serveRoot) {
-        if (wsExists && filePart && !filePart.startsWith('/workspace/')) {
-          const wsFilePath = path.join(projectRoot, 'workspace', '.' + filePart);
-          try {
-            fs.accessSync(wsFilePath);
-            const newUrl = '/serve/' + encodeURIComponent(project) + '/workspace' + filePart + (parsedUrl.search || '');
-            res.writeHead(302, { 'Location': newUrl }); res.end(); return;
-          } catch {}
-        }
+      // Security: sandbox to project root — don't allow path traversal above it
+      if (!filePath.startsWith(projectRoot + '/') && filePath !== projectRoot) {
         res.writeHead(403); res.end('Forbidden'); return;
       }
 
@@ -10155,10 +10493,15 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
           res.end(page);
         } else {
           const mime = getMimeType(filePath);
-          res.writeHead(200, {
+          const headers: Record<string, string> = {
             'Content-Type': mime + (mime.startsWith('text/') ? '; charset=utf-8' : ''),
             'Cache-Control': 'no-cache',
-          });
+          };
+          // Force inline display for PDFs (Android Chrome defaults to download)
+          if (mime === 'application/pdf') {
+            headers['Content-Disposition'] = 'inline';
+          }
+          res.writeHead(200, headers);
           fs.createReadStream(filePath).pipe(res);
         }
       } catch {
@@ -10788,7 +11131,20 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
 
 // Terminal WebSocket server — proxies to PTY service
 const terminalWss = new WebSocketServer({ noServer: true });
+
+// Server-side ping/pong keepalive — prevents proxies from closing idle WS connections
+const WS_PING_INTERVAL = 30000; // 30s
+setInterval(() => {
+  terminalWss.clients.forEach((ws) => {
+    if ((ws as any)._isAlive === false) { ws.terminate(); return; }
+    (ws as any)._isAlive = false;
+    ws.ping();
+  });
+}, WS_PING_INTERVAL);
+
 terminalWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
+  (clientWs as any)._isAlive = true;
+  clientWs.on('pong', () => { (clientWs as any)._isAlive = true; });
   const url = new URL(req.url!, `http://${req.headers.host}`);
   const sessionId = url.searchParams.get('session') || 'default';
   const wsAuth = getAuthInfo(req);
@@ -10865,7 +11221,18 @@ terminalWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) =>
 
 // Easy Mode WebSocket server — claude -p structured JSON protocol
 const easyWss = new WebSocketServer({ noServer: true });
+// Easy mode ping/pong keepalive
+setInterval(() => {
+  easyWss.clients.forEach((ws) => {
+    if ((ws as any)._isAlive === false) { ws.terminate(); return; }
+    (ws as any)._isAlive = false;
+    ws.ping();
+  });
+}, WS_PING_INTERVAL);
+
 easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
+  (clientWs as any)._isAlive = true;
+  clientWs.on('pong', () => { (clientWs as any)._isAlive = true; });
   const url = new URL(req.url!, `http://${req.headers.host}`);
   const sessionId = url.searchParams.get('session') || 'default';
   const projectParam = url.searchParams.get('project') || '';
