@@ -1638,7 +1638,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 .project-chip.add { color:#34c759; border-color:#34c759; background:#f0fff4; }
 
 /* Tab bar */
-#tab-bar { display:flex; flex-shrink:0; background:#ffffff; border-bottom:1px solid #e5e5ea; padding:0 12px; gap:0; }
+#tab-bar { display:flex; flex-shrink:0; background:#ffffff; border-bottom:1px solid #e5e5ea; padding:0 12px; gap:0; align-items:center; }
 .tab-item { flex:1; padding:8px 0; text-align:center; font-size:13px; color:#86868b; cursor:pointer; border-bottom:2px solid transparent; position:relative; }
 .tab-item.active { color:#1d1d1f; border-bottom-color:#007aff; }
 .tab-badge { position:absolute; top:4px; right:calc(50% - 28px); width:6px; height:6px; border-radius:50%; background:#007aff; display:none; }
@@ -1704,11 +1704,11 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 
 /* Chat area */
 #chat-area { flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:8px; }
-.msg { max-width:92%; padding:10px 14px; border-radius:18px; font-size:var(--easy-font-size, 15px); line-height:1.5; word-break:break-word; overflow-wrap:break-word; white-space:pre-wrap; animation:fadeIn 0.15s ease; }
+.msg { max-width:92%; padding:10px 14px; border-radius:18px; font-size:var(--easy-font-size, 15px); line-height:1.5; word-break:break-word; overflow-wrap:break-word; animation:fadeIn 0.15s ease; }
 @keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
 .msg.user { align-self:flex-end; background:#95ec69; color:#1d1d1f; border-bottom-right-radius:6px; }
-.msg-wrap { display:block; max-width:92%; align-self:flex-start; }
-.msg-wrap .msg { display:inline-block; max-width:100%; text-align:left; }
+.msg-wrap { display:block; max-width:92%; }
+.msg-wrap .msg { width:fit-content; max-width:100%; text-align:left; }
 .msg-wrap .msg-sender { font-size:12px; color:#999; margin-bottom:2px; padding-left:4px; }
 .msg-wrap .msg.user { background:#e9e9eb; color:#1d1d1f; border-bottom-right-radius:18px; border-bottom-left-radius:6px; }
 #participants-indicator { font-size:11px; color:#86868b; margin-left:8px; cursor:default; }
@@ -1740,7 +1740,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 .msg-wrap.user-wrap { align-self:flex-end; text-align:right; }
 .msg-wrap.user-wrap .msg-sender { padding-right:4px; color:#2e7d32; }
 .msg-wrap.user-wrap .msg.user { display:inline-block; text-align:left; background:#95ec69; color:#1d1d1f; border-bottom-right-radius:6px; border-bottom-left-radius:18px; }
-.msg.assistant { background:#e9e9eb; color:#1d1d1f; border-bottom-left-radius:6px; font-family:'SF Mono',Monaco,Consolas,monospace; font-size:var(--easy-font-size, 15px); max-width:98%; }
+.msg.assistant { background:#e9e9eb; color:#1d1d1f; border-bottom-left-radius:6px; font-size:var(--easy-font-size, 15px); max-width:98%; }
 .msg.assistant.thinking-msg { background:#f5f5f5; color:#8e8e93; font-size:calc(var(--easy-font-size, 15px) - 1px); font-style:italic; }
 .msg.system { align-self:center; background:none; color:#86868b; font-size:12px; text-align:center; padding:4px 8px; }
 .msg.error { align-self:center; background:#fff0f0; color:#ff3b30; border:1px solid #ffcdd2; font-size:13px; }
@@ -2060,7 +2060,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 
   <!-- Tab bar (shown when preview URL exists) -->
   <div id="tab-bar">
-    <span id="guest-badge" style="display:none; background:#ff9500; color:#fff; font-size:11px; font-weight:600; padding:2px 8px; border-radius:10px; margin-right:8px;" data-i18n="guest.badge">Guest</span>
+    <span id="guest-badge" style="display:none; background:#ff9500; color:#fff; font-size:11px; font-weight:600; padding:4px 8px; border-radius:10px; margin-right:8px; line-height:11px;" data-i18n="guest.badge">Guest</span>
     <div class="tab-item active" id="tab-chat"><span data-i18n="easy.tab.chat">Chat</span><span class="tab-badge" id="chat-badge"></span></div>
     <div class="tab-item" id="tab-files"><span data-i18n="easy.menu.files">Files</span><span class="tab-badge" id="files-badge"></span></div>
     <div class="tab-item" id="tab-preview"><span data-i18n="easy.tab.preview">Preview</span><span class="tab-badge" id="preview-badge"></span></div>
@@ -2781,7 +2781,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     if (tab === 'chat') {
       leftPanel.style.display = 'flex';
       chatArea.style.display = 'flex';
-      if (participantsBar) participantsBar.style.display = '';
+      if (participantsBar) participantsBar.style.display = participantsBar._hasMultipleUsers ? 'block' : 'none';
       if (quickActions) quickActions.style.display = '';
       if (inputBar) inputBar.style.display = '';
       if (resizeFilesChat) resizeFilesChat.style.display = 'none';
@@ -3831,7 +3831,9 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       return '<a href="' + url + '" class="chat-link" style="color:#007aff;word-break:break-all;text-decoration:underline;">' + url + '</a>' + trail;
     });
     // Highlight @mentions
-    return withLinks.replace(/@([\w\u4e00-\u9fff]+)/g, '<span class="mention">@$1</span>');
+    var withMentions = withLinks.replace(/@([\w\u4e00-\u9fff]+)/g, '<span class="mention">@$1</span>');
+    // Convert newlines to HTML breaks
+    return withMentions.replace(/\\n{2,}/g, '<br><br>').replace(/\\n/g, ' ');
   }
 
   // Intercept link clicks in chat — open in preview instead of navigating away
@@ -3889,10 +3891,11 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       }
     }
 
-    // Participants bar — always visible, 小码 first then users
+    // Participants bar — visible when >1 user, 小码 first then users
     var bar = document.getElementById('participants-bar');
     if (bar) {
-      bar.style.display = 'block';
+      bar.style.display = (users.length > 1) ? 'block' : 'none';
+      bar._hasMultipleUsers = (users.length > 1);
       bar.innerHTML = '';
 
       // 小码 AI chip — always first
@@ -6376,7 +6379,9 @@ const indexHtml = `<!DOCTYPE html>
           // Re-focus terminal after output settles (mobile loses focus during heavy output)
           clearTimeout(outputRefocusTimer);
           outputRefocusTimer = setTimeout(function() {
-            if (document.activeElement !== xtermTextarea && !isMobile) {
+            if (document.activeElement !== xtermTextarea && !isMobile
+                && !vpConfirmVisible
+                && !(pasteOverlay && pasteOverlay.style.display === 'flex')) {
               term.focus();
             }
           }, 300);
@@ -7614,7 +7619,7 @@ const indexHtml = `<!DOCTYPE html>
           } else if (vpConfirmVisible) {
             pendingAsrText = d.text;
           }
-          if (!asrFlushed) { directSendMode ? vpSend() : flushAsrText(); }
+          if (!asrFlushed && !vpConfirmVisible) { directSendMode ? vpSend() : flushAsrText(); }
         } else if (d.type === 'asr_partial' && d.text) {
           if (!asrFlushed && !vpConfirmVisible) {
             pendingAsrText = d.text;
@@ -8086,7 +8091,7 @@ const indexHtml = `<!DOCTYPE html>
       if (xtermTextarea) xtermTextarea.disabled = true;
     });
     chatInput.addEventListener('blur', function() {
-      if (xtermTextarea) xtermTextarea.disabled = false;
+      if (xtermTextarea && !vpConfirmVisible) xtermTextarea.disabled = false;
     });
 
     // Chat bar special keys (Esc/Tab/Up/Down) — send to terminal
