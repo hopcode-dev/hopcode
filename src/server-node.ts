@@ -35,7 +35,10 @@ import {
 } from './shared/protocol.js';
 import { ClaudeProcess } from './easymode/claude-process.js';
 import type { EasyClientMessage, EasyServerMessage } from './easymode/protocol.js';
+import { TaskScheduler } from './easymode/task-scheduler.js';
+import type { TaskRunResult } from './easymode/task-scheduler.js';
 import { setupProjectTemplate } from './templates/index.js';
+import { WeComBridge } from './channels/wecom-bridge.js';
 import { getI18nScript, t } from './i18n.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -919,22 +922,34 @@ function getLoginHtml(): string {
 // Session chooser HTML page - generated dynamically with server-side rendering
 async function buildSessionsHtml(username?: string): Promise<string> {
   const isRoot = isAdminUser(username);
-  let sessionList: { id: string; name: string; owner: string; createdAt: number; lastActivity: number; clients: number; mode?: string; project?: string; sharedWith?: string[]; onlineUsers?: string[] }[] = [];
+  let sessionList: { id: string; name: string; owner: string; createdAt: number; lastActivity: number; clients: number; mode?: string; project?: string; sharedWith?: string[]; onlineUsers?: string[]; _projectDir?: string }[] = [];
   try {
     // Root sees all sessions; other users see only their own
     const ownerQuery = isMultiUser && username && !isRoot ? `?owner=${encodeURIComponent(username)}` : '';
     const resp = await ptyFetch('/sessions' + ownerQuery);
     if (resp.ok) {
       const list: SessionInfo[] = await resp.json() as SessionInfo[];
-      sessionList = list.map(s => ({ id: s.id, name: s.name, owner: s.owner, createdAt: s.createdAt, lastActivity: s.lastActivity, clients: s.clientCount }));
+      sessionList = list.map(s => ({ id: s.id, name: s.name, owner: s.owner, createdAt: s.createdAt, lastActivity: s.lastActivity, clients: s.clientCount, _projectDir: s.projectDir }));
     }
   } catch {}
   // Append Easy Mode sessions
+  const easyProjectDirs = new Set<string>(); // track Easy projectDirs to hide paired Pro sessions
   for (const [id, info] of easySessions) {
     if (isMultiUser && username && !isRoot && info.owner !== username && !info.sharedWith.has(username)) continue;
     if (sessionList.some(s => s.id === id)) continue;
     const onlineUsers = Array.from(info.connectedUsers.keys());
     sessionList.push({ id, name: info.name, owner: info.owner, createdAt: info.createdAt, lastActivity: info.lastActivity || info.createdAt, clients: onlineUsers.length, mode: 'easy', project: info.project, sharedWith: info.sharedWith.size > 0 ? Array.from(info.sharedWith) : undefined, onlineUsers: onlineUsers.length > 0 ? onlineUsers : undefined });
+    // Track this Easy session's projectDir
+    const pd = info.cp.projectDir.endsWith('/workspace') ? info.cp.projectDir.slice(0, -'/workspace'.length) : info.cp.projectDir;
+    easyProjectDirs.add(pd);
+  }
+  // Hide Pro sessions that share a projectDir with an Easy session (they're the same project)
+  if (easyProjectDirs.size > 0) {
+    sessionList = sessionList.filter(s => {
+      if (s.mode === 'easy') return true;
+      if (s._projectDir && easyProjectDirs.has(s._projectDir)) return false;
+      return true;
+    });
   }
   sessionList.sort((a, b) => b.lastActivity - a.lastActivity);
 
@@ -2064,11 +2079,25 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     <div class="tab-item active" id="tab-chat"><span data-i18n="easy.tab.chat">Chat</span><span class="tab-badge" id="chat-badge"></span></div>
     <div class="tab-item" id="tab-files"><span data-i18n="easy.menu.files">Files</span><span class="tab-badge" id="files-badge"></span></div>
     <div class="tab-item" id="tab-preview"><span data-i18n="easy.tab.preview">Preview</span><span class="tab-badge" id="preview-badge"></span></div>
+    <span id="task-btn" style="display:none; margin-left:auto; padding:4px 8px; cursor:pointer; font-size:16px; position:relative;" title="Scheduled Tasks">⏰<span id="task-badge" style="display:none; position:absolute; top:0; right:0; min-width:14px; height:14px; background:#007aff; color:#fff; font-size:9px; font-weight:700; border-radius:7px; text-align:center; line-height:14px;"></span></span>
   </div>
 
   <!-- Main content (side-by-side on desktop) -->
   <div id="main-content">
-  <div id="left-panel">
+  <div id="left-panel" style="position:relative;">
+    <!-- Task list overlay (inside left-panel so it only covers the chat area) -->
+    <div id="task-overlay" style="display:none; position:absolute; inset:0; background:rgba(0,0,0,.4); z-index:3000;">
+      <div style="position:absolute; bottom:0; left:0; right:0; max-height:70vh; background:#fff; border-radius:16px 16px 0 0; padding:16px; overflow-y:auto;">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+          <span style="font-size:17px; font-weight:600;">⏰ Scheduled Tasks</span>
+          <span id="task-overlay-close" style="font-size:22px; cursor:pointer; padding:4px 8px; color:#86868b;">&times;</span>
+        </div>
+        <div id="task-list"></div>
+        <div id="task-guest-hint" style="display:none; text-align:center; color:#86868b; font-size:13px; padding:12px;">
+          注册后可创建自己的定时任务 ✨
+        </div>
+      </div>
+    </div>
     <!-- Files panel (Finder-style on desktop, slide-in on mobile) -->
     <div id="files-panel">
       <div class="fp-header">
@@ -2172,7 +2201,9 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     <div class="menu-item" id="menu-home"><span class="mi-icon">&#x1F3E0;</span><span class="mi-label" data-i18n="easy.menu.home">Home</span><span class="mi-arrow">&#x203A;</span></div>
     <div class="menu-item" id="menu-files"><span class="mi-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="#60a5fa"><path d="M2 6a2 2 0 012-2h5l2 2h9a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg></span><span class="mi-label" data-i18n="easy.menu.files">Files</span><span class="mi-arrow">&#x203A;</span></div>
     <div class="menu-item" id="menu-apps"><span class="mi-icon">&#x2B50;</span><span class="mi-label" data-i18n="easy.menu.apps">Apps</span><span class="mi-arrow">&#x203A;</span></div>
+    <div class="menu-item" id="menu-tasks"><span class="mi-icon">&#x23F0;</span><span class="mi-label">Scheduled Tasks</span><span class="mi-badge" id="menu-task-badge"></span><span class="mi-arrow">&#x203A;</span></div>
     <div class="menu-item" id="menu-invite"><span class="mi-icon">&#x1F91D;</span><span class="mi-label" data-i18n="easy.copy_invite">Invite to collaborate</span></div>
+    <div class="menu-item" id="menu-pro-mode"><span class="mi-icon">&#x1F4BB;</span><span class="mi-label" data-i18n="easy.menu.pro_mode">Pro Mode</span><span class="mi-arrow">&#x203A;</span></div>
   </div>
   <div class="menu-divider"></div>
   <div class="menu-section">
@@ -2431,6 +2462,25 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     menuHide();
     window.location.href = '/terminal';
   });
+  document.getElementById('menu-pro-mode').addEventListener('click', function() {
+    menuHide();
+    addSystemMsg(_t('easy.switch.to_pro'));
+    var projectParam = new URLSearchParams(location.search).get('project') || '';
+    fetch('/terminal/api/switch-mode', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fromSession: sessionId, targetMode: 'pro', project: projectParam })
+    }).then(function(r) { return r.json(); }).then(function(d) {
+      if (d.url) {
+        // If new PTY session, pass cd command via URL hash
+        if (d.cdCommand) {
+          window.location.href = d.url + '#cd=' + encodeURIComponent(d.cdCommand);
+        } else {
+          window.location.href = d.url;
+        }
+      }
+    }).catch(function() {});
+  });
   document.getElementById('menu-files').addEventListener('click', function() {
     menuHide();
     showTab('files');
@@ -2442,6 +2492,12 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   document.getElementById('menu-new-project').addEventListener('click', function() {
     menuHide();
     if (newProjectModal) newProjectModal.classList.add('show');
+  });
+  document.getElementById('menu-tasks').addEventListener('click', function() {
+    menuHide();
+    taskOverlay.style.display = 'flex';
+    taskOverlay.style.alignItems = 'flex-end';
+    wsSend({ type: 'list_tasks' });
   });
   // Invite modal
   var inviteModal = document.getElementById('invite-modal');
@@ -3575,6 +3631,43 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         // User was granted file access
         _hasFileAccess = true;
         updateFileAccessUI();
+      } else if (d.type === 'task_result') {
+        // Render task result as a special assistant bubble
+        var wrap = document.createElement('div');
+        wrap.className = 'msg-wrap assistant-wrap';
+        var header = document.createElement('div');
+        header.className = 'msg-sender';
+        header.style.color = d.isDraft ? '#e67e22' : '#8e44ad';
+        header.textContent = (d.isDraft ? '📋 ' : '⏰ ') + d.taskName;
+        wrap.appendChild(header);
+        var bubble = document.createElement('div');
+        bubble.className = 'msg assistant';
+        if (d.isDraft) bubble.style.borderLeft = '3px dashed #e67e22';
+        bubble.innerHTML = linkify(d.text || '');
+        wrap.appendChild(bubble);
+        chatArea.appendChild(wrap);
+        autoScroll();
+        saveChatHistory();
+      } else if (d.type === 'task_count') {
+        updateTaskBadge(d.count);
+      } else if (d.type === 'tasks_list') {
+        renderTaskList(d.tasks);
+      } else if (d.type === 'version_log_result') {
+        renderVersionLog(d.entries);
+      } else if (d.type === 'version_restored') {
+        versionPanel.style.display = 'none';
+        addSystemMsg(_t('easy.version.restored', {files: d.files.map(function(f){return f.replace('workspace/','')}).join(', ')}));
+        if (fbPanel.classList.contains('open')) fbLoadDir(fbCurrentPath);
+        var previewFrame = document.getElementById('preview-frame');
+        if (previewFrame && previewFrame.src) previewFrame.src = previewFrame.src;
+      } else if (d.type === 'file_version_log_result') {
+        renderFileVersionLog(d.filePath, d.entries);
+      } else if (d.type === 'file_version_restored') {
+        versionPanel.style.display = 'none';
+        addSystemMsg(_t('easy.version.restored', {files: d.message}));
+        if (fbPanel.classList.contains('open')) fbLoadDir(fbCurrentPath);
+        var previewFrame2 = document.getElementById('preview-frame');
+        if (previewFrame2 && previewFrame2.src) previewFrame2.src = previewFrame2.src;
       } else if (d.type === 'error') {
         addRetryMsg(d.message || _t('error_generic'));
       }
@@ -3604,6 +3697,164 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       dbg('wsSend DROPPED (ws not ready): ' + JSON.stringify(msg).substring(0, 80));
     }
   }
+
+  // --- Task management UI ---
+  var taskBtn = document.getElementById('task-btn');
+  var taskBadge = document.getElementById('task-badge');
+  var taskOverlay = document.getElementById('task-overlay');
+  var taskList = document.getElementById('task-list');
+  var taskGuestHint = document.getElementById('task-guest-hint');
+  var taskOverlayClose = document.getElementById('task-overlay-close');
+
+  var menuTaskBadge = document.getElementById('menu-task-badge');
+  function updateTaskBadge(count) {
+    if (count > 0) {
+      taskBtn.style.display = '';
+      taskBadge.style.display = '';
+      taskBadge.textContent = count;
+      if (menuTaskBadge) menuTaskBadge.textContent = count + ' active';
+    } else {
+      taskBadge.style.display = 'none';
+      if (menuTaskBadge) menuTaskBadge.textContent = '';
+    }
+  }
+
+  function scheduleLabel(s, t) {
+    if (!s) return '';
+    if (s.kind === 'cron') {
+      // Parse common cron patterns into human-readable Chinese
+      var expr = s.expr || '';
+      var parts = expr.split(' ');
+      if (parts.length === 5) {
+        var min = parts[0], hour = parts[1], dom = parts[2], mon = parts[3], dow = parts[4];
+        // "0 9 * * *" → 每天 9:00
+        if (dom === '*' && mon === '*' && dow === '*' && min.match(/^\\d+$/) && hour.match(/^\\d+$/)) {
+          return '\u6bcf\u5929 ' + hour.padStart(2,'0') + ':' + min.padStart(2,'0');
+        }
+        // "*/30 * * * *" → 每30分钟
+        var everyMin = min.match(/^\\*\\/(\\d+)$/);
+        if (everyMin && hour === '*' && dom === '*') return '\u6bcf' + everyMin[1] + '\u5206\u949f';
+        // "0 9 * * 1-5" → 工作日 9:00
+        if (dow === '1-5' && dom === '*' && mon === '*' && min.match(/^\\d+$/) && hour.match(/^\\d+$/)) {
+          return '\u5de5\u4f5c\u65e5 ' + hour.padStart(2,'0') + ':' + min.padStart(2,'0');
+        }
+      }
+      return 'cron: ' + expr;
+    }
+    if (s.kind === 'every') {
+      var ms = s.everyMs || 0;
+      if (ms >= 86400000) return '\u6bcf' + Math.round(ms / 86400000) + '\u5929';
+      if (ms >= 3600000) return '\u6bcf' + Math.round(ms / 3600000) + '\u5c0f\u65f6';
+      if (ms >= 60000) return '\u6bcf' + Math.round(ms / 60000) + '\u5206\u949f';
+      return '\u6bcf' + Math.round(ms / 1000) + '\u79d2';
+    }
+    if (s.kind === 'delay') {
+      var ms = s.delayMs || 0;
+      var label = '';
+      if (ms >= 86400000) label = Math.round(ms / 86400000) + '\u5929';
+      else if (ms >= 3600000) label = Math.round(ms / 3600000) + '\u5c0f\u65f6';
+      else if (ms >= 60000) label = Math.round(ms / 60000) + '\u5206\u949f';
+      else label = Math.round(ms / 1000) + '\u79d2';
+      return label + '\u540e\uff08\u4e00\u6b21\u6027\uff09';
+    }
+    if (s.kind === 'at') return s.at ? new Date(s.at).toLocaleString() : '';
+    return JSON.stringify(s);
+  }
+
+  function statusLabel(t) {
+    if (t.status === 'draft') return '\u2709\ufe0f \u5f85\u786e\u8ba4';
+    if (!t.enabled) return '\u23f8 \u5df2\u6682\u505c';
+    return '\u25b6 \u8fd0\u884c\u4e2d';
+  }
+
+  function timeAgo(ts) {
+    if (!ts) return '-';
+    var diff = Date.now() - ts;
+    if (diff < 60000) return '\u521a\u521a';
+    if (diff < 3600000) return Math.floor(diff / 60000) + '\u5206\u949f\u524d';
+    if (diff < 86400000) return Math.floor(diff / 3600000) + '\u5c0f\u65f6\u524d';
+    return Math.floor(diff / 86400000) + '\u5929\u524d';
+  }
+
+  function renderTaskList(tasks) {
+    taskList.innerHTML = '';
+    if (!tasks || tasks.length === 0) {
+      taskList.innerHTML = '<div style="text-align:center;color:#86868b;padding:20px;font-size:14px;">\u8fd8\u6ca1\u6709\u5b9a\u65f6\u4efb\u52a1<br>\u5bf9\u5c0f\u7801\u8bf4\u201c\u6bcf\u5929\u4e5d\u70b9\u67e5\u5929\u6c14\u201d\u8bd5\u8bd5</div>';
+      return;
+    }
+    var isGuest = !_isOwner;
+    tasks.forEach(function(t) {
+      var card = document.createElement('div');
+      card.style.cssText = 'padding:12px;margin-bottom:8px;background:#f9f9fb;border-radius:12px;';
+
+      // Row 1: prompt (the actual content) + status
+      var row1 = document.createElement('div');
+      row1.style.cssText = 'display:flex;align-items:flex-start;gap:8px;';
+      var promptEl = document.createElement('div');
+      promptEl.style.cssText = 'flex:1;font-size:14px;color:#1d1d1f;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;';
+      promptEl.textContent = t.prompt || t.name;
+      row1.appendChild(promptEl);
+      var statusEl = document.createElement('span');
+      statusEl.style.cssText = 'flex-shrink:0;font-size:11px;padding:2px 8px;border-radius:10px;white-space:nowrap;'
+        + (t.status === 'draft' ? 'background:#fef3e2;color:#e67e22;' : t.enabled ? 'background:#e8f8ed;color:#34c759;' : 'background:#f0f0f0;color:#86868b;');
+      statusEl.textContent = statusLabel(t);
+      row1.appendChild(statusEl);
+      card.appendChild(row1);
+
+      // Row 2: schedule + last run + errors
+      var row2 = document.createElement('div');
+      row2.style.cssText = 'display:flex;align-items:center;gap:12px;margin-top:6px;font-size:12px;color:#86868b;flex-wrap:wrap;';
+      var schedEl = document.createElement('span');
+      schedEl.textContent = '\ud83d\udcc5 ' + scheduleLabel(t.schedule, t);
+      row2.appendChild(schedEl);
+      if (t.lastRunAt) {
+        var lastEl = document.createElement('span');
+        lastEl.textContent = '\u4e0a\u6b21: ' + timeAgo(t.lastRunAt);
+        row2.appendChild(lastEl);
+      }
+      if (t.consecutiveErrors > 0) {
+        var errEl = document.createElement('span');
+        errEl.style.color = '#ff3b30';
+        errEl.textContent = '\u26a0 \u8fde\u7eed\u5931\u8d25 ' + t.consecutiveErrors + ' \u6b21';
+        row2.appendChild(errEl);
+      }
+      card.appendChild(row2);
+
+      // Row 3: actions (owner only)
+      if (!isGuest) {
+        var row3 = document.createElement('div');
+        row3.style.cssText = 'display:flex;gap:8px;margin-top:8px;justify-content:flex-end;';
+        var toggle = document.createElement('button');
+        toggle.style.cssText = 'padding:4px 12px;border:1px solid #e0e0e0;border-radius:8px;background:#fff;font-size:12px;cursor:pointer;color:#333;';
+        toggle.textContent = t.enabled ? '\u23f8 \u6682\u505c' : '\u25b6 \u6062\u590d';
+        toggle.onclick = function() { wsSend({ type: 'toggle_task', taskId: t.id, enabled: !t.enabled }); setTimeout(function() { wsSend({ type: 'list_tasks' }); }, 300); };
+        row3.appendChild(toggle);
+        var del = document.createElement('button');
+        del.style.cssText = 'padding:4px 12px;border:1px solid #ffcdd2;border-radius:8px;background:#fff;color:#ff3b30;font-size:12px;cursor:pointer;';
+        del.textContent = '\ud83d\uddd1 \u5220\u9664';
+        del.onclick = function() { if (confirm('\u5220\u9664\u4efb\u52a1\u201c' + (t.name || '') + '\u201d\uff1f')) { wsSend({ type: 'delete_task', taskId: t.id }); setTimeout(function() { wsSend({ type: 'list_tasks' }); }, 300); } };
+        row3.appendChild(toggle);
+        row3.appendChild(del);
+        card.appendChild(row3);
+      }
+
+      taskList.appendChild(card);
+    });
+    if (isGuest) taskGuestHint.style.display = '';
+    else taskGuestHint.style.display = 'none';
+  }
+
+  if (taskBtn) taskBtn.onclick = function() {
+    taskOverlay.style.display = 'flex';
+    taskOverlay.style.alignItems = 'flex-end';
+    wsSend({ type: 'list_tasks' });
+  };
+  if (taskOverlayClose) taskOverlayClose.onclick = function() {
+    taskOverlay.style.display = 'none';
+  };
+  if (taskOverlay) taskOverlay.onclick = function(e) {
+    if (e.target === taskOverlay) taskOverlay.style.display = 'none';
+  };
 
   var toolIcons = { Read: '\ud83d\udcc4', Write: '\u270f\ufe0f', Edit: '\u270f\ufe0f', Bash: '\u25b6', Glob: '\ud83d\udd0d', Grep: '\ud83d\udd0d', Agent: '\ud83e\udd16', WebFetch: '\ud83c\udf10', WebSearch: '\ud83c\udf10', NotebookEdit: '\ud83d\udcd3' };
   var toolStepCount = 0;
@@ -4620,6 +4871,117 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     });
   }
 
+  // Version history helpers (shared between Easy Mode file panel and Pro Mode file browser)
+  // Lazy-init: version-panel div may appear after this script in the DOM
+  var versionPanel, versionList;
+  function _initVersionPanel() {
+    if (versionPanel) return;
+    versionPanel = document.getElementById('version-panel');
+    versionList = document.getElementById('version-list');
+    if (!versionPanel) return;
+    var closeBtn = document.getElementById('version-close');
+    if (closeBtn) closeBtn.addEventListener('click', function() { versionPanel.style.display = 'none'; });
+    versionPanel.addEventListener('click', function(e) { if (e.target === versionPanel) versionPanel.style.display = 'none'; });
+  }
+  function fbIsWorkspaceFile(fullPath) {
+    return _projectDir && fullPath.indexOf(_projectDir) === 0;
+  }
+  function fbGetWorkspacePath(fullPath) {
+    var pd = _projectDir;
+    if (pd.endsWith('/')) pd = pd.slice(0, -1);
+    if (pd.endsWith('/workspace')) {
+      var projRoot = pd.slice(0, -'/workspace'.length);
+      return fullPath.replace(projRoot + '/', '');
+    }
+    return fullPath.replace(pd + '/', '');
+  }
+  var _fileHistoryTarget = '';
+  function fbFileHistory(fullPath, displayName) {
+    _initVersionPanel();
+    _fileHistoryTarget = fullPath;
+    var wsPath = fbGetWorkspacePath(fullPath);
+    versionPanel.style.display = '';
+    versionPanel.querySelector('[data-i18n="easy.version.title"]').textContent = _t('easy.version.title') + ' — ' + displayName;
+    versionList.innerHTML = '<div style="color:#888;padding:20px;text-align:center;">Loading...</div>';
+    wsSend({ type: 'file_version_log', filePath: wsPath });
+  }
+  function _translateVersionMsg(msg) {
+    if (!msg) return '';
+    var m;
+    if ((m = msg.match(/^Updated (.+)$/))) return _t('easy.version.updated', {files: m[1]});
+    if ((m = msg.match(/^Uploaded (.+)$/))) return _t('easy.version.uploaded', {files: m[1]});
+    if ((m = msg.match(/^Restored (.+)$/))) return _t('easy.version.restored_file', {file: m[1]});
+    if (msg === '还原到之前的版本') return _t('easy.version.restored_label');
+    if (msg === '初始版本' || msg === 'Initial version') return _t('easy.version.initial');
+    return msg;
+  }
+  function renderVersionLog(entries) {
+    _initVersionPanel();
+    if (!entries || entries.length === 0) {
+      versionList.innerHTML = '<div style="color:#888;padding:20px;text-align:center;">' + _t('easy.version.empty') + '</div>';
+      return;
+    }
+    versionList.innerHTML = '';
+    entries.forEach(function(entry, i) {
+      var div = document.createElement('div');
+      div.style.cssText = 'padding:10px 12px;border-bottom:1px solid rgba(15,52,96,0.4);';
+      var date = new Date(entry.timestamp);
+      var timeStr = (date.getMonth()+1) + '/' + date.getDate() + ' ' + date.getHours().toString().padStart(2,'0') + ':' + date.getMinutes().toString().padStart(2,'0');
+      var filesStr = entry.filesChanged.length > 0
+        ? '<div style="color:#60a5fa;font-size:11px;margin-top:3px;">' + entry.filesChanged.map(function(f){return f.replace('workspace/','')}).join(', ') + '</div>'
+        : '';
+      var idx = i + 1;
+      var displayMsg = _translateVersionMsg(entry.message);
+      div.innerHTML = '<div style="display:flex;align-items:center;gap:8px;">'
+        + '<span style="color:#4ade80;font-size:12px;min-width:40px;">' + timeStr + '</span>'
+        + '<span style="color:#e0e0e0;font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + displayMsg.replace(/</g,'&lt;') + '</span>'
+        + (i > 0 ? '<button class="ver-restore key-btn" data-idx="' + idx + '" style="font-size:11px;padding:2px 8px;white-space:nowrap;">' + _t('easy.version.restore') + '</button>' : '<span style="color:#888;font-size:11px;">' + _t('easy.version.current') + '</span>')
+        + '</div>'
+        + '<div style="color:#888;font-size:11px;margin-top:2px;">' + entry.author + '</div>'
+        + filesStr;
+      versionList.appendChild(div);
+    });
+    versionList.querySelectorAll('.ver-restore').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var idx = parseInt(btn.getAttribute('data-idx'), 10);
+        if (confirm(_t('easy.version.restore_confirm'))) {
+          wsSend({ type: 'version_restore', index: idx });
+        }
+      });
+    });
+  }
+  function renderFileVersionLog(filePath, entries) {
+    _initVersionPanel();
+    if (!entries || entries.length === 0) {
+      versionList.innerHTML = '<div style="color:#888;padding:20px;text-align:center;">' + _t('easy.version.empty') + '</div>';
+      return;
+    }
+    versionList.innerHTML = '';
+    entries.forEach(function(entry, i) {
+      var div = document.createElement('div');
+      div.style.cssText = 'padding:10px 12px;border-bottom:1px solid rgba(15,52,96,0.4);';
+      var date = new Date(entry.timestamp);
+      var timeStr = (date.getMonth()+1) + '/' + date.getDate() + ' ' + date.getHours().toString().padStart(2,'0') + ':' + date.getMinutes().toString().padStart(2,'0');
+      var displayMsg = _translateVersionMsg(entry.message);
+      var idx = i + 1;
+      div.innerHTML = '<div style="display:flex;align-items:center;gap:8px;">'
+        + '<span style="color:#4ade80;font-size:12px;min-width:40px;">' + timeStr + '</span>'
+        + '<span style="color:#e0e0e0;font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + displayMsg.replace(/</g,'&lt;') + '</span>'
+        + (i > 0 ? '<button class="ver-file-restore key-btn" data-idx="' + idx + '" style="font-size:11px;padding:2px 8px;white-space:nowrap;">' + _t('easy.version.restore') + '</button>' : '<span style="color:#888;font-size:11px;">' + _t('easy.version.current') + '</span>')
+        + '</div>'
+        + '<div style="color:#888;font-size:11px;margin-top:2px;">' + entry.author + '</div>';
+      versionList.appendChild(div);
+    });
+    versionList.querySelectorAll('.ver-file-restore').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var idx = parseInt(btn.getAttribute('data-idx'), 10);
+        if (confirm(_t('easy.version.restore_confirm'))) {
+          wsSend({ type: 'file_version_restore', filePath: filePath, index: idx });
+        }
+      });
+    });
+  }
+
   function loadFiles(dir) {
     if (!_hasFileAccess) { updateFileAccessUI(); return; }
     // Sandbox: restrict to project directory (only when projectDir is known)
@@ -4721,6 +5083,21 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
               document.body.removeChild(a);
             });
             acts.appendChild(dlBtn);
+
+            // Version history button (only for workspace files)
+            if (fbIsWorkspaceFile(dir + '/' + item.name)) {
+              var histBtn = document.createElement('button');
+              histBtn.className = 'fp-act';
+              histBtn.title = _t('easy.version.title');
+              histBtn.innerHTML = '&#x1F551;';
+              histBtn.style.fontSize = '14px';
+              histBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                fbFileHistory(dir + '/' + item.name, item.name);
+              });
+              acts.appendChild(histBtn);
+            }
+
             row.appendChild(acts);
 
             // Row click: preview if possible, else download
@@ -5475,6 +5852,11 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   // ---- Init ----
   msgInput.placeholder = (('ontouchstart' in window || navigator.maxTouchPoints > 0) || window.innerWidth < 768 || msgInput.offsetWidth < 300) ? _t('easy.input.placeholder_mobile') : _t('easy.input.placeholder', {key: /Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Option' : 'Alt'});
   restoreChatHistory();
+  // Show "back from Pro" message if applicable
+  if (location.hash === '#from-pro') {
+    addSystemMsg(_t('easy.switch.from_pro'));
+    history.replaceState(null, '', location.pathname + location.search);
+  }
   connectWs();
   connectVoice();
 
@@ -5593,6 +5975,15 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   }
 })();
 </script>
+<div id="version-panel" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:10001;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);">
+  <div style="position:absolute;top:10%;left:5%;right:5%;bottom:10%;background:#0a1628;border:1px solid rgba(15,52,96,0.8);border-radius:12px;display:flex;flex-direction:column;overflow:hidden;">
+    <div style="display:flex;align-items:center;padding:12px 16px;border-bottom:1px solid rgba(15,52,96,0.5);background:rgba(22,33,62,0.85);">
+      <span style="flex:1;color:#e0e0e0;font-weight:600;font-size:15px;" data-i18n="easy.version.title">Version History</span>
+      <button id="version-close" style="background:none;border:none;color:#e0e0e0;font-size:22px;cursor:pointer;padding:0 4px;">&times;</button>
+    </div>
+    <div id="version-list" style="flex:1;overflow-y:auto;padding:8px;"></div>
+  </div>
+</div>
 </body>
 </html>`;
 }
@@ -5928,8 +6319,9 @@ const indexHtml = `<!DOCTYPE html>
     .fb-name { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .fb-meta { font-size: 11px; color: #666; margin-top: 2px; }
     .fb-actions { display: flex; gap: 4px; flex-shrink: 0; }
-    .fb-dl { background: #333; border: none; color: #4ade80; font-size: 11px; padding: 4px 8px; border-radius: 4px; cursor: pointer; min-width: 32px; min-height: 36px; }
-    .fb-dl:active { background: #4ade80; color: #000; }
+    .fb-dl, .fb-hist { background: #333; border: none; color: #4ade80; font-size: 11px; padding: 4px 8px; border-radius: 4px; cursor: pointer; min-width: 32px; min-height: 36px; }
+    .fb-dl:active, .fb-hist:active { background: #4ade80; color: #000; }
+    .fb-hist { font-size: 13px; color: #60a5fa; }
     #fb-text-preview { display: none; flex: 1; flex-direction: column; overflow: hidden; }
     #fb-text-header {
       display: flex; align-items: center; gap: 8px; padding: 8px 12px;
@@ -6088,6 +6480,15 @@ const indexHtml = `<!DOCTYPE html>
     <div id="fb-preview-info">
       <span id="fb-preview-name"></span>
       <button id="fb-preview-dl" class="key-btn">&#x2193;</button>
+    </div>
+  </div>
+  <div id="version-panel" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:10001;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);">
+    <div style="position:absolute;top:10%;left:5%;right:5%;bottom:10%;background:#0a1628;border:1px solid rgba(15,52,96,0.8);border-radius:12px;display:flex;flex-direction:column;overflow:hidden;">
+      <div style="display:flex;align-items:center;padding:12px 16px;border-bottom:1px solid rgba(15,52,96,0.5);background:rgba(22,33,62,0.85);">
+        <span style="flex:1;color:#e0e0e0;font-weight:600;font-size:15px;" data-i18n="easy.version.title">Version History</span>
+        <button id="version-close" style="background:none;border:none;color:#e0e0e0;font-size:22px;cursor:pointer;padding:0 4px;">&times;</button>
+      </div>
+      <div id="version-list" style="flex:1;overflow-y:auto;padding:8px;"></div>
     </div>
   </div>
 
@@ -6393,6 +6794,13 @@ const indexHtml = `<!DOCTYPE html>
         setStatus(defaultStatusText);
         reconnectDelay = 1000; // reset backoff on successful connection
         lastCols = 0; lastRows = 0; sendResize();
+        // Auto-cd if switched from Easy Mode (hash contains cd command)
+        var cdHash = location.hash.match(/^#cd=(.+)/);
+        if (cdHash && !isReconnect) {
+          var cdCmd = decodeURIComponent(cdHash[1]);
+          setTimeout(function() { termWs.send(JSON.stringify({ type: 'input', data: cdCmd + '\\n' })); }, 800);
+          history.replaceState(null, '', location.pathname + location.search);
+        }
       };
       termWs.onerror = () => {
         // Only show error if reconnect message is already visible (i.e. slow reconnect)
@@ -8521,7 +8929,14 @@ const indexHtml = `<!DOCTYPE html>
     });
     document.getElementById('menu-easy-mode').addEventListener('click', function(e) {
       e.preventDefault();
-      location.href = '/terminal/easy?session=' + encodeURIComponent(sessionId);
+      menuHide();
+      fetch('/terminal/api/switch-mode', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fromSession: sessionId, targetMode: 'easy' })
+      }).then(function(r) { return r.json(); }).then(function(d) {
+        if (d.url) location.href = d.url + '#from-pro';
+      }).catch(function() {});
     });
     document.getElementById('menu-lang-toggle').addEventListener('click', function() {
       _setLang(_lang === 'en' ? 'zh' : 'en');
@@ -8576,6 +8991,16 @@ const indexHtml = `<!DOCTYPE html>
       fbHiddenBtn.style.opacity = fbShowHidden ? '1' : '0.5';
       fbLoadDir(fbCurrentPath);
     });
+
+    // Project-level version history button (Pro Mode file browser)
+    var _fbVerBtn = document.getElementById('fb-version-btn');
+    if (_fbVerBtn) _fbVerBtn.addEventListener('click', function() {
+      _initVersionPanel();
+      versionPanel.style.display = '';
+      versionList.innerHTML = '<div style="color:#888;padding:20px;text-align:center;">Loading...</div>';
+      wsSend({ type: 'version_log' });
+    });
+
     document.getElementById('fb-text-back').addEventListener('click', function() {
       fbTextPreview.style.display = 'none';
       fbList.style.display = '';
@@ -9423,6 +9848,7 @@ function loadEasyRegistry(): void {
       // Create a ClaudeProcess — it will load history from .easy-state.json
       const noop = () => {};
       const cp = new ClaudeProcess(entry.id, entry.projectDir, noop);
+      cp.owner = entry.owner;
       cp.removeListener(noop);
       const info: EasySessionInfo = {
         cp,
@@ -9478,6 +9904,7 @@ function scanOrphanEasySessions(): void {
           const owner = home === (process.env.HOME || '/root') ? 'root' : path.basename(home);
           const noop = () => {};
           const cp = new ClaudeProcess(id, projDir, noop);
+          cp.owner = owner;
           cp.removeListener(noop);
           const stat = fs.statSync(stateFile);
           easySessions.set(id, {
@@ -9503,6 +9930,72 @@ function scanOrphanEasySessions(): void {
 
 // Load on startup
 loadEasyRegistry();
+
+// Task scheduler for Easy Mode scheduled tasks
+const taskScheduler = new TaskScheduler();
+
+function broadcastTaskCount(sessionId: string, info: EasySessionInfo, count: number): void {
+  for (const [, sockets] of info.connectedUsers) {
+    for (const ws of sockets) {
+      try { ws.send(JSON.stringify({ type: 'task_count', count })); } catch {}
+    }
+  }
+}
+
+function initTaskSchedulerForSession(sessionId: string, info: EasySessionInfo): void {
+  taskScheduler.loadAndSync(sessionId, info.cp.projectDir, (result: TaskRunResult) => {
+    // Inject result into chat history
+    info.cp.injectTaskResult(result.taskName, result.text, result.isDraft);
+    // Broadcast task count update
+    broadcastTaskCount(sessionId, info, taskScheduler.getActiveCount(sessionId));
+  }, (count: number) => {
+    // Count changed (e.g. at-task auto-deleted, task enabled/disabled via file change)
+    broadcastTaskCount(sessionId, info, count);
+  });
+}
+
+// Initialize scheduler for all restored sessions
+for (const [sessionId, info] of easySessions) {
+  try { initTaskSchedulerForSession(sessionId, info); } catch {}
+}
+
+// ── WeChat Work Bridge ──
+// Creates a new Easy Mode session for a given Hopcode user (used by WeComBridge)
+function createSessionForUser(owner: string): EasySessionInfo {
+  const userCfg = usersConfig[owner];
+  const homeDir = (!userCfg?.linuxUser || userCfg.linuxUser === 'root')
+    ? (process.env.HOME || '/root')
+    : `/home/${userCfg.linuxUser}`;
+  const projectName = `wecom-${Date.now().toString(36)}`;
+  const projectDir = `${homeDir}/coding/${projectName}`;
+  const sessionId = `easy_${randomUUID().replace(/-/g, '').substring(0, 12)}`;
+  const noop = () => {};
+  const cp = new ClaudeProcess(sessionId, projectDir, noop);
+  cp.owner = owner;
+  cp.removeListener(noop);
+  const info: EasySessionInfo = {
+    cp, owner, project: projectName, name: projectName,
+    createdAt: Date.now(), lastActivity: Date.now(),
+    connectedUsers: new Map(), sharedWith: new Set(),
+    _fileAccessUsers: new Set(), _leaveTimers: new Map(),
+  };
+  easySessions.set(sessionId, info);
+  saveEasyRegistry();
+  initTaskSchedulerForSession(sessionId, info);
+  console.log(`[easy] Created session ${sessionId} for ${owner} via WeComBridge in ${projectDir}`);
+  return info;
+}
+
+// Start WeChat Work bridge if configured
+if (process.env.WECOM_BOT_ID || process.env.WECOM_CORP_ID) {
+  const bridge = new WeComBridge(
+    easySessions as Map<string, any>,
+    saveEasyRegistry,
+    createSessionForUser,
+    () => ({ ...usersConfig }),
+  );
+  bridge.start().catch(e => console.error('[wecom-bridge] Start failed:', e));
+}
 
 function sendHtml(req: http.IncomingMessage, res: http.ServerResponse, html: string, precompressed?: Buffer): void {
   const noCacheHeaders = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', 'Pragma': 'no-cache', 'Expires': '0', 'Vary': 'Accept-Encoding' };
@@ -9643,6 +10136,208 @@ const server = http.createServer(async (req, res) => {
       'Set-Cookie': `auth=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly;${securePart}`,
     });
     res.end();
+    return;
+  }
+
+  // POST /terminal/api/switch-mode — switch between Easy and Pro mode for same project
+  if ((req.url || '').match(/^(?:\/terminal)?\/api\/switch-mode$/) && req.method === 'POST') {
+    if (!isAuthenticated(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      req.resume();
+      return;
+    }
+    const auth = getAuthInfo(req);
+    let body = '';
+    req.on('data', (c: Buffer) => { body += c.toString(); });
+    req.on('end', async () => {
+      try {
+        const { fromSession, targetMode } = JSON.parse(body);
+        if (!fromSession || !targetMode) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Missing fromSession or targetMode' }));
+          return;
+        }
+
+        const homeDir = (!auth.linuxUser || auth.linuxUser === 'root')
+          ? (process.env.HOME || '/root')
+          : `/home/${auth.linuxUser}`;
+        const codingBase = path.join(homeDir, 'coding');
+
+        // 1. Resolve projectDir from source session
+        let projectDir: string;
+        if (fromSession.startsWith('easy_')) {
+          const info = easySessions.get(fromSession);
+          if (info) {
+            projectDir = info.cp.projectDir;
+          } else {
+            // Session not yet activated — look up from registry, then from URL project param
+            try {
+              const registry = JSON.parse(fs.readFileSync(path.join(process.env.HOME || '/root', '.hopcode', 'easy-sessions.json'), 'utf-8'));
+              const entry = registry.find((s: any) => s.id === fromSession);
+              if (entry?.projectDir) { projectDir = entry.projectDir; }
+              else throw new Error('not in registry');
+            } catch {
+              // Fallback: reconstruct from project name in request body
+              const { project } = JSON.parse(body);
+              if (project) {
+                projectDir = path.join(codingBase, project);
+              } else {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Session not found. Pass project name.' }));
+                return;
+              }
+            }
+          }
+          // Normalize: if projectDir ends with /workspace, go up
+          if (projectDir.endsWith('/workspace')) projectDir = path.dirname(projectDir);
+        } else {
+          // Pro session — get projectDir from session metadata, fallback to CWD
+          const sessResp = await ptyFetch(`/sessions?owner=${encodeURIComponent(auth.username!)}`);
+          if (!sessResp.ok) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Pro session not found' })); return; }
+          const allSessions = await sessResp.json() as any[];
+          const proSession = allSessions.find((s: any) => s.id === fromSession);
+          if (!proSession) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Pro session not found' })); return; }
+
+          if (proSession.projectDir) {
+            projectDir = proSession.projectDir;
+          } else {
+            // Legacy session without projectDir — fallback to CWD
+            const cwdResp = await ptyFetch(`/sessions/${encodeURIComponent(fromSession)}/cwd`);
+            if (!cwdResp.ok) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Cannot determine project directory' })); return; }
+            const { cwd } = await cwdResp.json() as { cwd: string };
+            if (cwd.startsWith(codingBase + '/')) {
+              const relative = cwd.substring(codingBase.length + 1);
+              projectDir = path.join(codingBase, relative.split('/')[0]!);
+            } else {
+              projectDir = path.join(codingBase, path.basename(cwd));
+            }
+          }
+        }
+
+        const projectName = path.basename(projectDir);
+
+        // Sync latest Claude session ID from ~/.claude/projects/ into .easy-state.json
+        // This ensures both modes always use the most recent claude conversation
+        let latestClaudeSid: string | null = null;
+        try {
+          const encodedPath = projectDir.replace(/\//g, '-');
+          const claudeDir = path.join(homeDir, '.claude', 'projects', encodedPath);
+          const jsonlFiles = fs.readdirSync(claudeDir)
+            .filter((f: string) => f.endsWith('.jsonl') && !f.includes('/'))
+            .map((f: string) => ({ name: f, mtime: fs.statSync(path.join(claudeDir, f)).mtimeMs }))
+            .sort((a: any, b: any) => b.mtime - a.mtime);
+          if (jsonlFiles.length > 0) {
+            latestClaudeSid = jsonlFiles[0].name.replace('.jsonl', '');
+          }
+        } catch {}
+        if (latestClaudeSid) {
+          const stateFile = path.join(projectDir, '.easy-state.json');
+          try {
+            let state: any = {};
+            try { state = JSON.parse(fs.readFileSync(stateFile, 'utf-8')); } catch {}
+            if (state.claudeSessionId !== latestClaudeSid) {
+              state.claudeSessionId = latestClaudeSid;
+              fs.writeFileSync(stateFile, JSON.stringify(state));
+              // Also update in-memory ClaudeProcess if loaded
+              const easyInfo = easySessions.get(fromSession);
+              if (easyInfo) easyInfo.cp.claudeSessionId = latestClaudeSid;
+            }
+          } catch {}
+        }
+
+        if (targetMode === 'easy') {
+          // Find existing easy session for same project (memory first, then registry)
+          let targetId: string | null = null;
+          for (const [id, info] of easySessions) {
+            const infoDir = info.cp.projectDir.endsWith('/workspace') ? path.dirname(info.cp.projectDir) : info.cp.projectDir;
+            if (info.owner === auth.username && infoDir === projectDir) {
+              targetId = id;
+              break;
+            }
+          }
+          // Fallback: check registry for sessions not yet loaded into memory
+          if (!targetId) {
+            try {
+              const regPath = path.join(homeDir, '.hopcode', 'easy-sessions.json');
+              const reg: any[] = JSON.parse(fs.readFileSync(regPath, 'utf-8'));
+              const match = reg.find((s: any) => s.owner === auth.username && s.projectDir === projectDir);
+              if (match) targetId = match.id;
+            } catch {}
+          }
+          if (!targetId) {
+            // Create new easy session for the same project dir
+            targetId = 'easy_' + randomBytes(12).toString('hex');
+            fs.mkdirSync(projectDir, { recursive: true });
+            if (!fs.existsSync(path.join(projectDir, 'CLAUDE.md'))) {
+              try { setupProjectTemplate(projectDir, auth.linuxUser || auth.username, projectName); } catch {}
+            }
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ url: `/terminal/easy?session=${encodeURIComponent(targetId)}&project=${encodeURIComponent(projectName)}` }));
+        } else {
+          // Cancel Easy Mode's active claude process before switching to Pro
+          // (prevents two claude processes resuming the same session simultaneously)
+          if (fromSession.startsWith('easy_')) {
+            const easyInfo = easySessions.get(fromSession);
+            if (easyInfo && easyInfo.cp.isActive()) {
+              easyInfo.cp.cancel();
+            }
+          }
+          // Target = pro: find existing PTY session with same projectDir
+          let targetId: string | null = null;
+          console.log(`[switch-mode] Looking for pro session: owner=${auth.username} projectDir=${projectDir}`);
+          try {
+            const sessResp = await ptyFetch(`/sessions?owner=${encodeURIComponent(auth.username!)}`);
+            if (sessResp.ok) {
+              const sessions = await sessResp.json() as any[];
+              for (const s of sessions) {
+                console.log(`[switch-mode]   pro ${s.id}: projectDir=${s.projectDir || '(none)'} match=${s.projectDir === projectDir}`);
+                if (s.projectDir === projectDir) { targetId = s.id; break; }
+              }
+            }
+          } catch {}
+
+          if (!targetId) {
+            // Create new PTY session with cwd in project dir
+            targetId = 'sess_' + randomBytes(12).toString('hex');
+            const sessionBody: Record<string, any> = { id: targetId, name: projectName, owner: auth.username, cwd: projectDir, projectDir };
+            if (auth.linuxUser) sessionBody.linuxUser = auth.linuxUser;
+            try {
+              await ptyFetch('/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sessionBody) });
+            } catch {}
+          }
+          // Check if this Pro session already has active clients (someone is using it)
+          let hasActiveClients = false;
+          try {
+            const sessResp2 = await ptyFetch(`/sessions?owner=${encodeURIComponent(auth.username!)}`);
+            if (sessResp2.ok) {
+              const allSess = await sessResp2.json() as any[];
+              const thisSess = allSess.find((s: any) => s.id === targetId);
+              if (thisSess && thisSess.clientCount > 0) hasActiveClients = true;
+            }
+          } catch {}
+
+          const result: any = { url: `/terminal?session=${encodeURIComponent(targetId)}` };
+          // Only inject cd + claude for idle Pro sessions (don't disturb running terminals)
+          if (fromSession.startsWith('easy_') && !hasActiveClients) {
+            let startCmd = `cd ${projectDir}`;
+            let claudeSid: string | null = null;
+            try {
+              const state = JSON.parse(fs.readFileSync(path.join(projectDir, '.easy-state.json'), 'utf-8'));
+              if (state.claudeSessionId) claudeSid = state.claudeSessionId;
+            } catch {}
+            startCmd += claudeSid ? ` && claude --resume ${claudeSid}` : ' && claude';
+            result.cdCommand = startCmd;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        }
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message || 'Internal error' }));
+      }
+    });
     return;
   }
 
@@ -10688,6 +11383,14 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
         try { fs.chownSync(filePath, chownUser.uid, chownUser.gid); } catch {}
       }
 
+      // Auto-commit uploaded file to version history
+      if (uploadEasyInfo) {
+        uploadEasyInfo.cp.versionTracker.commit(
+          `Uploaded ${actualName}`,
+          auth.username || 'user',
+        ).catch(() => {});
+      }
+
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, path: filePath, name: actualName }));
     } catch (e: any) {
@@ -11040,15 +11743,23 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
       const dateSuffix = String(now.getMonth() + 1).padStart(2, '0') + String(now.getDate()).padStart(2, '0')
         + '-' + String(now.getHours()).padStart(2, '0') + String(now.getMinutes()).padStart(2, '0');
       const projectName = 'project-' + dateSuffix + randomBytes(1).toString('hex').charAt(0);
+      const easyHomeDir = (!auth.linuxUser || auth.linuxUser === 'root') ? (process.env.HOME || '/root') : `/home/${auth.linuxUser}`;
+      const easyProjectDir = `${easyHomeDir}/coding/${projectName}`;
       try {
-        const homeDir = (!auth.linuxUser || auth.linuxUser === 'root') ? (process.env.HOME || '/root') : `/home/${auth.linuxUser}`;
-        const projectDir = `${homeDir}/coding/${projectName}`;
         try {
-          setupProjectTemplate(projectDir, auth.linuxUser || auth.username, projectName);
-          console.log(`[easy] Project template created: ${projectDir}/CLAUDE.md`);
+          setupProjectTemplate(easyProjectDir, auth.linuxUser || auth.username, projectName);
+          console.log(`[easy] Project template created: ${easyProjectDir}/CLAUDE.md`);
         } catch (e) {
           console.error('[easy] Failed to setup project template:', e);
         }
+        // Pre-register in easy-sessions.json so switch-mode can find it before WS connects
+        try {
+          const regPath = path.join(easyHomeDir, '.hopcode', 'easy-sessions.json');
+          let reg: any[] = [];
+          try { reg = JSON.parse(fs.readFileSync(regPath, 'utf-8')); } catch {}
+          reg.push({ id, owner: auth.username, project: projectName, name: projectName, createdAt: Date.now(), lastActivity: Date.now(), projectDir: easyProjectDir });
+          fs.writeFileSync(regPath, JSON.stringify(reg));
+        } catch {}
       } catch (e) {
         console.error('Failed to create easy session:', e);
       }
@@ -11102,10 +11813,16 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
     }
     const id = 'sess_' + randomBytes(12).toString('hex');
     const proNow = new Date();
-    const proSessionName = 'session-' + String(proNow.getMonth() + 1).padStart(2, '0') + String(proNow.getDate()).padStart(2, '0')
+    const proDateSuffix = String(proNow.getMonth() + 1).padStart(2, '0') + String(proNow.getDate()).padStart(2, '0')
       + '-' + String(proNow.getHours()).padStart(2, '0') + String(proNow.getMinutes()).padStart(2, '0');
+    const proProjectName = 'project-' + proDateSuffix + randomBytes(1).toString('hex').charAt(0);
+    const proHomeDir = (!auth.linuxUser || auth.linuxUser === 'root') ? (process.env.HOME || '/root') : `/home/${auth.linuxUser}`;
+    const proProjectDir = `${proHomeDir}/coding/${proProjectName}`;
     try {
-      const sessionBody: Record<string, string> = { id, name: proSessionName, owner: auth.username };
+      // Create project directory with template
+      fs.mkdirSync(proProjectDir, { recursive: true });
+      try { setupProjectTemplate(proProjectDir, auth.linuxUser || auth.username, proProjectName); } catch {}
+      const sessionBody: Record<string, any> = { id, name: proProjectName, owner: auth.username, cwd: proProjectDir, projectDir: proProjectDir };
       if (auth.linuxUser) sessionBody.linuxUser = auth.linuxUser;
       const resp = await ptyFetch('/sessions', {
         method: 'POST',
@@ -11271,9 +11988,11 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
       ? `${homeDir}/coding/${projectParam}`
       : `${homeDir}`;
     cp = new ClaudeProcess(sessionId, projectDir, sendToClient);
+    cp.owner = wsAuth.username;
     info = { cp, owner: wsAuth.username, project: projectParam, name: projectParam || sessionId, createdAt: Date.now(), lastActivity: Date.now(), connectedUsers: new Map(), sharedWith: new Set(), _fileAccessUsers: new Set(), _leaveTimers: new Map() };
     easySessions.set(sessionId, info);
     saveEasyRegistry();
+    initTaskSchedulerForSession(sessionId, info);
     console.log(`[easy] Created ClaudeProcess for ${sessionId} in ${projectDir}`);
   } else {
     // Add this client as an additional listener (supports multiple browser tabs)
@@ -11343,6 +12062,12 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
     hasFileAccess,
   }));
 
+  // Send task count on connect
+  const taskCount = taskScheduler.getActiveCount(sessionId);
+  if (taskCount > 0) {
+    clientWs.send(JSON.stringify({ type: 'task_count', count: taskCount }));
+  }
+
   // Send current state + history on connect
   const history = cp.getHistory();
   if (history.length > 0) {
@@ -11410,6 +12135,113 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
           }
           // Also confirm to the owner
           clientWs.send(JSON.stringify({ type: 'file_access_granted', user: msg.user }));
+        }
+      } else if (msg.type === 'list_tasks') {
+        // Anyone can view tasks
+        const tasks = taskScheduler.getTasks(sessionId);
+        const isOwner = info ? connUser === info.owner : false;
+        clientWs.send(JSON.stringify({
+          type: 'tasks_list',
+          tasks: tasks.map(t => ({
+            id: t.id, name: t.name, schedule: t.schedule,
+            prompt: t.prompt, status: t.status, enabled: t.enabled,
+            lastRunAt: t.lastRunAt, lastStatus: t.lastStatus,
+            consecutiveErrors: t.consecutiveErrors,
+          })),
+        }));
+      } else if (msg.type === 'toggle_task') {
+        // Only owner can toggle tasks
+        if (!info || connUser !== info.owner) {
+          const isGuest = connUser.startsWith('guest_');
+          clientWs.send(JSON.stringify({ type: 'error',
+            message: isGuest
+              ? '定时任务仅限注册用户使用，注册后即可体验 ✨'
+              : '只有项目创建者可以管理定时任务',
+          }));
+        } else {
+          taskScheduler.toggleTask(sessionId, msg.taskId, msg.enabled);
+          // Broadcast updated task count
+          const count = taskScheduler.getActiveCount(sessionId);
+          for (const [, sockets] of info.connectedUsers) {
+            for (const ws of sockets) {
+              try { ws.send(JSON.stringify({ type: 'task_count', count })); } catch {}
+            }
+          }
+        }
+      } else if (msg.type === 'delete_task') {
+        // Only owner can delete tasks
+        if (!info || connUser !== info.owner) {
+          const isGuest = connUser.startsWith('guest_');
+          clientWs.send(JSON.stringify({ type: 'error',
+            message: isGuest
+              ? '定时任务仅限注册用户使用，注册后即可体验 ✨'
+              : '只有项目创建者可以管理定时任务',
+          }));
+        } else {
+          taskScheduler.deleteTask(sessionId, msg.taskId);
+          const count = taskScheduler.getActiveCount(sessionId);
+          for (const [, sockets] of info.connectedUsers) {
+            for (const ws of sockets) {
+              try { ws.send(JSON.stringify({ type: 'task_count', count })); } catch {}
+            }
+          }
+        }
+      } else if (msg.type === 'version_log') {
+        cp!.versionTracker.log(20).then(entries => {
+          clientWs.send(JSON.stringify({ type: 'version_log_result', entries }));
+        }).catch(() => {
+          clientWs.send(JSON.stringify({ type: 'version_log_result', entries: [] }));
+        });
+      } else if (msg.type === 'version_restore') {
+        // Only owner can restore versions
+        if (!info || connUser !== info.owner) {
+          clientWs.send(JSON.stringify({ type: 'error', message: '只有项目创建者可以回滚版本' }));
+        } else {
+          const idx = parseInt(String(msg.index), 10);
+          // Resolve index to commit hash via log
+          cp!.versionTracker.log(50).then(entries => {
+            if (isNaN(idx) || idx < 1 || idx > entries.length) {
+              clientWs.send(JSON.stringify({ type: 'error', message: '无效的版本序号' }));
+              return;
+            }
+            const hash = entries[idx - 1]!.hash;
+            return cp!.versionTracker.restore(hash).then(files => {
+              clientWs.send(JSON.stringify({ type: 'version_restored', files, message: `已还原` }));
+              // Notify Claude about the restore
+              const fileList = files.map(f => f.replace('workspace/', '')).join(', ');
+              cp!.sendMessage(`[系统通知] ${connUser} 还原了项目文件到之前的版本。变更的文件：${fileList}。请注意文件内容已变化。`, connUser);
+            });
+          }).catch((e: any) => {
+            clientWs.send(JSON.stringify({ type: 'error', message: `回滚失败: ${e.message}` }));
+          });
+        }
+      } else if (msg.type === 'file_version_log') {
+        const fp = String(msg.filePath || '');
+        cp!.versionTracker.fileLog(fp, 30).then(entries => {
+          clientWs.send(JSON.stringify({ type: 'file_version_log_result', filePath: fp, entries }));
+        }).catch(() => {
+          clientWs.send(JSON.stringify({ type: 'file_version_log_result', filePath: fp, entries: [] }));
+        });
+      } else if (msg.type === 'file_version_restore') {
+        if (!info || connUser !== info.owner) {
+          clientWs.send(JSON.stringify({ type: 'error', message: '只有项目创建者可以还原文件' }));
+        } else {
+          const fp = String(msg.filePath || '');
+          const idx = parseInt(String(msg.index), 10);
+          cp!.versionTracker.fileLog(fp, 50).then(entries => {
+            if (isNaN(idx) || idx < 1 || idx > entries.length) {
+              clientWs.send(JSON.stringify({ type: 'error', message: '无效的版本序号' }));
+              return;
+            }
+            const hash = entries[idx - 1]!.hash;
+            return cp!.versionTracker.restoreFile(fp, hash).then(() => {
+              const fileName = fp.replace('workspace/', '');
+              clientWs.send(JSON.stringify({ type: 'file_version_restored', filePath: fp, message: fileName }));
+              cp!.sendMessage(`[系统通知] ${connUser} 还原了文件 ${fileName} 到之前的版本。请注意该文件内容已变化。`, connUser);
+            });
+          }).catch((e: any) => {
+            clientWs.send(JSON.stringify({ type: 'error', message: `还原失败: ${e.message}` }));
+          });
         }
       }
     } catch (e) {

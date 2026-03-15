@@ -30,7 +30,14 @@ export type EasyServerMessage =
   | { type: 'session_info'; owner: string; projectDir: string; isOwner: boolean; hasFileAccess: boolean }
   | { type: 'file_access_request'; user: string }
   | { type: 'file_access_granted'; user: string }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | { type: 'task_result'; taskId: string; taskName: string; text: string; timestamp: number; isDraft: boolean }
+  | { type: 'tasks_list'; tasks: { id: string; name: string; schedule: any; status: string; enabled: boolean; lastRunAt?: number | null }[] }
+  | { type: 'task_count'; count: number }
+  | { type: 'version_log_result'; entries: import('./version-tracker.js').VersionEntry[] }
+  | { type: 'version_restored'; files: string[]; message: string }
+  | { type: 'file_version_log_result'; filePath: string; entries: import('./version-tracker.js').VersionEntry[] }
+  | { type: 'file_version_restored'; filePath: string; message: string };
 
 // --- Client → Server Messages ---
 
@@ -39,4 +46,11 @@ export type EasyClientMessage =
   | { type: 'cancel' }
   | { type: 'retry' }
   | { type: 'request_file_access' }
-  | { type: 'grant_file_access'; user: string };
+  | { type: 'grant_file_access'; user: string }
+  | { type: 'list_tasks' }
+  | { type: 'toggle_task'; taskId: string; enabled: boolean }
+  | { type: 'delete_task'; taskId: string }
+  | { type: 'version_log' }
+  | { type: 'version_restore'; index: number }
+  | { type: 'file_version_log'; filePath: string }
+  | { type: 'file_version_restore'; filePath: string; index: number };

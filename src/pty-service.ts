@@ -40,6 +40,7 @@ interface Session {
   name: string;
   owner: string;
   linuxUser: string;
+  projectDir: string;
   createdAt: number;
   lastActivity: number;
   ready: boolean;
@@ -49,7 +50,7 @@ interface Session {
 const sessions = new Map<string, Session>();
 let sessionCounter = 0;
 
-function createSession(id: string, owner: string = 'admin', linuxUser?: string, customName?: string): Session {
+function createSession(id: string, owner: string = 'admin', linuxUser?: string, customName?: string, cwd?: string, projectDir?: string): Session {
   sessionCounter++;
   const name = customName || `Session ${sessionCounter}`;
 
@@ -65,6 +66,7 @@ function createSession(id: string, owner: string = 'admin', linuxUser?: string, 
     name,
     owner,
     linuxUser: linuxUser || '',
+    projectDir: projectDir || cwd || '',
     createdAt: Date.now(),
     lastActivity: Date.now(),
     ready: false,
@@ -138,6 +140,7 @@ function createSession(id: string, owner: string = 'admin', linuxUser?: string, 
     owner,
     linuxUser,
     name,
+    cwd,
   });
 
   sessions.set(id, session);
@@ -189,6 +192,7 @@ const server = http.createServer(async (req, res) => {
       id,
       name: s.name,
       owner: s.owner,
+      projectDir: s.projectDir || undefined,
       createdAt: s.createdAt,
       lastActivity: s.lastActivity,
       clientCount: s.clients.size,
@@ -213,7 +217,7 @@ const server = http.createServer(async (req, res) => {
         }
         const owner = body.owner || 'admin';
         const linuxUser = body.linuxUser || undefined;
-        const session = createSession(id, owner, linuxUser, body.name);
+        const session = createSession(id, owner, linuxUser, body.name, body.cwd, body.projectDir);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ id }));
       } catch (err: any) {

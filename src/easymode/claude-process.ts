@@ -5,9 +5,12 @@
  */
 
 import { spawn, ChildProcess } from 'child_process';
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync } from 'fs';
 import * as path from 'path';
+
+const MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'task-mcp-server.ts');
 import type { EasyServerMessage } from './protocol.js';
+import { VersionTracker } from './version-tracker.js';
 
 interface HistoryEntry {
   role: 'user' | 'assistant';
@@ -31,6 +34,8 @@ export class ClaudeProcess {
   private _knownAllFiles = new Set<string>(); // track all files to detect new ones
   private static PREVIEW_EXTS = new Set(['.html', '.htm', '.svg', '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf']);
   private static PREVIEW_EXCLUDE = new Set(['claude.md', 'readme.md', 'license.md', 'changelog.md', 'contributing.md', 'code_of_conduct.md']);
+  private _writtenFiles = new Set<string>(); // files Claude wrote via Write/Edit tools
+  versionTracker: VersionTracker;
   // File types that are useful but browsers can't render — worth suggesting HTML preview
   private static SUGGEST_PREVIEW_EXTS = new Set([
     '.py', '.js', '.ts', '.tsx', '.jsx', '.json', '.yaml', '.yml', '.toml',
@@ -42,12 +47,14 @@ export class ClaudeProcess {
   lastPreviewUrl: string | null = null;
   previewUrls: string[] = [];  // all preview URLs in order (newest first)
   private _pendingContext: string[] = [];  // skipped messages to prepend on next Claude call
+  private _lastSender = 'xiaoma';  // track who triggered the current Claude response
   private _messageQueue: { text: string; sender?: string; mentions?: string[]; participantCount: number }[] = [];
   private _idleTimer: ReturnType<typeof setTimeout> | null = null;
   private _idleNotified = false;
   private static IDLE_TIMEOUT = 3 * 60 * 1000; // 3 min without output = stuck
 
   private stateFile: string;
+  owner: string = '';
 
   constructor(
     sessionId: string,
@@ -58,6 +65,8 @@ export class ClaudeProcess {
     this.projectDir = projectDir;
     this.listeners.add(onMessage);
     this.stateFile = path.join(projectDir, '.easy-state.json');
+    this.versionTracker = new VersionTracker(projectDir);
+    this.versionTracker.init().catch(e => console.error(`[version-tracker] init failed: ${e}`));
     this.loadState();
     this.snapshotPreviewFiles();
   }
@@ -200,6 +209,8 @@ export class ClaudeProcess {
 
   /** Internal: spawn a claude -p subprocess with the given prompt */
   private _spawnClaude(text: string, sender?: string, mentions?: string[], participantCount: number = 1): void {
+    // Track who triggered this Claude response (for version commit attribution)
+    if (sender) this._lastSender = sender;
     // Notify client: thinking state
     this.broadcast({ type: 'state', state: 'thinking' });
 
@@ -226,6 +237,20 @@ export class ClaudeProcess {
       this._pendingContext = [];
     }
 
+    // Write MCP config for task scheduler
+    const mcpConfig = {
+      mcpServers: {
+        'hopcode-tasks': {
+          command: 'npx',
+          args: ['tsx', MCP_SERVER_SCRIPT],
+          env: { TASK_PROJECT_DIR: this.projectDir },
+        },
+      },
+    };
+    const mcpConfigPath = path.join(this.projectDir, '.mcp-config.json');
+    try { mkdirSync(this.projectDir, { recursive: true }); } catch {}
+    try { writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig)); } catch {}
+
     // Build command args
     const args = [
       '-p', promptText,
@@ -233,6 +258,9 @@ export class ClaudeProcess {
       '--verbose',
       '--model', 'sonnet',
       '--include-partial-messages',
+      '--mcp-config', mcpConfigPath,
+      '--allowedTools', 'mcp__hopcode-tasks__schedule_task', 'mcp__hopcode-tasks__list_tasks', 'mcp__hopcode-tasks__delete_task', 'mcp__hopcode-tasks__activate_task',
+      ...(['jack', 'root'].includes(this.owner) ? ['mcp__tesla__check_battery', 'mcp__tesla__wake_vehicle'] : []),
       '--append-system-prompt',
       `You are 小码 (Xiaoma), a friendly action-oriented AI assistant in Hopcode Easy Mode. When users confirm or agree (好的/试试/做吧/go ahead/ok), START DOING THE WORK immediately — write code, create files. Never just say "ok let me know". Be concise — this is a mobile chat UI. Reply in the same language as the user.
 
@@ -241,13 +269,23 @@ export class ClaudeProcess {
 - Working files (downloads, temp scripts, node_modules, backend code) → project root
 - Never default to generic names like index.html. Name files to reflect the user's intent (e.g. workspace/weather-dashboard.html, workspace/doctor-consult.html)
 
+## Image messages
+When users send images via WeChat Work, the image is saved locally and the message contains the file path like [用户发送了一张图片: /path/to/image.jpg]. Use the Read tool to view the image and respond based on its content. You CAN read image files (PNG, JPG, etc.) — just use Read with the file path.
+
 ## Multi-user @ mention rules
 Messages are formatted as: [sender → @mentions]: text  or  [sender]: text
 - When @小码 appears in the message → you MUST respond (you were directly addressed)
 - When a message immediately follows YOUR previous response and has no @ → treat it as a reply to you, respond normally
 - When a message has no @ mentions and doesn't follow your response → read and understand for context, but only respond if the content clearly requires your input (e.g., a coding question, a request for help)
 - When @someone_else appears without @小码 → stay silent unless the content directly involves work you are doing
-- When in doubt, stay silent — it's better to wait to be asked than to interrupt a human conversation`,
+- When in doubt, stay silent — it's better to wait to be asked than to interrupt a human conversation
+
+## Scheduled tasks — MUST use MCP tools
+IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_task) for managing scheduled tasks. You MUST use these tools. NEVER write tasks.json directly — the MCP server handles it.
+- One-shot timers ("30分钟后提醒") → schedule_task(type="delay", delay_minutes=30, ...)
+- Recurring ("每天9点") → schedule_task(type="cron", cron_expr="0 9 * * *", ...)
+- Fixed intervals ("每30分钟") → schedule_task(type="every", interval_minutes=30, ...)
+- Only session owner can create tasks. If a guest asks, tell them to register.`,
     ];
 
     if (this.claudeSessionId) {
@@ -355,6 +393,15 @@ Messages are formatted as: [sender → @mentions]: text  or  [sender]: text
           id: this.nextMsgId++,
         });
         this.saveState();
+      }
+
+      // Auto-commit workspace changes after Claude response
+      if (isCurrentChild && fullResponseText) {
+        const files = [...this._writtenFiles];
+        const commitMsg = files.length > 0
+          ? `Updated ${files.join(', ')}`
+          : fullResponseText.slice(0, 80);
+        this.versionTracker.commit(commitMsg, this._lastSender || 'xiaoma').catch(() => {});
       }
 
       // Check for new/modified previewable files and hint preview
@@ -621,6 +668,31 @@ Messages are formatted as: [sender → @mentions]: text  or  [sender]: text
         break;
       }
     }
+  }
+
+  /** Inject a task result into chat history and broadcast to all listeners */
+  injectTaskResult(taskName: string, text: string, isDraft: boolean): void {
+    const prefix = isDraft ? `📋 测试预览 — ${taskName}` : `⏰ 定时任务 — ${taskName}`;
+    const fullText = `${prefix}\n${text}`;
+
+    // Add to history
+    const entry: HistoryEntry = {
+      role: 'assistant',
+      text: fullText,
+      id: this.nextMsgId++,
+    };
+    this.history.push(entry);
+    this.saveState();
+
+    // Broadcast as task_result (client renders specially)
+    this.broadcast({
+      type: 'task_result' as any,
+      taskId: '',
+      taskName,
+      text,
+      timestamp: Date.now(),
+      isDraft,
+    });
   }
 
   cancel(): void {

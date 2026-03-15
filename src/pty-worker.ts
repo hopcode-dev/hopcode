@@ -26,6 +26,7 @@ interface InitMessage {
   owner: string;
   linuxUser?: string;
   name: string;
+  cwd?: string;
 }
 
 interface InputMessage {
@@ -147,13 +148,19 @@ function initPty(msg: InitMessage) {
       rows: 30,
       env: { TERM: 'xterm-256color' },
     });
+    // su - resets CWD to home; if project cwd specified, cd into it after shell starts
+    if (msg.cwd) {
+      setTimeout(() => {
+        try { ptyProcess!.write(`cd ${msg.cwd} 2>/dev/null && clear\n`); } catch {}
+      }, 500);
+    }
   } else {
     // Single-user mode
     ptyProcess = pty.spawn('/bin/bash', ['--login', '-i'], {
       name: 'xterm-256color',
       cols: 120,
       rows: 30,
-      cwd: process.env.HOME || '/',
+      cwd: msg.cwd || process.env.HOME || '/',
       env: {
         ...Object.fromEntries(
           Object.entries(process.env).filter(([k]) => k !== 'CLAUDECODE')

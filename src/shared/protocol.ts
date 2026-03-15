@@ -16,6 +16,7 @@ export interface SessionInfo {
   id: string;
   name: string;
   owner: string;
+  projectDir?: string;
   createdAt: number;
   lastActivity: number;
   clientCount: number;
