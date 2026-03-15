@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <!-- Style A: 极简侧影奔马 — 深色背景 + 渐变金马 -->
+  <circle cx="256" cy="256" r="240" fill="#1a1a2e"/>
+
+  <!-- 奔马侧影 — 流线型 -->
+  <defs>
+    <linearGradient id="gold1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f6d365"/>
+      <stop offset="100%" stop-color="#fda085"/>
+    </linearGradient>
+  </defs>
+  <!-- 身体 + 腿 -->
+  <path d="M160 280 Q140 240 160 200 Q170 180 195 170 L210 155 Q220 140 235 145 L225 165 Q240 155 260 158 Q280 160 290 175 Q310 168 325 175 Q340 185 340 205 Q355 200 365 215 Q375 235 360 260 Q370 280 380 310 L370 340 L355 340 L360 300 Q350 275 340 265 L330 295 L320 340 L305 340 L315 290 Q300 275 285 270 Q270 290 260 340 L245 340 L260 285 Q240 280 225 290 L215 340 L200 340 L218 285 Q195 280 175 295 L165 340 L150 340 L170 295 Q155 295 160 280Z" fill="url(#gold1)"/>
+  <!-- 眼睛 -->
+  <circle cx="240" cy="157" r="4" fill="#1a1a2e"/>
+  <!-- 鬃毛 -->
+  <path d="M260 158 Q275 140 285 150 Q295 135 305 148 Q310 130 325 145 Q320 160 325 175" stroke="url(#gold1)" stroke-width="5" fill="none" stroke-linecap="round"/>
+  <!-- 尾巴 -->
+  <path d="M160 275 Q130 260 120 280 Q110 300 125 310 Q115 325 130 330" stroke="url(#gold1)" stroke-width="5" fill="none" stroke-linecap="round"/>
+  <!-- Terminal prompt >_ -->
+  <text x="195" y="415" font-family="'SF Mono', Menlo, Monaco, monospace" font-size="42" font-weight="700" fill="#f6d365" opacity="0.9">&gt;_</text>
+</svg>

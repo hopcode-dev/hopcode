@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <!-- Style B: 几何马头特写 — 科技感 -->
+  <circle cx="256" cy="256" r="240" fill="#0f172a"/>
+
+  <defs>
+    <linearGradient id="cyber" x1="0" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#60a5fa"/>
+      <stop offset="100%" stop-color="#a78bfa"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 马头侧面 — 几何棱角风格 -->
+  <path d="
+    M200 140
+    L175 160
+    L155 220
+    L145 280
+    L155 310
+    L175 340
+    L200 360
+    L240 375
+    L280 370
+    L310 350
+    L325 320
+    L330 280
+    L325 240
+    L340 220
+    L350 190
+    L340 165
+    L320 150
+    L295 135
+    L270 130
+    L240 128
+    Z
+  " fill="url(#cyber)" opacity="0.9"/>
+
+  <!-- 内部线条 — 几何切割 -->
+  <path d="M200 140 L240 200 L280 190 L320 150" stroke="#0f172a" stroke-width="3" fill="none" stroke-linejoin="round"/>
+  <path d="M155 220 L220 230 L280 210 L325 240" stroke="#0f172a" stroke-width="2.5" fill="none" stroke-linejoin="round"/>
+  <path d="M175 340 L240 310 L310 350" stroke="#0f172a" stroke-width="2" fill="none"/>
+
+  <!-- 眼睛 — 锐利 -->
+  <path d="M230 205 L260 200 L245 220 Z" fill="#0f172a"/>
+  <circle cx="244" cy="208" r="5" fill="#e0f2fe"/>
+
+  <!-- 鬃毛 — 几条锐利线条 -->
+  <path d="M295 135 L310 105 L325 120" stroke="#818cf8" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <path d="M270 130 L280 95 L300 108" stroke="#818cf8" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+  <path d="M240 128 L245 90 L268 100" stroke="#818cf8" stroke-width="3" fill="none" stroke-linecap="round"/>
+
+  <!-- 耳朵 -->
+  <path d="M200 140 L185 105 L210 125" fill="#7c3aed" opacity="0.7"/>
+  <path d="M220 132 L215 98 L235 118" fill="#7c3aed" opacity="0.7"/>
+
+  <!-- Terminal prompt >_ 底部 -->
+  <path d="M190 430 L215 445 L190 460" stroke="#60a5fa" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <line x1="228" y1="445" x2="270" y2="445" stroke="#60a5fa" stroke-width="6" stroke-linecap="round"/>
+</svg>

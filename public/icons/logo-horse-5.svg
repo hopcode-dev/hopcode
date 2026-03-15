@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <!-- Style E: 极简线条马头 — 一笔画风格 -->
+  <circle cx="256" cy="256" r="240" fill="#111827"/>
+
+  <defs>
+    <linearGradient id="neon" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#06b6d4"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 马头轮廓 — 单笔优雅曲线 -->
+  <path d="
+    M180 350
+    Q170 310 180 270
+    Q185 240 195 220
+    Q200 195 190 175
+    L175 145
+    Q170 130 180 120
+    Q190 115 195 130
+    L200 145
+    Q210 130 220 125
+    Q230 122 238 132
+    Q245 120 255 125
+    Q265 130 268 145
+    Q280 140 290 148
+    Q298 155 295 170
+    Q310 175 315 195
+    Q320 215 315 240
+    Q310 265 320 285
+    Q335 310 340 340
+    Q342 360 330 370
+  " stroke="url(#neon)" stroke-width="7" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- 耳朵尖 -->
+  <path d="M180 120 L170 95 L190 108" stroke="url(#neon)" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M205 118 L200 90 L218 105" stroke="url(#neon)" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- 眼睛 -->
+  <circle cx="240" cy="185" r="10" stroke="url(#neon)" stroke-width="4" fill="none"/>
+  <circle cx="243" cy="183" r="3.5" fill="#06b6d4"/>
+
+  <!-- 鼻孔 -->
+  <circle cx="210" cy="295" r="5" stroke="url(#neon)" stroke-width="2.5" fill="none"/>
+  <circle cx="232" cy="292" r="5" stroke="url(#neon)" stroke-width="2.5" fill="none"/>
+
+  <!-- 鬃毛 — 飘逸线条 -->
+  <path d="M268 145 Q290 115 280 90" stroke="#8b5cf6" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.7"/>
+  <path d="M290 148 Q315 125 305 95" stroke="#8b5cf6" stroke-width="3.5" fill="none" stroke-linecap="round" opacity="0.6"/>
+  <path d="M295 170 Q325 150 320 120" stroke="#8b5cf6" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.5"/>
+
+  <!-- Terminal >_ -->
+  <path d="M195 430 L218 445 L195 460" stroke="#06b6d4" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <line x1="230" y1="445" x2="268" y2="445" stroke="#06b6d4" stroke-width="5" stroke-linecap="round"/>
+</svg>
