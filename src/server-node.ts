@@ -9904,6 +9904,7 @@ function loadEasyRegistry(): void {
       const noop = () => {};
       const cp = new ClaudeProcess(entry.id, entry.projectDir, noop);
       cp.owner = entry.owner;
+      cp.linuxUser = usersConfig[entry.owner]?.linuxUser || '';
       cp.removeListener(noop);
       const info: EasySessionInfo = {
         cp,
@@ -9960,6 +9961,7 @@ function scanOrphanEasySessions(): void {
           const noop = () => {};
           const cp = new ClaudeProcess(id, projDir, noop);
           cp.owner = owner;
+          cp.linuxUser = usersConfig[owner]?.linuxUser || '';
           cp.removeListener(noop);
           const stat = fs.statSync(stateFile);
           easySessions.set(id, {
@@ -10032,6 +10034,7 @@ function createSessionForUser(owner: string): EasySessionInfo {
   const noop = () => {};
   const cp = new ClaudeProcess(sessionId, projectDir, noop);
   cp.owner = owner;
+  cp.linuxUser = userCfg?.linuxUser || '';
   cp.removeListener(noop);
   const info: EasySessionInfo = {
     cp, owner, project: projectName, name: projectName,
@@ -12066,6 +12069,7 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
       : `${homeDir}`;
     cp = new ClaudeProcess(sessionId, projectDir, sendToClient);
     cp.owner = wsAuth.username;
+    cp.linuxUser = wsAuth.linuxUser || '';
     info = { cp, owner: wsAuth.username, project: projectParam, name: projectParam || sessionId, createdAt: Date.now(), lastActivity: Date.now(), connectedUsers: new Map(), sharedWith: new Set(), _fileAccessUsers: new Set(), _leaveTimers: new Map() };
     easySessions.set(sessionId, info);
     saveEasyRegistry();

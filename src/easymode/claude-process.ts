@@ -4,7 +4,7 @@
  * Multi-turn handled via --resume with the session UUID from the first response.
  */
 
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, execFileSync, ChildProcess } from 'child_process';
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync } from 'fs';
 import * as path from 'path';
 
@@ -55,6 +55,7 @@ export class ClaudeProcess {
 
   private stateFile: string;
   owner: string = '';
+  linuxUser: string = '';
 
   constructor(
     sessionId: string,
@@ -237,19 +238,26 @@ export class ClaudeProcess {
       this._pendingContext = [];
     }
 
-    // Write MCP config for task scheduler
+    // Write MCP config for task scheduler (use absolute tsx path so non-root users don't need npx install)
+    const tsxPath = path.resolve(import.meta.dirname || __dirname, '../../node_modules/.bin/tsx');
     const mcpConfig = {
       mcpServers: {
         'hopcode-tasks': {
-          command: 'npx',
-          args: ['tsx', MCP_SERVER_SCRIPT],
+          command: tsxPath,
+          args: [MCP_SERVER_SCRIPT],
           env: { TASK_PROJECT_DIR: this.projectDir },
         },
       },
     };
     const mcpConfigPath = path.join(this.projectDir, '.mcp-config.json');
     try { mkdirSync(this.projectDir, { recursive: true }); } catch {}
-    try { writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig)); } catch {}
+    try {
+      writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig));
+      // Ensure file is owned by the linux user
+      if (this.linuxUser && this.linuxUser !== 'root') {
+        try { execFileSync('chown', [`${this.linuxUser}:${this.linuxUser}`, mcpConfigPath], { timeout: 2000 }); } catch {}
+      }
+    } catch {}
 
     // Build command args
     const args = [
@@ -295,16 +303,34 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
     // Ensure project directory exists
     try { mkdirSync(this.projectDir, { recursive: true }); } catch {}
 
-    // Spawn claude process
+    // Spawn claude process — as linuxUser if set (so claude sessions are in the right home dir)
     const env = { ...process.env };
     delete env.CLAUDECODE;  // prevent child inheriting parent's claude-code session
 
-    console.log(`[claude-process] ${this.sessionId} spawning: claude ${args.join(' ').substring(0, 200)} cwd=${this.projectDir} resume=${this.claudeSessionId || 'none'}`);
-    const child = spawn('claude', args, {
+    const spawnOpts: any = {
       cwd: this.projectDir,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    };
+
+    // Run as the target linux user if not root
+    if (this.linuxUser && this.linuxUser !== 'root') {
+      try {
+        const uid = parseInt(execFileSync('id', ['-u', this.linuxUser], { encoding: 'utf-8' }).trim());
+        const gid = parseInt(execFileSync('id', ['-g', this.linuxUser], { encoding: 'utf-8' }).trim());
+        spawnOpts.uid = uid;
+        spawnOpts.gid = gid;
+        // Set HOME so claude stores sessions in the user's home
+        const userHome = `/home/${this.linuxUser}`;
+        env.HOME = userHome;
+        env.USER = this.linuxUser;
+      } catch (e) {
+        console.error(`[claude-process] Failed to get uid/gid for ${this.linuxUser}:`, e);
+      }
+    }
+
+    console.log(`[claude-process] ${this.sessionId} spawning: claude ${args.join(' ').substring(0, 200)} cwd=${this.projectDir} user=${this.linuxUser || 'root'} resume=${this.claudeSessionId || 'none'}`);
+    const child = spawn('claude', args, spawnOpts);
     this.activeChild = child;
     console.log(`[claude-process] ${this.sessionId} spawned pid=${child.pid}`);
 

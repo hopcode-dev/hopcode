@@ -816,8 +816,7 @@ export class WeComBridge {
 
   /** Parse number from Arabic or Chinese digits. Returns 0 if not a number. */
   private parseNumber(s: string): number {
-    const n = parseInt(s, 10);
-    if (!isNaN(n)) return n;
+    if (/^\d+$/.test(s)) return parseInt(s, 10);
     const zhMap: Record<string, number> = {
       '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
       '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,

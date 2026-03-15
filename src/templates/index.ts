@@ -6,6 +6,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { execFileSync } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -110,6 +111,14 @@ export function setupProjectTemplate(
     fs.mkdirSync(projectDir, { recursive: true });
     fs.mkdirSync(path.join(projectDir, 'workspace'), { recursive: true });
     fs.writeFileSync(claudeMdPath, finalContent, 'utf-8');
+    // chown project dir to the linux user (so claude -p running as that user can read/write)
+    if (username && username !== 'root') {
+      try {
+        execFileSync('chown', ['-R', `${username}:${username}`, projectDir], { timeout: 5000 });
+      } catch (e) {
+        console.error(`[template] chown failed for ${projectDir}:`, e);
+      }
+    }
   } catch (e) {
     console.error(`[template] Failed to write ${claudeMdPath}:`, e);
   }
