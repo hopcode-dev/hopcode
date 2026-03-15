@@ -192,6 +192,7 @@ const en: Record<string, string> = {
   'easy.version.restored_file': 'Restored {file}',
   'easy.switch.to_pro': 'Switching to Pro Mode (terminal)... Conversation will continue there.',
   'easy.switch.from_pro': 'Welcome back from Pro Mode. Xiaoma remembers the conversation context.',
+  'easy.switch.waiting': 'Waiting for Pro Mode to close...',
 
   // Tool labels
   'tool.Read': 'Reading file',
@@ -280,6 +281,7 @@ const en: Record<string, string> = {
   'pro.menu.files': '📁 Files',
   'pro.menu.home': '🏠 Home',
   'pro.menu.easy_mode': '🐸 Easy Mode',
+  'pro.switch.confirm_exit': 'Switching to Easy Mode will exit the current Claude session. Continue?',
   'pro.menu.classic_mode': '💬 Classic Mode',
   'pro.menu.chat_mode': '💬 Chat Mode',
   'pro.menu.devtools': 'DevTools',
@@ -513,6 +515,7 @@ const zh: Record<string, string> = {
   'easy.version.restored_file': '还原了 {file}',
   'easy.switch.to_pro': '正在切换到专业模式（终端）…对话将在那边继续。',
   'easy.switch.from_pro': '已从专业模式切回。小码记得之前的对话内容。',
+  'easy.switch.waiting': '正在等待专业模式关闭…',
 
   // Tool labels
   'tool.Read': '读取文件',
@@ -601,6 +604,7 @@ const zh: Record<string, string> = {
   'pro.menu.files': '📁 文件',
   'pro.menu.home': '🏠 首页',
   'pro.menu.easy_mode': '🐸 简单模式',
+  'pro.switch.confirm_exit': '切换到简单模式需要退出当前的 Claude 会话。确定继续？',
   'pro.menu.classic_mode': '💬 经典模式',
   'pro.menu.chat_mode': '💬 对话模式',
   'pro.menu.devtools': '开发者工具',

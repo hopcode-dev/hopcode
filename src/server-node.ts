@@ -5852,13 +5852,41 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   // ---- Init ----
   msgInput.placeholder = (('ontouchstart' in window || navigator.maxTouchPoints > 0) || window.innerWidth < 768 || msgInput.offsetWidth < 300) ? _t('easy.input.placeholder_mobile') : _t('easy.input.placeholder', {key: /Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Option' : 'Alt'});
   restoreChatHistory();
-  // Show "back from Pro" message if applicable
+  // When returning from Pro Mode, wait for Pro's claude to fully exit before connecting
   if (location.hash === '#from-pro') {
     addSystemMsg(_t('easy.switch.from_pro'));
     history.replaceState(null, '', location.pathname + location.search);
+    msgInput.disabled = true;
+    msgInput.placeholder = _t('easy.switch.waiting');
+    // Poll server to check if claude process is gone, then connect
+    var _proCheckCount = 0;
+    function _checkProExited() {
+      var projectParam = new URLSearchParams(location.search).get('project') || '';
+      fetch('/terminal/api/check-claude?project=' + encodeURIComponent(projectParam), { credentials: 'include' })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+          if (!d.running || _proCheckCount++ > 10) {
+            msgInput.disabled = false;
+            msgInput.placeholder = _t('easy.input.placeholder_mobile');
+            connectWs();
+            connectVoice();
+          } else {
+            setTimeout(_checkProExited, 1000);
+          }
+        })
+        .catch(function() {
+          // On error, just connect anyway
+          msgInput.disabled = false;
+          connectWs();
+          connectVoice();
+        });
+    }
+    // First check after 1s (give pkill time)
+    setTimeout(_checkProExited, 1000);
+  } else {
+    connectWs();
+    connectVoice();
   }
-  connectWs();
-  connectVoice();
 
   // Mobile keyboard: resize #app to visual viewport so top bar stays visible
   var appEl = document.getElementById('app');
@@ -6794,11 +6822,22 @@ const indexHtml = `<!DOCTYPE html>
         setStatus(defaultStatusText);
         reconnectDelay = 1000; // reset backoff on successful connection
         lastCols = 0; lastRows = 0; sendResize();
-        // Auto-cd if switched from Easy Mode (hash contains cd command)
+        // Auto-run commands if switched from Easy Mode (hash contains commands)
         var cdHash = location.hash.match(/^#cd=(.+)/);
         if (cdHash && !isReconnect) {
-          var cdCmd = decodeURIComponent(cdHash[1]);
-          setTimeout(function() { termWs.send(JSON.stringify({ type: 'input', data: cdCmd + '\\n' })); }, 800);
+          var fullCmd = decodeURIComponent(cdHash[1]);
+          // Split "cd /path && claude --resume xxx" into separate commands
+          var cmds = fullCmd.split(' && ');
+          var delay = 800;
+          cmds.forEach(function(cmd) {
+            (function(c, d) {
+              setTimeout(function() {
+                sendInput(c);
+                setTimeout(function() { sendInput(String.fromCharCode(13)); }, 50);
+              }, d);
+            })(cmd, delay);
+            delay += 1500; // wait between commands for shell to process
+          });
           history.replaceState(null, '', location.pathname + location.search);
         }
       };
@@ -8930,13 +8969,29 @@ const indexHtml = `<!DOCTYPE html>
     document.getElementById('menu-easy-mode').addEventListener('click', function(e) {
       e.preventDefault();
       menuHide();
-      fetch('/terminal/api/switch-mode', {
-        method: 'POST', credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fromSession: sessionId, targetMode: 'easy' })
-      }).then(function(r) { return r.json(); }).then(function(d) {
-        if (d.url) location.href = d.url + '#from-pro';
-      }).catch(function() {});
+      if (!confirm(_t('pro.switch.confirm_exit'))) return;
+      // Ctrl+C to interrupt, then /exit + Enter, then Ctrl+C again as fallback
+      sendInput(String.fromCharCode(3));
+      setTimeout(function() {
+        sendInput('/exit');
+        setTimeout(function() { sendInput(String.fromCharCode(13)); }, 50);
+      }, 200);
+      // Fallback: Ctrl+C again at 1.5s in case /exit didn't work
+      setTimeout(function() {
+        sendInput(String.fromCharCode(3));
+        sendInput(String.fromCharCode(3));
+      }, 1500);
+      // Server-side fallback: ask API to kill claude process if still running
+      // Then switch after 2s
+      setTimeout(function() {
+        fetch('/terminal/api/switch-mode', {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fromSession: sessionId, targetMode: 'easy', killClaude: true })
+        }).then(function(r) { return r.json(); }).then(function(d) {
+          if (d.url) location.href = d.url + '#from-pro';
+        }).catch(function() {});
+      }, 2000);
     });
     document.getElementById('menu-lang-toggle').addEventListener('click', function() {
       _setLang(_lang === 'en' ? 'zh' : 'en');
@@ -10139,6 +10194,25 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /terminal/api/check-claude — check if claude process is running for a project
+  if ((req.url || '').match(/^(?:\/terminal)?\/api\/check-claude/) && req.method === 'GET') {
+    if (!isAuthenticated(req)) { res.writeHead(401); res.end('{}'); return; }
+    const checkUrl = new URL(req.url!, `http://${req.headers.host}`);
+    const project = checkUrl.searchParams.get('project') || '';
+    let running = false;
+    if (project) {
+      try {
+        execFileSync('pgrep', ['-f', `claude.*${project}`], { timeout: 2000 });
+        running = true;
+      } catch {
+        // pgrep returns non-zero if no match — not running
+      }
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ running }));
+    return;
+  }
+
   // POST /terminal/api/switch-mode — switch between Easy and Pro mode for same project
   if ((req.url || '').match(/^(?:\/terminal)?\/api\/switch-mode$/) && req.method === 'POST') {
     if (!isAuthenticated(req)) {
@@ -10152,7 +10226,7 @@ const server = http.createServer(async (req, res) => {
     req.on('data', (c: Buffer) => { body += c.toString(); });
     req.on('end', async () => {
       try {
-        const { fromSession, targetMode } = JSON.parse(body);
+        const { fromSession, targetMode, killClaude } = JSON.parse(body);
         if (!fromSession || !targetMode) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Missing fromSession or targetMode' }));
@@ -10273,6 +10347,10 @@ const server = http.createServer(async (req, res) => {
               try { setupProjectTemplate(projectDir, auth.linuxUser || auth.username, projectName); } catch {}
             }
           }
+          // Server-side fallback: kill claude in the Pro terminal if requested
+          if (killClaude && fromSession.startsWith('sess_')) {
+            try { execFileSync('pkill', ['-f', `claude.*${path.basename(projectDir)}`], { timeout: 3000 }); } catch {}
+          }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ url: `/terminal/easy?session=${encodeURIComponent(targetId)}&project=${encodeURIComponent(projectName)}` }));
         } else {
@@ -10298,8 +10376,9 @@ const server = http.createServer(async (req, res) => {
             }
           } catch {}
 
+          let isNewProSession = false;
           if (!targetId) {
-            // Create new PTY session with cwd in project dir
+            isNewProSession = true;
             targetId = 'sess_' + randomBytes(12).toString('hex');
             const sessionBody: Record<string, any> = { id: targetId, name: projectName, owner: auth.username, cwd: projectDir, projectDir };
             if (auth.linuxUser) sessionBody.linuxUser = auth.linuxUser;
@@ -10307,20 +10386,12 @@ const server = http.createServer(async (req, res) => {
               await ptyFetch('/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sessionBody) });
             } catch {}
           }
-          // Check if this Pro session already has active clients (someone is using it)
-          let hasActiveClients = false;
-          try {
-            const sessResp2 = await ptyFetch(`/sessions?owner=${encodeURIComponent(auth.username!)}`);
-            if (sessResp2.ok) {
-              const allSess = await sessResp2.json() as any[];
-              const thisSess = allSess.find((s: any) => s.id === targetId);
-              if (thisSess && thisSess.clientCount > 0) hasActiveClients = true;
-            }
-          } catch {}
 
           const result: any = { url: `/terminal?session=${encodeURIComponent(targetId)}` };
-          // Only inject cd + claude for idle Pro sessions (don't disturb running terminals)
-          if (fromSession.startsWith('easy_') && !hasActiveClients) {
+          // Inject cd + claude for Easy→Pro switches
+          // New session: always inject (fresh shell)
+          // Existing session: always inject (claude was killed by Ctrl+C when leaving Pro)
+          if (fromSession.startsWith('easy_')) {
             let startCmd = `cd ${projectDir}`;
             let claudeSid: string | null = null;
             try {
