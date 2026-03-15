@@ -10003,6 +10003,11 @@ function initTaskSchedulerForSession(sessionId: string, info: EasySessionInfo): 
     info.cp.injectTaskResult(result.taskName, result.text, result.isDraft);
     // Broadcast task count update
     broadcastTaskCount(sessionId, info, taskScheduler.getActiveCount(sessionId));
+    // Push to WeChat Work if user is bound
+    if (wecomBridge) {
+      const prefix = result.isDraft ? `📋 测试预览 — ${result.taskName}` : `⏰ ${result.taskName}`;
+      wecomBridge.notifyUser(info.owner, `${prefix}\n${result.text}`).catch(() => {});
+    }
   }, (count: number) => {
     // Count changed (e.g. at-task auto-deleted, task enabled/disabled via file change)
     broadcastTaskCount(sessionId, info, count);
@@ -10042,8 +10047,9 @@ function createSessionForUser(owner: string): EasySessionInfo {
 }
 
 // Start WeChat Work bridge if configured
+let wecomBridge: WeComBridge | null = null;
 if (process.env.WECOM_BOT_ID || process.env.WECOM_CORP_ID) {
-  const bridge = new WeComBridge(
+  const bridge = wecomBridge = new WeComBridge(
     easySessions as Map<string, any>,
     saveEasyRegistry,
     createSessionForUser,

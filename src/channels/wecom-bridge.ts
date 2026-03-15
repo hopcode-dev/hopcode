@@ -792,6 +792,26 @@ export class WeComBridge {
     }
   }
 
+  // ── Proactive notifications ──
+
+  /** Send a notification to a Hopcode user via WeChat Work (for task results, etc.) */
+  async notifyUser(hopcodeUsername: string, text: string): Promise<boolean> {
+    // Find the wecomUserId for this hopcode user
+    let wecomUserId: string | null = null;
+    for (const [wid, huser] of this.bindings) {
+      if (huser === hopcodeUsername) { wecomUserId = wid; break; }
+    }
+    if (!wecomUserId || !this.botChannel) return false;
+
+    // Try proactive send (single chat, chatType=1)
+    try {
+      return await this.botChannel.sendProactive(wecomUserId, text, 1);
+    } catch (e) {
+      this.log(`notifyUser failed for ${hopcodeUsername}: ${e}`);
+      return false;
+    }
+  }
+
   // ── Helpers ──
 
   /** Parse number from Arabic or Chinese digits. Returns 0 if not a number. */
