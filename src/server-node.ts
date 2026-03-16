@@ -10300,21 +10300,42 @@ const server = http.createServer(async (req, res) => {
 
         const projectName = path.basename(projectDir);
 
-        // Sync latest Claude session ID from ~/.claude/projects/ into .easy-state.json
-        // This ensures both modes always use the most recent claude conversation
+        // Sync latest Claude session ID into .easy-state.json
+        // Search both root's and user's .claude/projects/ for the newest session
         let latestClaudeSid: string | null = null;
-        try {
-          const encodedPath = projectDir.replace(/\//g, '-');
-          const claudeDir = path.join(homeDir, '.claude', 'projects', encodedPath);
-          const jsonlFiles = fs.readdirSync(claudeDir)
-            .filter((f: string) => f.endsWith('.jsonl') && !f.includes('/'))
-            .map((f: string) => ({ name: f, mtime: fs.statSync(path.join(claudeDir, f)).mtimeMs }))
-            .sort((a: any, b: any) => b.mtime - a.mtime);
-          if (jsonlFiles.length > 0) {
-            latestClaudeSid = jsonlFiles[0].name.replace('.jsonl', '');
+        let latestMtime = 0;
+        let latestSourceDir: string | null = null;
+        const encodedPath = projectDir.replace(/\//g, '-');
+        const rootHome = process.env.HOME || '/root';
+        const searchDirs = [path.join(rootHome, '.claude', 'projects', encodedPath)];
+        if (auth.linuxUser && auth.linuxUser !== 'root') {
+          searchDirs.push(path.join(`/home/${auth.linuxUser}`, '.claude', 'projects', encodedPath));
+        }
+        for (const claudeDir of searchDirs) {
+          try {
+            const jsonlFiles = fs.readdirSync(claudeDir)
+              .filter((f: string) => f.endsWith('.jsonl') && !f.includes('/'))
+              .map((f: string) => ({ name: f, mtime: fs.statSync(path.join(claudeDir, f)).mtimeMs }));
+            for (const f of jsonlFiles) {
+              if (f.mtime > latestMtime) {
+                latestMtime = f.mtime;
+                latestClaudeSid = f.name.replace('.jsonl', '');
+                latestSourceDir = claudeDir;
+              }
+            }
+          } catch {}
+        }
+        if (latestClaudeSid && latestSourceDir) {
+          // Copy session file to root's .claude if it came from user's dir (so Easy Mode can resume)
+          const rootClaudeDir = path.join(rootHome, '.claude', 'projects', encodedPath);
+          const rootSessionFile = path.join(rootClaudeDir, `${latestClaudeSid}.jsonl`);
+          if (latestSourceDir !== rootClaudeDir && !fs.existsSync(rootSessionFile)) {
+            try {
+              fs.mkdirSync(rootClaudeDir, { recursive: true });
+              fs.copyFileSync(path.join(latestSourceDir, `${latestClaudeSid}.jsonl`), rootSessionFile);
+            } catch {}
           }
-        } catch {}
-        if (latestClaudeSid) {
+          // Update .easy-state.json
           const stateFile = path.join(projectDir, '.easy-state.json');
           try {
             let state: any = {};
@@ -10322,7 +10343,6 @@ const server = http.createServer(async (req, res) => {
             if (state.claudeSessionId !== latestClaudeSid) {
               state.claudeSessionId = latestClaudeSid;
               fs.writeFileSync(stateFile, JSON.stringify(state));
-              // Also update in-memory ClaudeProcess if loaded
               const easyInfo = easySessions.get(fromSession);
               if (easyInfo) easyInfo.cp.claudeSessionId = latestClaudeSid;
             }
@@ -10407,7 +10427,26 @@ const server = http.createServer(async (req, res) => {
               const state = JSON.parse(fs.readFileSync(path.join(projectDir, '.easy-state.json'), 'utf-8'));
               if (state.claudeSessionId) claudeSid = state.claudeSessionId;
             } catch {}
-            startCmd += claudeSid ? ` && claude --resume ${claudeSid}` : ' && claude';
+            if (claudeSid) {
+              // Copy session file from root's .claude to user's .claude so --resume works
+              if (auth.linuxUser && auth.linuxUser !== 'root') {
+                try {
+                  const rootEncodedPath = projectDir.replace(/\//g, '-');
+                  const rootSessionFile = path.join(process.env.HOME || '/root', '.claude', 'projects', rootEncodedPath, `${claudeSid}.jsonl`);
+                  const userHome = `/home/${auth.linuxUser}`;
+                  const userClaudeDir = path.join(userHome, '.claude', 'projects', rootEncodedPath);
+                  const userSessionFile = path.join(userClaudeDir, `${claudeSid}.jsonl`);
+                  if (fs.existsSync(rootSessionFile) && !fs.existsSync(userSessionFile)) {
+                    fs.mkdirSync(userClaudeDir, { recursive: true });
+                    fs.copyFileSync(rootSessionFile, userSessionFile);
+                    execFileSync('chown', ['-R', `${auth.linuxUser}:${auth.linuxUser}`, path.join(userHome, '.claude')], { timeout: 5000 });
+                  }
+                } catch {}
+              }
+              startCmd += ` && claude --resume ${claudeSid}`;
+            } else {
+              startCmd += ' && claude';
+            }
             result.cdCommand = startCmd;
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });

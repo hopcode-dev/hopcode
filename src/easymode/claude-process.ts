@@ -303,34 +303,16 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
     // Ensure project directory exists
     try { mkdirSync(this.projectDir, { recursive: true }); } catch {}
 
-    // Spawn claude process — as linuxUser if set (so claude sessions are in the right home dir)
+    // Spawn claude process (always as root — claude auth is under root's config)
     const env = { ...process.env };
     delete env.CLAUDECODE;  // prevent child inheriting parent's claude-code session
 
-    const spawnOpts: any = {
+    console.log(`[claude-process] ${this.sessionId} spawning: claude ${args.join(' ').substring(0, 200)} cwd=${this.projectDir} resume=${this.claudeSessionId || 'none'}`);
+    const child = spawn('claude', args, {
       cwd: this.projectDir,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
-    };
-
-    // Run as the target linux user if not root
-    if (this.linuxUser && this.linuxUser !== 'root') {
-      try {
-        const uid = parseInt(execFileSync('id', ['-u', this.linuxUser], { encoding: 'utf-8' }).trim());
-        const gid = parseInt(execFileSync('id', ['-g', this.linuxUser], { encoding: 'utf-8' }).trim());
-        spawnOpts.uid = uid;
-        spawnOpts.gid = gid;
-        // Set HOME so claude stores sessions in the user's home
-        const userHome = `/home/${this.linuxUser}`;
-        env.HOME = userHome;
-        env.USER = this.linuxUser;
-      } catch (e) {
-        console.error(`[claude-process] Failed to get uid/gid for ${this.linuxUser}:`, e);
-      }
-    }
-
-    console.log(`[claude-process] ${this.sessionId} spawning: claude ${args.join(' ').substring(0, 200)} cwd=${this.projectDir} user=${this.linuxUser || 'root'} resume=${this.claudeSessionId || 'none'}`);
-    const child = spawn('claude', args, spawnOpts);
+    });
     this.activeChild = child;
     console.log(`[claude-process] ${this.sessionId} spawned pid=${child.pid}`);
 
