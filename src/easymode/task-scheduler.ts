@@ -351,6 +351,7 @@ export class TaskScheduler {
         '--output-format', 'stream-json',
         '--verbose',
         '--model', 'sonnet',
+        '--allowedTools', 'mcp__tesla__check_battery', 'mcp__tesla__wake_vehicle',
       ];
 
       const env = { ...process.env };

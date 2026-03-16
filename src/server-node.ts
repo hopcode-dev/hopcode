@@ -2462,7 +2462,10 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     menuHide();
     window.location.href = '/terminal';
   });
-  document.getElementById('menu-pro-mode').addEventListener('click', function() {
+  var _proModeBtn = document.getElementById('menu-pro-mode');
+  // Hide Pro Mode button for non-owners (shared sessions — can't access other user's directory)
+  if (!_isOwner && _proModeBtn) _proModeBtn.style.display = 'none';
+  _proModeBtn.addEventListener('click', function() {
     menuHide();
     addSystemMsg(_t('easy.switch.to_pro'));
     var projectParam = new URLSearchParams(location.search).get('project') || '';
@@ -3382,6 +3385,26 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       }
     }
 
+    // Swap menu button logo: running horse gif when busy, static when idle
+    var _menuBtn = document.getElementById('menu-btn');
+    var _menuLogo = _menuBtn ? _menuBtn.querySelector('img') : null;
+    if (_menuLogo && _menuBtn) {
+      var isBusy = (newState === 'thinking' || newState === 'tool_running' || newState === 'queued');
+      if (isBusy) {
+        _menuLogo.src = './icons/logo-horse-running-btn.png?v=3';
+        _menuLogo.style.width = '100%';
+        _menuLogo.style.height = '100%';
+        _menuBtn.style.padding = '0';
+        _menuBtn.style.overflow = 'hidden';
+      } else {
+        _menuLogo.src = './icons/logo-horse-portal.png?v=7';
+        _menuLogo.style.width = '28px';
+        _menuLogo.style.height = '28px';
+        _menuBtn.style.padding = '3px';
+        _menuBtn.style.overflow = '';
+      }
+    }
+
     // Update input placeholder & disabled state — always allow input (messages queue)
     msgInput.disabled = (newState === 'initializing' || newState === 'exited');
     if (newState === 'ready') {
@@ -3421,6 +3444,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 
     // On transition to ready, finalize current message
     if (newState === 'ready' && prev !== 'ready' && prev !== 'initializing') {
+      clearToolIndicator();
       currentAssistantMsg = null;
       _lastDetectedUrl = '';
       // Refresh files panel if visible
@@ -3470,6 +3494,8 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       if (d.type === 'state') {
         setState(d.state);
       } else if (d.type === 'message') {
+        // Clear any lingering tool indicators when text arrives
+        clearToolIndicator();
         // Complete message — create or update bubble
         if (d.id != null && currentAssistantMsg && currentAssistantMsg._msgId === d.id) {
           // Same bubble — update with final text (reconcile streaming)
@@ -3519,6 +3545,8 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         // Non-previewable file generated — suggest HTML preview
         addPreviewSuggest(d.filename);
       } else if (d.type === 'user_message') {
+        // Strip internal WeChat hints before displaying
+        if (d.text) { var _hi = d.text.indexOf('[This user is on WeChat Work'); if (_hi >= 0) d.text = d.text.substring(0, _hi).trim(); }
         // Server echo of user message — WeChat group style
         var isSelf = d.sender === username;
         var isMentioned = d.text && d.text.match(new RegExp('@' + username + '(?![\\w\\u4e00-\\u9fff])'));
@@ -3568,6 +3596,8 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
           _suppressUrlDetection = true; // Don't detect URLs from history replay
           for (var i = 0; i < d.messages.length; i++) {
             var m = d.messages[i];
+            // Strip internal WeChat hints before displaying
+            if (m.text) { var _hj = m.text.indexOf('[This user is on WeChat Work'); if (_hj >= 0) m.text = m.text.substring(0, _hj).trim(); }
             if (m.role === 'user') {
               var isSelf = !m.sender || m.sender === username;
               if (isSelf) {
@@ -3949,22 +3979,27 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   // ---- Tool activity indicator (single reusable element) ----
   var toolIndicatorEl = null;
 
+  var _clearToolTimer = null;
   function clearToolIndicator() {
-    if (toolIndicatorEl) {
-      if (toolIndicatorEl._timerInterval) clearInterval(toolIndicatorEl._timerInterval);
-      if (toolStepCount > 1) {
-        toolIndicatorEl.innerHTML = '\u2699\ufe0f ' + _t('easy.tool.done', {n: toolStepCount});
-      } else {
-        // Single step — just fade it
-        var timerEl = toolIndicatorEl.querySelector('.tool-timer');
-        if (timerEl && toolIndicatorEl._startTime) {
-          timerEl.textContent = Math.floor((Date.now() - toolIndicatorEl._startTime) / 1000) + 's';
+    // Delay clearing so consecutive tools reuse the same bubble
+    if (_clearToolTimer) clearTimeout(_clearToolTimer);
+    _clearToolTimer = setTimeout(function() {
+      _clearToolTimer = null;
+      if (toolIndicatorEl && !toolIndicatorEl.classList.contains('done')) {
+        if (toolIndicatorEl._timerInterval) clearInterval(toolIndicatorEl._timerInterval);
+        if (toolStepCount > 1) {
+          toolIndicatorEl.innerHTML = '\u2699\ufe0f ' + _t('easy.tool.done', {n: toolStepCount});
+        } else {
+          var timerEl = toolIndicatorEl.querySelector('.tool-timer');
+          if (timerEl && toolIndicatorEl._startTime) {
+            timerEl.textContent = Math.floor((Date.now() - toolIndicatorEl._startTime) / 1000) + 's';
+          }
         }
+        toolIndicatorEl.classList.add('done');
+        toolIndicatorEl = null;
+        toolStepCount = 0;
       }
-      toolIndicatorEl.classList.add('done');
-    }
-    toolIndicatorEl = null;
-    toolStepCount = 0;
+    }, 300);
   }
 
   // ---- Chat history persistence ----
@@ -4074,9 +4109,9 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   function linkify(text) {
     var fixed = joinSplitUrls(text);
     var escaped = escHtml(fixed);
-    var withLinks = escaped.replace(/(https?:\\/\\/[^\\s<>'"\\u3000-\\u303F\\uFF00-\\uFF60]+)/g, function(m) {
+    var withLinks = escaped.replace(/(https?:\\/\\/[^\\s<>'")\`\\u3000-\\u303F\\uFF00-\\uFF60]+)/g, function(m) {
       // Strip trailing punctuation (ASCII + CJK) that is not part of the URL
-      var url = m.replace(/[).,;:!?\\]}>\\u3001\\u3002\\uFF01\\uFF09\\uFF0C\\uFF0E\\uFF1A\\uFF1B\\uFF1F\\uFF5E]+$/, '');
+      var url = m.replace(/[).,;:!?\`'"\\]}>\\u3001\\u3002\\uFF01\\uFF09\\uFF0C\\uFF0E\\uFF1A\\uFF1B\\uFF1F\\uFF5E]+$/, '');
       if (!url) url = m;
       var trail = m.substring(url.length);
       return '<a href="' + url + '" class="chat-link" style="color:#007aff;word-break:break-all;text-decoration:underline;">' + url + '</a>' + trail;
@@ -5145,6 +5180,8 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     var ext = (name.split('.').pop() || '').toLowerCase();
     var url = '/serve/' + project + '/' + relPath;
     if (ext === 'csv' || ext === 'md') url += '?render=1';
+    var imgExts = ['png','jpg','jpeg','gif','webp','svg','bmp','ico'];
+    if (imgExts.indexOf(ext) >= 0) url += '?preview=1';
     return url;
   }
 
@@ -11310,6 +11347,20 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
           const page = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font-family:system-ui;margin:16px;color:#1d1d1f;line-height:1.6;max-width:720px}h1,h2,h3{margin:1em 0 .5em}code{background:#f5f5f7;padding:2px 6px;border-radius:4px;font-size:13px}a{color:#007aff}ul{padding-left:20px}li{margin:4px 0}</style></head><body>${html}</body></html>`;
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
           res.end(page);
+        } else if (isPreviewableImage(filePath)) {
+          const accept = req.headers['accept'] || '';
+          const wantWrap = parsedUrl.searchParams.get('preview') === '1';
+          // Only wrap in HTML for iframe preview (explicit ?preview=1 or top-level navigation)
+          // <img src> requests send Accept: image/*, so return raw image for those
+          if (wantWrap || (!accept.includes('image/') && accept.includes('text/html'))) {
+            const imgHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>*{margin:0;padding:0}body{display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f5f5f7}img{max-width:100%;max-height:100vh;object-fit:contain}</style></head><body><img src="${pathname}"></body></html>`;
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+            res.end(imgHtml);
+          } else {
+            const mime = getMimeType(filePath);
+            res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-cache' });
+            fs.createReadStream(filePath).pipe(res);
+          }
         } else {
           const mime = getMimeType(filePath);
           const headers: Record<string, string> = {
@@ -12152,9 +12203,18 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
       }
     }
   };
-  // Only broadcast if this is a genuinely new user (not a reconnect)
+  // Broadcast to all if new user joined; always send to this connection
   if (!wasConnected) {
     broadcastParticipants();
+  } else {
+    // Reconnect — send current participants to this client only
+    const onlineSet = new Set(info!.connectedUsers.keys());
+    const allUsers = new Set<string>();
+    allUsers.add(info!.owner);
+    for (const u of onlineSet) allUsers.add(u);
+    for (const u of info!.sharedWith) allUsers.add(u);
+    const users = Array.from(allUsers).map(name => ({ name, online: onlineSet.has(name) }));
+    try { clientWs.send(JSON.stringify({ type: 'participants', users })); } catch {}
   }
 
   // Track shared users (non-owner who joined)
@@ -12381,7 +12441,7 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
       if (wsSet.size === 0 && info) {
         // DON'T delete from connectedUsers yet — keep the entry so reconnect
         // sees wasConnected=true and doesn't broadcast a spurious "joined"
-        // Wait 60s before broadcasting leave — gives time to reconnect
+        // Wait 2min before broadcasting leave — gives time to reconnect
         const timer = setTimeout(() => {
           info!._leaveTimers.delete(connUser);
           // Check they haven't reconnected in the meantime
@@ -12390,7 +12450,7 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
             info!.connectedUsers.delete(connUser);
             broadcastParticipants();
           }
-        }, 60000);
+        }, 120000);
         info._leaveTimers.set(connUser, timer);
       }
     }

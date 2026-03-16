@@ -13,7 +13,7 @@ export interface IncomingMessage {
   /** Message text content */
   content: string;
   /** Message type */
-  msgType: 'text' | 'voice' | 'image';
+  msgType: 'text' | 'voice' | 'image' | 'file';
   /** Chat/room ID (for group messages) */
   chatId?: string;
   /** Chat type */

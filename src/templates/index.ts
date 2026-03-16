@@ -83,11 +83,13 @@ export function setupProjectTemplate(
   }
 
   const port = getNextPort(username);
-  const serveUrl = `/serve/${encodeURIComponent(projectName)}/workspace/`;
+  const baseUrl = process.env.PUBLIC_URL || 'https://gotong.gizwitsapi.com';
+  const serveUrl = `${baseUrl}/serve/${encodeURIComponent(projectName)}/workspace/`;
   const deployInstructions = getDeployInstructions(username, projectName, port);
 
   const content = template
     .replace(/\{\{SERVE_URL\}\}/g, serveUrl)
+    .replace(/\{\{BASE_URL\}\}/g, baseUrl)
     .replace(/\{\{PROJECT_DIR\}\}/g, projectDir)
     .replace(/\{\{PROJECT_NAME\}\}/g, projectName)
     .replace(/\{\{PORT\}\}/g, String(port))

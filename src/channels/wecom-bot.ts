@@ -390,6 +390,20 @@ export class WeComBot implements Channel {
       if (quotedText) {
         content = `[引用: ${quotedText}]\n${content}`;
       }
+    } else if (msgtype === 'file') {
+      // File attachment (Excel, PDF, etc.)
+      this.log(`File raw keys: ${Object.keys(body.file || {}).join(', ')}`);
+      this.log(`File body keys: ${Object.keys(body).join(', ')}`);
+      const fileName = body.file?.file_name || body.file?.filename || body.file?.name || body.filename || body.file_name || 'unknown_file';
+      const fileUrl = body.file?.url || body.file?.file_url;
+      mediaId = body.file?.media_id;
+      this.log(`File message from ${userId}: name=${fileName} url=${fileUrl ? 'yes' : 'no'} mediaId=${mediaId || 'no'} aeskey=${body.file?.aeskey ? 'yes' : 'no'}`);
+      if (!userId || (!fileUrl && !mediaId)) {
+        this.log(`Skipped file message without url/media_id from ${userId || 'unknown'}`);
+        return;
+      }
+      imageUrl = fileUrl; // reuse imageUrl field for download
+      content = `[用户发送了文件: ${fileName}]`;
     } else {
       this.log(`Skipped ${msgtype} message from ${userId || 'unknown'}`);
       return;
@@ -415,7 +429,7 @@ export class WeComBot implements Channel {
       await this.messageHandler({
         userId,
         content: content || '',
-        msgType: msgtype as 'text' | 'voice' | 'image',
+        msgType: msgtype as 'text' | 'voice' | 'image' | 'file',
         chatId: chatId || undefined,
         chatType: chatId ? 'group' : 'direct',
         reqId,
@@ -424,7 +438,7 @@ export class WeComBot implements Channel {
           responseUrl,
           mediaId,
           imageUrl,
-          imageAesKey: msgtype === 'image' ? body.image?.aeskey : undefined,
+          imageAesKey: msgtype === 'image' ? body.image?.aeskey : (msgtype === 'file' ? body.file?.aeskey : undefined),
           quotedImageUrl: quotedImageUrl || undefined,
           quotedImageAesKey: quotedImageUrl ? body.quote?.image?.aeskey : undefined,
           fromName: body.from?.name,

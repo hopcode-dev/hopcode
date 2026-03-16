@@ -313,7 +313,9 @@ export class WeComBridge {
       this.setupNonStreamingReply(sessionId, userId, channel, chatId);
     }
 
-    info.cp.sendMessage(cleanContent, senderName, mentions, participantCount);
+    const groupBaseUrl = process.env.PUBLIC_URL || 'https://gotong.gizwitsapi.com';
+    const groupWecomHint = `\n[This user is on WeChat Work — reply in text/markdown only. NO inline images. Share images as full clickable URLs using domain: ${groupBaseUrl}]`;
+    info.cp.sendMessage(cleanContent + groupWecomHint, senderName, mentions, participantCount);
     info.lastActivity = Date.now();
     this.saveRegistry();
   }
@@ -578,6 +580,49 @@ export class WeComBridge {
     }
   }
 
+  /** Download file from WeComBot URL, save to workspace with original filename */
+  private async downloadFile(fileUrl: string, aesKey: string | undefined, projectDir: string, content: string): Promise<string | null> {
+    try {
+      const resp = await fetch(fileUrl, { signal: AbortSignal.timeout(30_000) });
+      if (!resp.ok) {
+        this.log(`File download failed: ${resp.status}`);
+        return null;
+      }
+
+      let fileData = Buffer.from(await resp.arrayBuffer());
+
+      // AES decryption if needed (same as image)
+      if (aesKey) {
+        try {
+          const key = Buffer.from(aesKey + '=', 'base64');
+          const iv = key.subarray(0, 16);
+          const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+          decipher.setAutoPadding(false);
+          const decrypted = Buffer.concat([decipher.update(fileData), decipher.final()]);
+          const pad = decrypted[decrypted.length - 1]!;
+          fileData = (pad > 0 && pad <= 32) ? decrypted.subarray(0, decrypted.length - pad) : decrypted;
+        } catch (e) {
+          this.log(`File AES decryption failed: ${e}, using raw data`);
+        }
+      }
+
+      // Extract filename from content "[用户发送了文件: xxx.xlsx]"
+      const nameMatch = content.match(/\[用户发送了文件: (.+?)\]/);
+      const filename = nameMatch ? nameMatch[1] : `wecom-file-${Date.now()}`;
+
+      const wsDir = path.join(projectDir, 'workspace');
+      fs.mkdirSync(wsDir, { recursive: true });
+      const filepath = path.join(wsDir, filename);
+      fs.writeFileSync(filepath, fileData);
+
+      this.log(`File saved: ${filepath} (${fileData.length} bytes)`);
+      return filepath;
+    } catch (e) {
+      this.log(`File download error: ${e}`);
+      return null;
+    }
+  }
+
   // ── Session routing ──
 
   private async routeToSession(
@@ -623,6 +668,16 @@ export class WeComBridge {
       } else {
         messageContent = content || '[用户发送了一张图片，但下载失败]';
       }
+    } else if (msg.msgType === 'file' && msg.raw?.imageUrl) {
+      // File attachment (Excel, PDF, etc.) — download and save to workspace
+      const filePath = await this.downloadFile(
+        msg.raw.imageUrl, msg.raw.imageAesKey, info.cp.projectDir, content,
+      );
+      if (filePath) {
+        messageContent = `[用户发送了文件: ${filePath}]。请读取该文件并根据内容进行处理。`;
+      } else {
+        messageContent = content || '[用户发送了文件，但下载失败]';
+      }
     }
 
     // Don't send empty messages
@@ -647,8 +702,10 @@ export class WeComBridge {
       }
     }
 
-    // Send to Claude
-    info.cp.sendMessage(messageContent, hopcodeUser, undefined, 1);
+    // Send to Claude (add WeChat format hint — no inline images)
+    const baseUrl = process.env.PUBLIC_URL || 'https://gotong.gizwitsapi.com';
+    const wecomHint = `\n[This user is on WeChat Work — reply in text/markdown only. NO inline images. Share images as full clickable URLs using domain: ${baseUrl}]`;
+    info.cp.sendMessage(messageContent + wecomHint, hopcodeUser, undefined, 1);
     info.lastActivity = Date.now();
     this.saveRegistry();
   }
