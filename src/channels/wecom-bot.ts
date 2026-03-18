@@ -13,6 +13,8 @@ import type { Channel, IncomingMessage, MessageHandler } from './types.js';
 
 const WSS_URL = 'wss://openws.work.weixin.qq.com';
 const PING_INTERVAL = 25_000;
+// No active pong timeout — rely on TCP/WebSocket onclose for dead connection detection
+// Ping is sent every 25s to keep the connection alive on the server side
 const ACK_TIMEOUT = 5_000;
 const RESPONSE_URL_TTL = 3500_000; // ~58 minutes (1h validity)
 
@@ -568,10 +570,11 @@ export class WeComBot implements Channel {
   }
 
   private scheduleReconnect(): void {
-    if (this.disconnected || this.reconnectAttempts >= 10) return;
+    if (this.disconnected) return;
+    // Never give up — always reconnect with exponential backoff capped at 60s
     this.reconnectAttempts++;
-    const delay = 5000 * Math.min(this.reconnectAttempts, 5);
-    this.log(`Reconnecting in ${delay / 1000}s (${this.reconnectAttempts}/10)`);
+    const delay = Math.min(5000 * Math.pow(1.5, Math.min(this.reconnectAttempts - 1, 8)), 60000);
+    this.log(`Reconnecting in ${Math.round(delay / 1000)}s (attempt ${this.reconnectAttempts})`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       if (!this.disconnected) {

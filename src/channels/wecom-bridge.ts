@@ -46,6 +46,9 @@ const BOT_NAMES = ['小码', 'xiaoma', '小云', 'xiaoyun'];
 export class WeComBridge {
   private channels: Channel[] = [];
   private botChannel: WeComBot | null = null;
+  private botChannels: Set<WeComBot> = new Set();
+  private userLastBot: Map<string, WeComBot> = new Map(); // wecomUserId → last active bot
+  private userLastActivity: Map<string, number> = new Map(); // wecomUserId → timestamp
 
   // Bindings
   private bindings = new Map<string, string>();       // wecomUserId → hopcodeUsername
@@ -74,21 +77,32 @@ export class WeComBridge {
   // ── Lifecycle ──
 
   async start(): Promise<void> {
-    // WeComBot (WebSocket long-connection)
+    // WeComBot (WebSocket long-connection) — supports multiple bots
+    const botConfigs: { id: string; secret: string; label: string }[] = [];
     if (process.env.WECOM_BOT_ID && process.env.WECOM_BOT_SECRET) {
+      botConfigs.push({ id: process.env.WECOM_BOT_ID, secret: process.env.WECOM_BOT_SECRET, label: 'primary' });
+    }
+    // Additional bots: WECOM_BOT_ID_2, WECOM_BOT_SECRET_2, etc.
+    for (let i = 2; i <= 9; i++) {
+      const id = process.env[`WECOM_BOT_ID_${i}`];
+      const secret = process.env[`WECOM_BOT_SECRET_${i}`];
+      if (id && secret) botConfigs.push({ id, secret, label: `bot-${i}` });
+    }
+    for (const cfg of botConfigs) {
       const bot = new WeComBot({
-        botId: process.env.WECOM_BOT_ID,
-        botSecret: process.env.WECOM_BOT_SECRET,
-        log: (msg) => console.log(`[wecom-bot] ${msg}`),
+        botId: cfg.id,
+        botSecret: cfg.secret,
+        log: (msg) => console.log(`[wecom-bot:${cfg.label}] ${msg}`),
       });
       bot.onMessage((msg) => this.handleMessage(msg, bot).catch(e => this.log(`handleMessage error: ${e}`)));
       this.channels.push(bot);
-      this.botChannel = bot;
+      this.botChannels.add(bot);
+      if (!this.botChannel) this.botChannel = bot; // first bot is the default for proactive messages
       try {
         await bot.start();
-        this.log('WeComBot channel started');
+        this.log(`WeComBot (${cfg.label}) started: ${cfg.id.slice(0, 12)}...`);
       } catch (e) {
-        this.log(`WeComBot start failed: ${e}`);
+        this.log(`WeComBot (${cfg.label}) start failed: ${e}`);
       }
     }
 
@@ -139,9 +153,11 @@ export class WeComBridge {
     const { userId, content, chatId, chatType } = msg;
     this.log(`handleMessage: userId=${userId} chatType=${chatType} content="${content.slice(0, 80)}"`);
 
-    // For WeComBot, set active req_id for reply routing
-    if (channel === this.botChannel && msg.reqId) {
-      this.botChannel!.setActiveReqId(userId, msg.reqId);
+    // For WeComBot, set active req_id for reply routing and track last active bot
+    if (this.botChannels.has(channel as WeComBot)) {
+      this.userLastBot.set(userId, channel as WeComBot);
+      this.userLastActivity.set(userId, Date.now());
+      if (msg.reqId) (channel as WeComBot).setActiveReqId(userId, msg.reqId);
     }
 
     try {
@@ -158,7 +174,7 @@ export class WeComBridge {
       if (!hopcodeUser) {
         if (this.tryBindCommand(userId, content, channel)) return;
         await this.sendReply(channel, userId, chatId,
-          '你好！请先绑定 Hopcode 账号：\n\n发送：绑定 用户名 密码\n\n例如：绑定 jack Hopcode2026!');
+          '你好！请先绑定立码账号：\n\n发送：绑定 用户名:密码\n\n例如：绑定 xiaoming:abc123');
         return;
       }
 
@@ -307,7 +323,7 @@ export class WeComBridge {
     const participantCount = this.groupParticipants.get(chatId!)?.size || 2;
 
     // Set up reply listener
-    if (channel === this.botChannel && msg.reqId) {
+    if (this.botChannels.has(channel as WeComBot) && msg.reqId) {
       this.setupStreamingReply(sessionId, userId, channel, msg.reqId, chatId);
     } else {
       this.setupNonStreamingReply(sessionId, userId, channel, chatId);
@@ -323,7 +339,8 @@ export class WeComBridge {
   // ── Commands ──
 
   private tryBindCommand(userId: string, content: string, channel: Channel): boolean {
-    const bindMatch = content.match(/^绑定\s+(\S+)\s+(\S+)$/);
+    // Support: 绑定 user pass | 绑定 user:pass | 绑定 user：pass
+    const bindMatch = content.trim().match(/^绑定\s+(\S+?)[:\s：]+(\S+)$/);
     if (!bindMatch) return false;
 
     const [, username, password] = bindMatch as RegExpMatchArray;
@@ -339,7 +356,7 @@ export class WeComBridge {
     this.saveBindings();
     this.log(`Bound wecom:${userId} → hopcode:${username}`);
     this.sendReply(channel, userId, undefined,
-      `绑定成功！你已关联到 Hopcode 用户「${username}」。\n\n现在可以直接发消息与小码对话。\n发送「项目列表」查看你的项目。`);
+      `绑定成功！你已关联到立码用户「${username}」🎉\n\n直接给小码发消息就能对话了，和网页版 Easy Mode 一样。发「项目列表」查看你的项目，回复序号可以切换。如果还没有项目，发「新建项目」即可创建。在群聊中 @小码 就能让它参与讨论。\n\n常用命令：\n• 项目列表 — 查看项目\n• 版本 — 查看文件历史\n• 回滚 序号 — 还原到之前的版本\n• 解绑 — 解除账号关联\n\n语音消息也支持，小码会自动识别并回复。`);
     return true;
   }
 
@@ -695,7 +712,7 @@ export class WeComBridge {
     // Only set up reply listener if Claude is not busy
     // If busy, the message will be queued and the existing listener will catch all replies
     if (!info.cp.isActive()) {
-      if (channel === this.botChannel && msg.reqId) {
+      if (this.botChannels.has(channel as WeComBot) && msg.reqId) {
         this.setupStreamingReply(sessionId, userId, channel, msg.reqId, chatId);
       } else {
         this.setupNonStreamingReply(sessionId, userId, channel, chatId);
@@ -729,7 +746,7 @@ export class WeComBridge {
     let chunkTimer: ReturnType<typeof setTimeout> | null = null;
 
     // Immediately show typing indicator (official WeChat Work spinner bubble)
-    const bot = this.botChannel!;
+    const bot = channel as WeComBot;
     bot.sendStreamChunk(wecomUserId, streamId, '', false).catch(() => {});
 
     const sendChunk = (finish: boolean) => {
@@ -782,15 +799,15 @@ export class WeComBridge {
         if (accumulated) {
           sendChunk(true);
         }
-        this.botChannel!.clearActiveReqId(wecomUserId);
+        bot.clearActiveReqId(wecomUserId);
         this.cleanupListener(listenerKey, sessionId);
       } else if (msg.type === 'error') {
         if (chunkTimer) { clearTimeout(chunkTimer); chunkTimer = null; }
         const errText = accumulated
           ? accumulated + '\n\n⚠️ ' + msg.message
           : '⚠️ ' + msg.message;
-        this.botChannel!.sendStreamChunk(wecomUserId, streamId, errText, true).catch(() => {});
-        this.botChannel!.clearActiveReqId(wecomUserId);
+        bot.sendStreamChunk(wecomUserId, streamId, errText, true).catch(() => {});
+        bot.clearActiveReqId(wecomUserId);
         this.cleanupListener(listenerKey, sessionId);
       }
     };
@@ -853,16 +870,26 @@ export class WeComBridge {
 
   /** Send a notification to a Hopcode user via WeChat Work (for task results, etc.) */
   async notifyUser(hopcodeUsername: string, text: string): Promise<boolean> {
-    // Find the wecomUserId for this hopcode user
-    let wecomUserId: string | null = null;
+    // Find all wecomUserIds bound to this hopcode user, pick the most recently active one
+    let bestUserId: string | null = null;
+    let bestBot: WeComBot | null = null;
+    let bestTime = 0;
+
     for (const [wid, huser] of this.bindings) {
-      if (huser === hopcodeUsername) { wecomUserId = wid; break; }
+      if (huser !== hopcodeUsername) continue;
+      const lastTime = this.userLastActivity.get(wid) || 0;
+      if (lastTime > bestTime || !bestUserId) {
+        bestUserId = wid;
+        bestBot = this.userLastBot.get(wid) || this.botChannel;
+        bestTime = lastTime;
+      }
     }
-    if (!wecomUserId || !this.botChannel) return false;
+
+    if (!bestUserId || !bestBot) return false;
 
     // Try proactive send (single chat, chatType=1)
     try {
-      return await this.botChannel.sendProactive(wecomUserId, text, 1);
+      return await bestBot.sendProactive(bestUserId, text, 1);
     } catch (e) {
       this.log(`notifyUser failed for ${hopcodeUsername}: ${e}`);
       return false;

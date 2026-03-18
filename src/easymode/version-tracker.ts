@@ -28,7 +28,7 @@ tasks.json
 
 function git(args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile('git', args, { cwd, timeout: 10_000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile('/usr/bin/git', args, { cwd, timeout: 10_000, maxBuffer: 1024 * 1024, env: { ...process.env, HOME: process.env.HOME || '/root' } }, (err, stdout, stderr) => {
       if (err) reject(new Error(`git ${args[0]} failed: ${stderr || err.message}`));
       else resolve(stdout);
     });
@@ -47,6 +47,9 @@ export class VersionTracker {
   /** Initialize git repo if needed (idempotent) */
   async init(): Promise<void> {
     if (this.initialized) return;
+
+    // Skip if project directory doesn't exist (deleted project)
+    if (!existsSync(this.projectDir)) return;
 
     const gitDir = path.join(this.projectDir, '.git');
     if (!existsSync(gitDir)) {
