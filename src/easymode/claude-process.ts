@@ -9,6 +9,9 @@ import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSy
 import * as path from 'path';
 
 const MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'task-mcp-server.ts');
+const BROWSER_MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'browser-mcp-server.ts');
+const WECHAT_MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'wechat-mcp-server.ts');
+const YUYI_SALES_MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'yuyi-sales-mcp-server.ts');
 import type { EasyServerMessage } from './protocol.js';
 import { VersionTracker } from './version-tracker.js';
 
@@ -245,7 +248,23 @@ export class ClaudeProcess {
         'hopcode-tasks': {
           command: tsxPath,
           args: [MCP_SERVER_SCRIPT],
-          env: { TASK_PROJECT_DIR: this.projectDir },
+          env: {
+            TASK_USER_HOME: this.linuxUser
+              ? (this.linuxUser === 'root' ? '/root' : `/home/${this.linuxUser}`)
+              : (process.env.HOME || '/root'),
+          },
+        },
+        'browser-proxy': {
+          command: tsxPath,
+          args: [BROWSER_MCP_SERVER_SCRIPT],
+        },
+        'wechat': {
+          command: tsxPath,
+          args: [WECHAT_MCP_SERVER_SCRIPT],
+        },
+        'yuyi-sales': {
+          command: tsxPath,
+          args: [YUYI_SALES_MCP_SERVER_SCRIPT],
         },
       },
     };
@@ -267,7 +286,11 @@ export class ClaudeProcess {
       '--model', 'sonnet',
       '--include-partial-messages',
       '--mcp-config', mcpConfigPath,
-      '--allowedTools', 'mcp__hopcode-tasks__schedule_task', 'mcp__hopcode-tasks__list_tasks', 'mcp__hopcode-tasks__delete_task', 'mcp__hopcode-tasks__activate_task',
+      '--allowedTools',
+      'mcp__hopcode-tasks__schedule_task', 'mcp__hopcode-tasks__list_tasks', 'mcp__hopcode-tasks__delete_task', 'mcp__hopcode-tasks__activate_task',
+      'mcp__browser-proxy__browser_open', 'mcp__browser-proxy__browser_screenshot', 'mcp__browser-proxy__browser_click', 'mcp__browser-proxy__browser_type', 'mcp__browser-proxy__browser_key', 'mcp__browser-proxy__browser_scroll', 'mcp__browser-proxy__browser_navigate', 'mcp__browser-proxy__browser_evaluate', 'mcp__browser-proxy__browser_cookies', 'mcp__browser-proxy__browser_status', 'mcp__browser-proxy__browser_close', 'mcp__browser-proxy__browser_list',
+      'mcp__wechat__wechat_login', 'mcp__wechat__wechat_status', 'mcp__wechat__wechat_send', 'mcp__wechat__wechat_read', 'mcp__wechat__wechat_contacts', 'mcp__wechat__wechat_search',
+      ...(['jack', 'root', 'alex'].includes(this.owner) ? ['mcp__yuyi-sales__sales_attendance', 'mcp__yuyi-sales__sales_bd_activity', 'mcp__yuyi-sales__sales_shipment_stats', 'mcp__yuyi-sales__sales_activation_stats', 'mcp__yuyi-sales__sales_order_stats', 'mcp__yuyi-sales__sales_team_overview', 'mcp__yuyi-sales__sales_dealer_ranking', 'mcp__yuyi-sales__sales_daily_report'] : []),
       ...(['jack', 'root'].includes(this.owner) ? ['mcp__tesla__check_battery', 'mcp__tesla__wake_vehicle'] : []),
       '--append-system-prompt',
       `You are 小码 (Xiaoma), a friendly action-oriented AI assistant in Hopcode Easy Mode. When users confirm or agree (好的/试试/做吧/go ahead/ok), START DOING THE WORK immediately — write code, create files. Never just say "ok let me know". Be concise — this is a mobile chat UI. Reply in the same language as the user.
@@ -293,6 +316,7 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
 - One-shot timers ("30分钟后提醒") → schedule_task(type="delay", delay_minutes=30, ...)
 - Recurring ("每天9点") → schedule_task(type="cron", cron_expr="0 9 * * *", ...)
 - Fixed intervals ("每30分钟") → schedule_task(type="every", interval_minutes=30, ...)
+- Tasks are per-user (not per-project) — they persist across project switches
 - Only session owner can create tasks. If a guest asks, tell them to register.`,
     ];
 
@@ -460,6 +484,12 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
 
       if (isCurrentChild && code !== 0 && code !== null && !fullResponseText) {
         console.error(`[claude-process] ${this.sessionId} crashed with code ${code}`);
+        // If resume failed (stale session), clear sessionId so next attempt starts fresh
+        if (this.claudeSessionId) {
+          console.log(`[claude-process] ${this.sessionId} clearing stale claudeSessionId ${this.claudeSessionId}`);
+          this.claudeSessionId = null;
+          this.saveState();
+        }
         this.broadcast({ type: 'error', message: `Claude exited unexpectedly (code ${code}). You can retry your message.` });
       }
     });

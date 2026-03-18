@@ -1,6 +1,7 @@
 /**
- * TaskScheduler — manages scheduled/cron tasks for Easy Mode projects.
- * Tasks are defined in tasks.json per project directory.
+ * TaskScheduler — manages scheduled/cron tasks for Easy Mode users.
+ * Tasks are stored per-user in ~/.hopcode/tasks.json (not per-project).
+ * Keyed by owner username — same user with multiple sessions shares one scheduler.
  * Supports: cron expressions, fixed intervals, one-shot timers.
  * Draft workflow: periodic tasks start as draft, auto-test-run, user activates.
  */
@@ -54,42 +55,77 @@ interface ActiveJob {
 type TaskCallback = (result: TaskRunResult) => void;
 type CountCallback = (count: number) => void;
 
-const MAX_TASKS_PER_PROJECT = 10;
+const MAX_TASKS = 10;
 const TASK_EXECUTION_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 const MAX_CONSECUTIVE_ERRORS = 3;
 
+interface OwnerState {
+  userHome: string;
+  jobs: Map<string, ActiveJob>;
+  watcher?: fs.FSWatcher;
+  callbacks: Set<TaskCallback>;       // all session callbacks for this owner
+  countCallbacks: Set<CountCallback>;
+  /** Directory containing .mcp-config.json for task execution */
+  mcpConfigDir?: string;
+}
+
 export class TaskScheduler {
-  private jobs = new Map<string, Map<string, ActiveJob>>(); // sessionId -> taskId -> ActiveJob
-  private watchers = new Map<string, fs.FSWatcher>(); // sessionId -> watcher
-  private callbacks = new Map<string, TaskCallback>(); // sessionId -> callback
-  private countCallbacks = new Map<string, CountCallback>(); // sessionId -> count change callback
-  private projectDirs = new Map<string, string>(); // sessionId -> projectDir
+  private owners = new Map<string, OwnerState>();
 
-  /**
-   * Load tasks.json for a session and start scheduling active jobs.
-   * Also watches the file for changes.
-   */
-  loadAndSync(sessionId: string, projectDir: string, callback: TaskCallback, onCountChange?: CountCallback): void {
-    this.callbacks.set(sessionId, callback);
-    if (onCountChange) this.countCallbacks.set(sessionId, onCountChange);
-    this.projectDirs.set(sessionId, projectDir);
-
-    const tasks = this.readTasksFile(projectDir);
-    this.syncJobs(sessionId, projectDir, tasks);
-    this.watchTasksFile(sessionId, projectDir);
+  private tasksFilePath(userHome: string): string {
+    return path.join(userHome, '.hopcode', 'tasks.json');
   }
 
   /**
-   * Read and parse tasks.json from project dir.
+   * Register a session for task scheduling. If this owner is already loaded,
+   * just adds the callback. Otherwise loads tasks and starts scheduling.
    */
-  private readTasksFile(projectDir: string): TaskDef[] {
-    const filePath = path.join(projectDir, 'tasks.json');
+  loadForUser(owner: string, userHome: string, callback: TaskCallback, onCountChange?: CountCallback, mcpConfigDir?: string): void {
+    let state = this.owners.get(owner);
+    if (state) {
+      // Owner already loaded — just add this session's callback
+      state.callbacks.add(callback);
+      if (onCountChange) state.countCallbacks.add(onCountChange);
+      if (mcpConfigDir) state.mcpConfigDir = mcpConfigDir;
+      // Send current count to new session
+      if (onCountChange) onCountChange(this.getActiveCount(owner));
+      return;
+    }
+
+    // First session for this owner — initialize
+    state = {
+      userHome,
+      jobs: new Map(),
+      callbacks: new Set([callback]),
+      countCallbacks: onCountChange ? new Set([onCountChange]) : new Set(),
+      mcpConfigDir,
+    };
+    this.owners.set(owner, state);
+
+    const tasks = this.readTasks(userHome);
+    this.syncJobs(owner, tasks);
+    this.watchTasksFile(owner, userHome);
+  }
+
+  /**
+   * Remove a session's callback. If no callbacks remain, stop everything for this owner.
+   */
+  removeCallback(owner: string, callback: TaskCallback, onCountChange?: CountCallback): void {
+    const state = this.owners.get(owner);
+    if (!state) return;
+    state.callbacks.delete(callback);
+    if (onCountChange) state.countCallbacks.delete(onCountChange);
+    // Don't stop scheduling even if no UI is connected — tasks should keep running
+  }
+
+  // --- File I/O ---
+
+  private readTasks(userHome: string): TaskDef[] {
     try {
-      const raw = fs.readFileSync(filePath, 'utf-8');
+      const raw = fs.readFileSync(this.tasksFilePath(userHome), 'utf-8');
       const arr = JSON.parse(raw);
       if (!Array.isArray(arr)) return [];
-      // Validate and cap at MAX_TASKS
-      return arr.slice(0, MAX_TASKS_PER_PROJECT).filter((t: any) =>
+      return arr.slice(0, MAX_TASKS).filter((t: any) =>
         t && t.id && t.name && t.schedule && t.prompt
       );
     } catch {
@@ -97,89 +133,84 @@ export class TaskScheduler {
     }
   }
 
-  /**
-   * Write tasks back to tasks.json.
-   */
-  private writeTasksFile(projectDir: string, tasks: TaskDef[]): void {
-    const filePath = path.join(projectDir, 'tasks.json');
+  private writeTasks(userHome: string, tasks: TaskDef[]): void {
+    const filePath = this.tasksFilePath(userHome);
     try {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, JSON.stringify(tasks, null, 2), 'utf-8');
     } catch (e) {
       console.error(`[task-scheduler] Failed to write ${filePath}:`, e);
     }
   }
 
-  /**
-   * Sync in-memory jobs with the task definitions.
-   * Creates new jobs, updates changed ones, removes deleted ones.
-   */
-  private syncJobs(sessionId: string, projectDir: string, tasks: TaskDef[]): void {
-    if (!this.jobs.has(sessionId)) this.jobs.set(sessionId, new Map());
-    const jobMap = this.jobs.get(sessionId)!;
-    const prevCount = this.getActiveCount(sessionId);
+  // --- Job sync ---
+
+  private syncJobs(owner: string, tasks: TaskDef[]): void {
+    const state = this.owners.get(owner);
+    if (!state) return;
+    const { jobs } = state;
+    const prevCount = this.getActiveCount(owner);
 
     const taskIds = new Set(tasks.map(t => t.id));
 
     // Remove jobs for deleted tasks
-    for (const [id, job] of jobMap) {
+    for (const [id, job] of jobs) {
       if (!taskIds.has(id)) {
         this.stopJob(job);
-        jobMap.delete(id);
+        jobs.delete(id);
       }
     }
 
     // Process each task
     for (const task of tasks) {
-      const existing = jobMap.get(task.id);
+      const existing = jobs.get(task.id);
 
-      // Check for new draft tasks → auto test run
+      // New draft → auto test run
       if (task.status === 'draft' && task.enabled && !existing) {
-        console.log(`[task-scheduler] ${sessionId} new draft task "${task.name}" — running test`);
-        jobMap.set(task.id, { task });
-        this.executeTask(sessionId, task, true);
+        console.log(`[task-scheduler] ${owner} new draft task "${task.name}" — running test`);
+        jobs.set(task.id, { task });
+        this.executeTask(owner, task, true);
         continue;
       }
 
-      // Only schedule active + enabled tasks
+      // Not active+enabled → stop if running
       if (task.status !== 'active' || !task.enabled) {
         if (existing) {
           this.stopJob(existing);
           existing.task = task;
-          // Keep in map but stopped
         } else {
-          jobMap.set(task.id, { task });
+          jobs.set(task.id, { task });
         }
         continue;
       }
 
-      // Active + enabled: create or update the scheduled job
+      // Active + enabled
       if (existing) {
-        // Check if schedule changed
         const scheduleChanged = JSON.stringify(existing.task.schedule) !== JSON.stringify(task.schedule);
         existing.task = task;
         if (scheduleChanged) {
           this.stopJob(existing);
-          this.startJob(sessionId, existing);
+          this.startJob(owner, existing);
         }
       } else {
         const job: ActiveJob = { task };
-        jobMap.set(task.id, job);
-        this.startJob(sessionId, job);
+        jobs.set(task.id, job);
+        this.startJob(owner, job);
       }
     }
 
     // Notify if active count changed
-    const newCount = this.getActiveCount(sessionId);
+    const newCount = this.getActiveCount(owner);
     if (newCount !== prevCount) {
-      const countCb = this.countCallbacks.get(sessionId);
-      if (countCb) countCb(newCount);
+      for (const cb of state.countCallbacks) {
+        try { cb(newCount); } catch {}
+      }
     }
   }
 
-  /**
-   * Start scheduling a job based on its schedule type.
-   */
-  private startJob(sessionId: string, job: ActiveJob): void {
+  // --- Job scheduling ---
+
+  private startJob(owner: string, job: ActiveJob): void {
     const { task } = job;
     const { schedule } = task;
 
@@ -190,48 +221,40 @@ export class TaskScheduler {
           return;
         }
         job.cronJob = cronSchedule(schedule.expr, () => {
-          this.executeTask(sessionId, task, false);
+          this.executeTask(owner, task, false);
         }, { timezone: 'Asia/Shanghai' });
-        console.log(`[task-scheduler] ${sessionId} scheduled cron "${task.name}" [${schedule.expr}]`);
+        console.log(`[task-scheduler] ${owner} scheduled cron "${task.name}" [${schedule.expr}]`);
         break;
       }
       case 'every': {
         const ms = schedule.everyMs;
-        if (!ms || ms < 10000) { // minimum 10 seconds
+        if (!ms || ms < 10000) {
           console.warn(`[task-scheduler] Invalid interval ${ms}ms for task ${task.id}`);
           return;
         }
         job.intervalId = setInterval(() => {
-          this.executeTask(sessionId, task, false);
+          this.executeTask(owner, task, false);
         }, ms);
-        console.log(`[task-scheduler] ${sessionId} scheduled every ${ms}ms "${task.name}"`);
+        console.log(`[task-scheduler] ${owner} scheduled every ${ms}ms "${task.name}"`);
         break;
       }
       case 'at': {
-        // Ensure UTC interpretation: append Z if no timezone info
-        // Timezone indicators: Z, +HH:MM, -HH:MM (but not the leading - of negative offset confused with date)
         let atStr = schedule.at || '';
         const hasTz = /Z$|[+-]\d{2}:\d{2}$|[+-]\d{4}$/.test(atStr);
-        if (atStr && !hasTz) {
-          atStr += 'Z';
-        }
+        if (atStr && !hasTz) atStr += 'Z';
         const targetTime = atStr ? new Date(atStr).getTime() : 0;
         const delay = targetTime - Date.now();
-        console.log(`[task-scheduler] ${sessionId} at-task "${task.name}" raw="${schedule.at}" parsed="${atStr}" target=${new Date(targetTime).toISOString()} delay=${Math.round(delay/1000)}s`);
+        console.log(`[task-scheduler] ${owner} at-task "${task.name}" target=${new Date(targetTime).toISOString()} delay=${Math.round(delay/1000)}s`);
         if (delay <= 0) {
-          // Already past — execute immediately and remove
-          console.log(`[task-scheduler] ${sessionId} at-task "${task.name}" is past due, executing now`);
-          this.executeTask(sessionId, task, false);
+          this.executeTask(owner, task, false);
           return;
         }
         job.timeoutId = setTimeout(() => {
-          this.executeTask(sessionId, task, false);
-        }, Math.min(delay, 2147483647)); // setTimeout max is ~24.8 days
-        console.log(`[task-scheduler] ${sessionId} scheduled at "${task.name}" in ${Math.round(delay / 1000)}s`);
+          this.executeTask(owner, task, false);
+        }, Math.min(delay, 2147483647));
         break;
       }
       case 'delay': {
-        // Simple delay from task creation time
         const delayMs = schedule.delayMs;
         if (!delayMs || delayMs < 5000) {
           console.warn(`[task-scheduler] Invalid delay ${delayMs}ms for task ${task.id}`);
@@ -240,46 +263,39 @@ export class TaskScheduler {
         const elapsed = Date.now() - (task.createdAt || Date.now());
         const remaining = delayMs - elapsed;
         if (remaining <= 0) {
-          console.log(`[task-scheduler] ${sessionId} delay-task "${task.name}" already elapsed, executing now`);
-          this.executeTask(sessionId, task, false);
+          this.executeTask(owner, task, false);
           return;
         }
         job.timeoutId = setTimeout(() => {
-          this.executeTask(sessionId, task, false);
+          this.executeTask(owner, task, false);
         }, remaining);
-        console.log(`[task-scheduler] ${sessionId} scheduled delay "${task.name}" in ${Math.round(remaining / 1000)}s`);
+        console.log(`[task-scheduler] ${owner} scheduled delay "${task.name}" in ${Math.round(remaining / 1000)}s`);
         break;
       }
     }
   }
 
-  /**
-   * Stop a job's timer/cron.
-   */
   private stopJob(job: ActiveJob): void {
     if (job.cronJob) { job.cronJob.stop(); job.cronJob = undefined; }
     if (job.intervalId) { clearInterval(job.intervalId); job.intervalId = undefined; }
     if (job.timeoutId) { clearTimeout(job.timeoutId); job.timeoutId = undefined; }
   }
 
-  /**
-   * Execute a task by spawning claude -p.
-   */
-  private async executeTask(sessionId: string, task: TaskDef, isDraft: boolean): Promise<void> {
-    const projectDir = this.projectDirs.get(sessionId);
-    if (!projectDir) return;
-    const callback = this.callbacks.get(sessionId);
+  // --- Task execution ---
+
+  private async executeTask(owner: string, task: TaskDef, isDraft: boolean): Promise<void> {
+    const state = this.owners.get(owner);
+    if (!state) return;
 
     const taggedPrompt = isDraft
       ? `[Scheduled task test run "${task.name}"]: ${task.prompt}\n\nThis is a TEST RUN. Execute the task and show the result. The user will review before activating the schedule.`
       : `[Scheduled task "${task.name}"]: ${task.prompt}`;
 
-    console.log(`[task-scheduler] ${sessionId} executing task "${task.name}" (draft=${isDraft})`);
+    console.log(`[task-scheduler] ${owner} executing task "${task.name}" (draft=${isDraft})`);
 
     try {
-      const result = await this.spawnClaudeForTask(projectDir, taggedPrompt);
+      const result = await this.spawnClaudeForTask(state.userHome, taggedPrompt, owner, state.mcpConfigDir);
 
-      // Update task state
       if (!isDraft) {
         task.lastRunAt = Date.now();
         task.lastStatus = 'ok';
@@ -295,16 +311,19 @@ export class TaskScheduler {
         isDraft,
       };
 
-      // For at-tasks, auto-remove after execution
+      // One-shot tasks: auto-remove after execution
       if (!isDraft && (task.schedule.kind === 'at' || task.schedule.kind === 'delay')) {
-        this.removeTaskFromFile(projectDir, task.id);
+        this.removeTaskFromFile(state.userHome, task.id);
       } else if (!isDraft) {
-        this.updateTaskInFile(projectDir, task);
+        this.updateTaskInFile(state.userHome, task);
       }
 
-      if (callback) callback(runResult);
+      // Broadcast to all connected sessions for this owner
+      for (const cb of state.callbacks) {
+        try { cb(runResult); } catch {}
+      }
     } catch (err: any) {
-      console.error(`[task-scheduler] ${sessionId} task "${task.name}" failed:`, err.message);
+      console.error(`[task-scheduler] ${owner} task "${task.name}" failed:`, err.message);
 
       if (!isDraft) {
         task.lastRunAt = Date.now();
@@ -312,18 +331,16 @@ export class TaskScheduler {
         task.lastError = err.message;
         task.consecutiveErrors = (task.consecutiveErrors || 0) + 1;
 
-        // Auto-disable after MAX_CONSECUTIVE_ERRORS
         if (task.consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
           task.enabled = false;
-          console.warn(`[task-scheduler] ${sessionId} task "${task.name}" auto-disabled after ${MAX_CONSECUTIVE_ERRORS} consecutive errors`);
+          console.warn(`[task-scheduler] ${owner} task "${task.name}" auto-disabled after ${MAX_CONSECUTIVE_ERRORS} consecutive errors`);
         }
 
-        this.updateTaskInFile(projectDir, task);
+        this.updateTaskInFile(state.userHome, task);
 
-        // Re-sync to stop the job if disabled
         if (!task.enabled) {
-          const tasks = this.readTasksFile(projectDir);
-          this.syncJobs(sessionId, projectDir, tasks);
+          const tasks = this.readTasks(state.userHome);
+          this.syncJobs(owner, tasks);
         }
       }
 
@@ -336,29 +353,48 @@ export class TaskScheduler {
         error: err.message,
       };
 
-      if (callback) callback(runResult);
+      for (const cb of state.callbacks) {
+        try { cb(runResult); } catch {}
+      }
     }
   }
 
   /**
    * Spawn an isolated claude -p process for task execution.
-   * Returns the text output.
    */
-  private spawnClaudeForTask(projectDir: string, prompt: string): Promise<string> {
+  private spawnClaudeForTask(userHome: string, prompt: string, owner: string, mcpConfigDir?: string): Promise<string> {
     return new Promise((resolve, reject) => {
+      const configDir = mcpConfigDir || userHome;
+      const mcpConfigPath = path.join(configDir, '.mcp-config.json');
+      const hasMcpConfig = fs.existsSync(mcpConfigPath);
+
+      // Owner-based tool whitelist
+      const allowedTools: string[] = [
+        'mcp__hopcode-tasks__schedule_task', 'mcp__hopcode-tasks__list_tasks', 'mcp__hopcode-tasks__delete_task', 'mcp__hopcode-tasks__activate_task',
+        'mcp__browser-proxy__browser_open', 'mcp__browser-proxy__browser_screenshot', 'mcp__browser-proxy__browser_click', 'mcp__browser-proxy__browser_type', 'mcp__browser-proxy__browser_key', 'mcp__browser-proxy__browser_navigate', 'mcp__browser-proxy__browser_evaluate', 'mcp__browser-proxy__browser_cookies', 'mcp__browser-proxy__browser_status', 'mcp__browser-proxy__browser_close', 'mcp__browser-proxy__browser_list', 'mcp__browser-proxy__browser_scroll',
+        'mcp__wechat__wechat_login', 'mcp__wechat__wechat_status', 'mcp__wechat__wechat_send', 'mcp__wechat__wechat_read', 'mcp__wechat__wechat_contacts', 'mcp__wechat__wechat_search',
+      ];
+      if (['jack', 'root'].includes(owner)) {
+        allowedTools.push('mcp__tesla__check_battery', 'mcp__tesla__wake_vehicle');
+      }
+      if (['jack', 'root', 'alex'].includes(owner)) {
+        allowedTools.push('mcp__yuyi-sales__sales_attendance', 'mcp__yuyi-sales__sales_bd_activity', 'mcp__yuyi-sales__sales_shipment_stats', 'mcp__yuyi-sales__sales_activation_stats', 'mcp__yuyi-sales__sales_order_stats', 'mcp__yuyi-sales__sales_team_overview', 'mcp__yuyi-sales__sales_dealer_ranking', 'mcp__yuyi-sales__sales_daily_report');
+      }
+
       const args = [
         '-p', prompt,
         '--output-format', 'stream-json',
         '--verbose',
         '--model', 'sonnet',
-        '--allowedTools', 'mcp__tesla__check_battery', 'mcp__tesla__wake_vehicle',
+        ...(hasMcpConfig ? ['--mcp-config', mcpConfigPath] : []),
+        '--allowedTools', ...allowedTools,
       ];
 
       const env = { ...process.env };
       delete env.CLAUDECODE;
 
       const child = spawn('claude', args, {
-        cwd: projectDir,
+        cwd: userHome,
         env,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -380,7 +416,6 @@ export class TaskScheduler {
           if (!line.trim()) continue;
           try {
             const event = JSON.parse(line);
-            // Extract text from assistant messages
             if (event.type === 'assistant' && event.message?.content) {
               for (const block of event.message.content) {
                 if (block.type === 'text' && block.text) {
@@ -392,7 +427,7 @@ export class TaskScheduler {
         }
       });
 
-      child.stderr?.on('data', () => {}); // ignore stderr
+      child.stderr?.on('data', () => {});
 
       child.on('close', (code) => {
         clearTimeout(timeout);
@@ -412,123 +447,94 @@ export class TaskScheduler {
     });
   }
 
-  /**
-   * Watch tasks.json for changes and re-sync.
-   */
-  private watchTasksFile(sessionId: string, projectDir: string): void {
-    // Stop existing watcher
-    const existing = this.watchers.get(sessionId);
-    if (existing) existing.close();
+  // --- File watching ---
 
-    const filePath = path.join(projectDir, 'tasks.json');
-    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private watchTasksFile(owner: string, userHome: string): void {
+    const state = this.owners.get(owner);
+    if (!state) return;
+    if (state.watcher) state.watcher.close();
 
+    const dir = path.join(userHome, '.hopcode');
+    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+
+    let debounce: ReturnType<typeof setTimeout> | null = null;
     try {
-      const watcher = fs.watch(projectDir, (eventType, filename) => {
+      state.watcher = fs.watch(dir, (eventType, filename) => {
         if (filename !== 'tasks.json') return;
-        // Debounce: wait 500ms for writes to settle
-        if (debounceTimer) clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => {
-          console.log(`[task-scheduler] ${sessionId} tasks.json changed, re-syncing`);
-          const tasks = this.readTasksFile(projectDir);
-          this.syncJobs(sessionId, projectDir, tasks);
+        if (debounce) clearTimeout(debounce);
+        debounce = setTimeout(() => {
+          console.log(`[task-scheduler] ${owner} tasks.json changed, re-syncing`);
+          const tasks = this.readTasks(userHome);
+          this.syncJobs(owner, tasks);
         }, 500);
       });
-      this.watchers.set(sessionId, watcher);
     } catch (e) {
-      console.error(`[task-scheduler] Failed to watch ${projectDir}:`, e);
+      console.error(`[task-scheduler] Failed to watch ${dir}:`, e);
     }
   }
 
-  /**
-   * Update a single task's runtime state in tasks.json.
-   */
-  private updateTaskInFile(projectDir: string, task: TaskDef): void {
-    const tasks = this.readTasksFile(projectDir);
+  // --- File mutations ---
+
+  private updateTaskInFile(userHome: string, task: TaskDef): void {
+    const tasks = this.readTasks(userHome);
     const idx = tasks.findIndex(t => t.id === task.id);
     if (idx >= 0) {
       tasks[idx] = { ...tasks[idx], ...task };
-      this.writeTasksFile(projectDir, tasks);
+      this.writeTasks(userHome, tasks);
     }
   }
 
-  /**
-   * Remove a task from tasks.json (for at-tasks after execution).
-   */
-  private removeTaskFromFile(projectDir: string, taskId: string): void {
-    const tasks = this.readTasksFile(projectDir);
+  private removeTaskFromFile(userHome: string, taskId: string): void {
+    const tasks = this.readTasks(userHome);
     const filtered = tasks.filter(t => t.id !== taskId);
     if (filtered.length !== tasks.length) {
-      this.writeTasksFile(projectDir, filtered);
+      this.writeTasks(userHome, filtered);
     }
   }
 
-  // --- Public API for server integration ---
+  // --- Public API ---
 
-  /**
-   * Get list of tasks for a session.
-   */
-  getTasks(sessionId: string): TaskDef[] {
-    const projectDir = this.projectDirs.get(sessionId);
-    if (!projectDir) return [];
-    return this.readTasksFile(projectDir);
+  getTasks(owner: string): TaskDef[] {
+    const state = this.owners.get(owner);
+    if (!state) return [];
+    return this.readTasks(state.userHome);
   }
 
-  /**
-   * Toggle a task's enabled state.
-   */
-  toggleTask(sessionId: string, taskId: string, enabled: boolean): void {
-    const projectDir = this.projectDirs.get(sessionId);
-    if (!projectDir) return;
-    const tasks = this.readTasksFile(projectDir);
+  toggleTask(owner: string, taskId: string, enabled: boolean): void {
+    const state = this.owners.get(owner);
+    if (!state) return;
+    const tasks = this.readTasks(state.userHome);
     const task = tasks.find(t => t.id === taskId);
     if (task) {
       task.enabled = enabled;
-      // Reset error count when re-enabling
       if (enabled) task.consecutiveErrors = 0;
-      this.writeTasksFile(projectDir, tasks);
-      this.syncJobs(sessionId, projectDir, tasks);
+      this.writeTasks(state.userHome, tasks);
+      this.syncJobs(owner, tasks);
     }
   }
 
-  /**
-   * Delete a task.
-   */
-  deleteTask(sessionId: string, taskId: string): void {
-    const projectDir = this.projectDirs.get(sessionId);
-    if (!projectDir) return;
-    this.removeTaskFromFile(projectDir, taskId);
-    const tasks = this.readTasksFile(projectDir);
-    this.syncJobs(sessionId, projectDir, tasks);
+  deleteTask(owner: string, taskId: string): void {
+    const state = this.owners.get(owner);
+    if (!state) return;
+    this.removeTaskFromFile(state.userHome, taskId);
+    const tasks = this.readTasks(state.userHome);
+    this.syncJobs(owner, tasks);
   }
 
-  /**
-   * Stop all jobs and watcher for a session.
-   */
-  stopAll(sessionId: string): void {
-    const jobMap = this.jobs.get(sessionId);
-    if (jobMap) {
-      for (const job of jobMap.values()) this.stopJob(job);
-      jobMap.clear();
-    }
-    this.jobs.delete(sessionId);
-
-    const watcher = this.watchers.get(sessionId);
-    if (watcher) watcher.close();
-    this.watchers.delete(sessionId);
-
-    this.callbacks.delete(sessionId);
-    this.projectDirs.delete(sessionId);
+  stopAll(owner: string): void {
+    const state = this.owners.get(owner);
+    if (!state) return;
+    for (const job of state.jobs.values()) this.stopJob(job);
+    state.jobs.clear();
+    if (state.watcher) state.watcher.close();
+    this.owners.delete(owner);
   }
 
-  /**
-   * Get count of active (scheduled) tasks for a session.
-   */
-  getActiveCount(sessionId: string): number {
-    const jobMap = this.jobs.get(sessionId);
-    if (!jobMap) return 0;
+  getActiveCount(owner: string): number {
+    const state = this.owners.get(owner);
+    if (!state) return 0;
     let count = 0;
-    for (const job of jobMap.values()) {
+    for (const job of state.jobs.values()) {
       if (job.task.status === 'active' && job.task.enabled) count++;
     }
     return count;

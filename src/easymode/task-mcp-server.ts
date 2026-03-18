@@ -2,15 +2,15 @@
 /**
  * MCP Server for Easy Mode Scheduled Tasks.
  * Runs as a subprocess of claude -p, communicates via stdio JSON-RPC.
- * Reads/writes tasks.json in PROJECT_DIR (passed via env).
+ * All tasks are user-level, stored in ~/.hopcode/tasks.json.
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
 
-const PROJECT_DIR = process.env.TASK_PROJECT_DIR || process.cwd();
-const TASKS_FILE = path.join(PROJECT_DIR, 'tasks.json');
+const USER_HOME = process.env.TASK_USER_HOME || process.env.HOME || '/root';
+const TASKS_FILE = path.join(USER_HOME, '.hopcode', 'tasks.json');
 const MAX_TASKS = 10;
 
 interface TaskDef {
@@ -60,7 +60,7 @@ const TOOLS = [
   },
   {
     name: 'list_tasks',
-    description: 'List all scheduled tasks in this project.',
+    description: 'List all scheduled tasks for this user.',
     inputSchema: { type: 'object', properties: {} },
   },
   {

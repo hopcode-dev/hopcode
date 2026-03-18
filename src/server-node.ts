@@ -5253,9 +5253,15 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     _pendingFiles.forEach(function(file, i) {
       var thumb = document.createElement('div');
       thumb.className = 'pf-thumb';
-      if (file.type && file.type.startsWith('image/')) {
+      if ((file.type && file.type.startsWith('image/')) || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(file.name)) {
         var img = document.createElement('img');
-        img.src = URL.createObjectURL(file);
+        img.style.cssText = 'width:100%;height:100%;object-fit:cover;';
+        // Use FileReader for reliable preview (objectURL fails on some mobile browsers)
+        (function(imgEl, f) {
+          var reader = new FileReader();
+          reader.onload = function(ev) { imgEl.src = ev.target.result; };
+          reader.readAsDataURL(f);
+        })(img, file);
         thumb.appendChild(img);
       } else {
         var nameEl = document.createElement('div');
@@ -10036,26 +10042,49 @@ function broadcastTaskCount(sessionId: string, info: EasySessionInfo, count: num
   }
 }
 
-function initTaskSchedulerForSession(sessionId: string, info: EasySessionInfo): void {
-  taskScheduler.loadAndSync(sessionId, info.cp.projectDir, (result: TaskRunResult) => {
-    // Inject result into chat history
-    info.cp.injectTaskResult(result.taskName, result.text, result.isDraft);
-    // Broadcast task count update
-    broadcastTaskCount(sessionId, info, taskScheduler.getActiveCount(sessionId));
-    // Push to WeChat Work if user is bound
+function initTaskSchedulerForUser(owner: string): void {
+  const linuxUser = usersConfig[owner]?.linuxUser || '';
+  const userHome = linuxUser ? getUserHome(linuxUser) : (process.env.HOME || '/root');
+
+  // Find any session for this owner to get mcpConfigDir
+  let mcpConfigDir: string | undefined;
+  for (const [, info] of easySessions) {
+    if (info.owner === owner) { mcpConfigDir = info.cp.projectDir; break; }
+  }
+
+  const taskCallback = (result: TaskRunResult) => {
+    // Push to all of this owner's sessions' UI
+    for (const [sid, info] of easySessions) {
+      if (info.owner !== owner) continue;
+      info.cp.injectTaskResult(result.taskName, result.text, result.isDraft);
+      broadcastTaskCount(sid, info, taskScheduler.getActiveCount(owner));
+    }
+    // Push to WeChat
     if (wecomBridge) {
       const prefix = result.isDraft ? `📋 测试预览 — ${result.taskName}` : `⏰ ${result.taskName}`;
-      wecomBridge.notifyUser(info.owner, `${prefix}\n${result.text}`).catch(() => {});
+      wecomBridge.notifyUser(owner, `${prefix}\n${result.text}`).catch(() => {});
     }
-  }, (count: number) => {
-    // Count changed (e.g. at-task auto-deleted, task enabled/disabled via file change)
-    broadcastTaskCount(sessionId, info, count);
-  });
+  };
+
+  const countCallback = (count: number) => {
+    for (const [sid, info] of easySessions) {
+      if (info.owner !== owner) continue;
+      broadcastTaskCount(sid, info, count);
+    }
+  };
+
+  taskScheduler.loadForUser(owner, userHome, taskCallback, countCallback, mcpConfigDir);
 }
 
-// Initialize scheduler for all restored sessions
-for (const [sessionId, info] of easySessions) {
-  try { initTaskSchedulerForSession(sessionId, info); } catch {}
+// Initialize scheduler for all restored users (deduplicated by owner)
+{
+  const initializedOwners = new Set<string>();
+  for (const [, info] of easySessions) {
+    if (!initializedOwners.has(info.owner)) {
+      initializedOwners.add(info.owner);
+      try { initTaskSchedulerForUser(info.owner); } catch {}
+    }
+  }
 }
 
 // ── WeChat Work Bridge ──
@@ -10081,7 +10110,7 @@ function createSessionForUser(owner: string): EasySessionInfo {
   };
   easySessions.set(sessionId, info);
   saveEasyRegistry();
-  initTaskSchedulerForSession(sessionId, info);
+  initTaskSchedulerForUser(info.owner);
   console.log(`[easy] Created session ${sessionId} for ${owner} via WeComBridge in ${projectDir}`);
   return info;
 }
@@ -10859,6 +10888,8 @@ const server = http.createServer(async (req, res) => {
         }, null, 2) + '\n');
         // chown
         try { execSync(`chown -R ${newUser}:${newUser} ${home}/.claude ${home}/coding`); } catch {}
+        // git safe.directory for version tracking
+        try { execSync(`sudo -u ${newUser} git config --global --add safe.directory '*'`); } catch {}
         // Sudoers (minimal)
         const sudoersFile = `/etc/sudoers.d/${newUser}`;
         if (!fs.existsSync(sudoersFile)) {
@@ -10870,6 +10901,44 @@ const server = http.createServer(async (req, res) => {
         saveUsersConfig();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: (e as Error).message }));
+      }
+    });
+    return;
+  }
+
+  // POST /api/wechat-push — receive incoming WeChat messages from wechat-service
+  if ((req.url || '').match(/^(?:\/terminal)?\/api\/wechat-push$/) && req.method === 'POST') {
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      try {
+        const { owner, contact, message, timestamp } = JSON.parse(Buffer.concat(chunks).toString());
+        if (!owner || !contact || !message) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'owner, contact, message required' }));
+          return;
+        }
+        // Find the owner's most recent active Easy Mode session
+        let targetSession: any = null;
+        let latestActivity = 0;
+        for (const [id, info] of easySessions) {
+          if (info.owner === owner && info.lastActivity > latestActivity) {
+            latestActivity = info.lastActivity;
+            targetSession = info;
+          }
+        }
+        if (targetSession) {
+          const text = `[微信消息 from ${contact}]: ${message}`;
+          targetSession.cp.sendMessage(text, 'wechat');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, session: targetSession.cp.sessionId }));
+        } else {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `No active session for owner: ${owner}` }));
+        }
       } catch (e) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: (e as Error).message }));
@@ -12163,7 +12232,7 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
     info = { cp, owner: wsAuth.username, project: projectParam, name: projectParam || sessionId, createdAt: Date.now(), lastActivity: Date.now(), connectedUsers: new Map(), sharedWith: new Set(), _fileAccessUsers: new Set(), _leaveTimers: new Map() };
     easySessions.set(sessionId, info);
     saveEasyRegistry();
-    initTaskSchedulerForSession(sessionId, info);
+    initTaskSchedulerForUser(info.owner);
     console.log(`[easy] Created ClaudeProcess for ${sessionId} in ${projectDir}`);
   } else {
     // Add this client as an additional listener (supports multiple browser tabs)
@@ -12243,7 +12312,7 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
   }));
 
   // Send task count on connect
-  const taskCount = taskScheduler.getActiveCount(sessionId);
+  const taskCount = taskScheduler.getActiveCount(info.owner);
   if (taskCount > 0) {
     clientWs.send(JSON.stringify({ type: 'task_count', count: taskCount }));
   }
@@ -12318,7 +12387,7 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
         }
       } else if (msg.type === 'list_tasks') {
         // Anyone can view tasks
-        const tasks = taskScheduler.getTasks(sessionId);
+        const tasks = taskScheduler.getTasks(info.owner);
         const isOwner = info ? connUser === info.owner : false;
         clientWs.send(JSON.stringify({
           type: 'tasks_list',
@@ -12339,9 +12408,9 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
               : '只有项目创建者可以管理定时任务',
           }));
         } else {
-          taskScheduler.toggleTask(sessionId, msg.taskId, msg.enabled);
+          taskScheduler.toggleTask(info.owner, msg.taskId, msg.enabled);
           // Broadcast updated task count
-          const count = taskScheduler.getActiveCount(sessionId);
+          const count = taskScheduler.getActiveCount(info.owner);
           for (const [, sockets] of info.connectedUsers) {
             for (const ws of sockets) {
               try { ws.send(JSON.stringify({ type: 'task_count', count })); } catch {}
@@ -12358,8 +12427,8 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
               : '只有项目创建者可以管理定时任务',
           }));
         } else {
-          taskScheduler.deleteTask(sessionId, msg.taskId);
-          const count = taskScheduler.getActiveCount(sessionId);
+          taskScheduler.deleteTask(info.owner, msg.taskId);
+          const count = taskScheduler.getActiveCount(info.owner);
           for (const [, sockets] of info.connectedUsers) {
             for (const ws of sockets) {
               try { ws.send(JSON.stringify({ type: 'task_count', count })); } catch {}
