@@ -107,9 +107,9 @@ const en: Record<string, string> = {
   'easy.welcome.skip': 'Or just start chatting',
 
   // Welcome prompts (sent to Claude when user clicks a card)
-  'easy.welcome.dashboard.prompt': 'Build me an impressive interactive sales analytics dashboard as a single HTML file. Include: 1) A header with company name and date range selector, 2) KPI cards showing Total Revenue, Orders, Avg Order Value, and Growth % with colored indicators, 3) A revenue trend line chart (use canvas or SVG, no external libs), 4) A pie/donut chart for sales by category, 5) A sortable top-10 products table with sparkline bars, 6) Make it responsive with a professional dark theme and smooth hover animations. Use realistic sample data for a tech accessories store. The file should be completely self-contained with no external dependencies.',
-  'easy.welcome.game.prompt': 'Build me a polished Snake game as a single HTML file. Include: 1) A canvas-based game board with a grid, 2) Smooth snake movement with arrow key and swipe controls (mobile friendly), 3) Score display and high score tracking (localStorage), 4) Speed increases every 5 points, 5) Game over screen with restart button, 6) A clean modern UI with dark theme, subtle grid lines, glowing snake effect, and food animations, 7) Start screen with instructions. Make it completely self-contained, no external dependencies. Make the visual quality impressive with gradients and subtle effects.',
-  'easy.welcome.portfolio.prompt': 'Build me a stunning personal portfolio website as a single HTML file. Include: 1) A hero section with animated gradient background, name "Alex Chen" and title "Creative Developer", with a subtle floating particle effect, 2) An About section with a brief bio and skill tags with hover effects, 3) A Projects section with 3 project cards that have image placeholders, hover lift animations and tech stack badges, 4) A Contact section with social links and a simple contact form (no backend needed), 5) Smooth scroll navigation with a sticky header that changes on scroll, 6) Fully responsive, modern glassmorphism design, dark theme. No external dependencies, all CSS and JS inline.',
+  'easy.welcome.dashboard.prompt': "I'd like a data dashboard. Before you start building, ask me 2–3 quick questions: what kind of business it's for, which metrics matter most to me, and my style preference (dark or light). Keep the questions short and casual, then build it once I answer.",
+  'easy.welcome.game.prompt': "I'd like a game. Before you start building, ask me 2–3 quick questions about the theme or visual style I want, and any special features or twists. Keep it casual, then build once I answer.",
+  'easy.welcome.portfolio.prompt': "I'd like a personal portfolio website. Before you start building, ask me 2–3 quick questions: my name, what I do, and the vibe or color style I prefer. Keep it short and friendly, then build it once I answer.",
 
   // Preview
   'easy.preview.share': 'Share',
@@ -430,9 +430,9 @@ const zh: Record<string, string> = {
   'easy.welcome.skip': '或直接开始对话',
 
   // 欢迎卡片点击后发送的提示词
-  'easy.welcome.dashboard.prompt': '帮我做一个漂亮的交互式销售数据分析仪表板，用单个 HTML 文件实现。要求：1) 顶部有公司名称和日期选择器，2) KPI 卡片显示总营收、订单数、客单价、增长率，带颜色指示，3) 用 canvas 或 SVG 画营收趋势折线图（不用外部库），4) 饼图/环形图展示各品类销售占比，5) 可排序的 Top 10 产品表格带迷你柱状图，6) 响应式布局，专业深色主题，丝滑的悬停动画。用一家数码配件店的模拟数据。文件完全独立，不依赖任何外部资源。',
-  'easy.welcome.game.prompt': '帮我做一个精致的贪吃蛇游戏，用单个 HTML 文件实现。要求：1) 基于 canvas 的游戏画布带网格，2) 流畅的蛇移动，支持方向键和手势滑动（手机友好），3) 分数显示和最高分记录（用 localStorage），4) 每得 5 分速度提升一级，5) 游戏结束画面带重新开始按钮，6) 干净现代的 UI，深色主题，细微网格线，发光蛇身效果和食物动画，7) 开始画面带操作说明。完全独立，不依赖外部资源。视觉效果要精美，用渐变和细腻特效。',
-  'easy.welcome.portfolio.prompt': '帮我做一个惊艳的个人作品集网站，用单个 HTML 文件实现。要求：1) 首屏区域带动态渐变背景，展示姓名"陈立"和头衔"创意开发者"，有微妙的浮动粒子效果，2) 关于我板块，简短个人介绍加技能标签带悬停效果，3) 项目展示区有 3 张项目卡片，带图片占位、悬停上浮动画和技术栈徽章，4) 联系方式区有社交链接和简单联系表单（不需要后端），5) 平滑滚动导航，固定头部会在滚动时变化，6) 完全响应式，现代毛玻璃风格设计，深色主题。不依赖外部资源，所有 CSS 和 JS 内联。',
+  'easy.welcome.dashboard.prompt': '我想要一个数据仪表板。先别急着做，先问我 2-3 个小问题：这是什么类型的业务？最关注哪类数据指标？偏好深色还是浅色风格？问完之后再开始制作。',
+  'easy.welcome.game.prompt': '我想要一个游戏。先别急着做，先问我 2-3 个小问题：想要什么主题或视觉风格？有没有特别想要的玩法或特色？问完之后再开始制作。',
+  'easy.welcome.portfolio.prompt': '我想要一个个人作品集网站。先别急着做，先问我 2-3 个小问题：我的名字、职业方向、以及喜欢什么风格或主色调。问完之后再开始制作。',
 
   // Preview
   'easy.preview.share': '分享',

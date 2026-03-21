@@ -982,6 +982,7 @@ function getLoginHtml(): string {
 // Session chooser HTML page - generated dynamically with server-side rendering
 async function buildSessionsHtml(username?: string): Promise<string> {
   const isRoot = isAdminUser(username);
+  const isProUser = ['alex', 'jack', 'root'].includes(username || '');
   let sessionList: { id: string; name: string; owner: string; createdAt: number; lastActivity: number; clients: number; mode?: string; project?: string; sharedWith?: string[]; onlineUsers?: string[]; _projectDir?: string }[] = [];
   try {
     // Root sees all sessions; other users see only their own
@@ -1287,12 +1288,26 @@ async function buildSessionsHtml(username?: string): Promise<string> {
         </div>
       </div>
       <div class="header-row2">
-        <div class="mode-toggle">
+        ${isProUser ? `<div class="mode-toggle">
           <a class="mode-btn" id="mode-easy" href="/terminal/easy" data-i18n="portal.mode_easy">Easy Mode</a>
           <a class="mode-btn" id="mode-pro" href="/terminal?action=new" data-i18n="portal.mode_pro">Pro Mode</a>
-        </div>
+        </div>` : ''}
         <a class="new-btn" id="new-project-btn" href="/terminal/easy" data-i18n="portal.btn_new_project">+ New Project</a>
       </div>
+      ${!isProUser ? `
+      <div id="project-name-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:999;display:flex;align-items:center;justify-content:center;padding:16px">
+        <div style="background:#fff;border-radius:20px;padding:28px 24px;width:100%;max-width:360px;box-shadow:0 8px 40px rgba(0,0,0,.18)">
+          <div style="font-size:18px;font-weight:700;color:#1d1d1f;margin-bottom:6px" data-i18n="portal.new_project_title">给项目起个名字</div>
+          <div style="font-size:13px;color:#86868b;margin-bottom:18px" data-i18n="portal.new_project_sub">方便以后找到它</div>
+          <input id="pn-input" type="text" placeholder="例：我的网站" maxlength="30"
+            style="width:100%;box-sizing:border-box;padding:11px 14px;border-radius:12px;border:1.5px solid #e5e5ea;font-size:15px;outline:none;margin-bottom:10px">
+          <button id="pn-auto" style="width:100%;padding:9px;border-radius:10px;border:1.5px solid #e5e5ea;background:#f5f5f7;font-size:13px;color:#007aff;cursor:pointer;margin-bottom:16px" data-i18n="portal.new_project_auto">随机生成名字</button>
+          <div style="display:flex;gap:8px">
+            <button id="pn-cancel" style="flex:1;padding:11px;border-radius:12px;border:1.5px solid #e5e5ea;background:#fff;font-size:14px;font-weight:600;color:#86868b;cursor:pointer" data-i18n="portal.new_project_cancel">取消</button>
+            <button id="pn-ok" style="flex:2;padding:11px;border-radius:12px;border:none;background:#007aff;color:#fff;font-size:14px;font-weight:600;cursor:pointer" data-i18n="portal.new_project_ok">开始创作 →</button>
+          </div>
+        </div>
+      </div>` : ''}
     </div>
     <div class="session-list">${cardsHtml}</div>
   </div>
@@ -1320,6 +1335,35 @@ async function buildSessionsHtml(username?: string): Promise<string> {
     setMode(savedMode);
     if (modeEasy) modeEasy.addEventListener('click', function(e) { e.preventDefault(); setMode('easy'); });
     if (modePro) modePro.addEventListener('click', function(e) { e.preventDefault(); setMode('pro'); });
+
+    // --- Project name modal (non-pro users) ---
+    var pnModal = document.getElementById('project-name-modal');
+    if (pnModal && newBtn) {
+      var pnInput = document.getElementById('pn-input');
+      var pnAuto = document.getElementById('pn-auto');
+      var pnCancel = document.getElementById('pn-cancel');
+      var pnOk = document.getElementById('pn-ok');
+      var _autoNames = ['我的作品','创意画廊','个人主页','趣味游戏','数据看板','小工具箱','灵感笔记','动态展示','互动故事','酷炫特效'];
+      function _randName() { return _autoNames[Math.floor(Math.random()*_autoNames.length)] + Math.floor(Math.random()*100); }
+      function showModal() {
+        pnInput.value = '';
+        pnModal.style.display = 'flex';
+        setTimeout(function(){ pnInput.focus(); }, 80);
+      }
+      function hideModal() { pnModal.style.display = 'none'; }
+      function doCreate() {
+        var name = pnInput.value.trim();
+        if (!name) { pnInput.focus(); return; }
+        hideModal();
+        window.location.href = '/terminal/easy?projectname=' + encodeURIComponent(name);
+      }
+      newBtn.addEventListener('click', function(e) { e.preventDefault(); showModal(); });
+      pnAuto.addEventListener('click', function() { pnInput.value = _randName(); pnInput.focus(); });
+      pnCancel.addEventListener('click', hideModal);
+      pnModal.addEventListener('click', function(e) { if (e.target === pnModal) hideModal(); });
+      pnOk.addEventListener('click', doCreate);
+      pnInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') doCreate(); });
+    }
 
     // --- Double-click to rename ---
     function startRename(nameEl) {
@@ -12164,7 +12208,9 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
       const now = new Date();
       const dateSuffix = String(now.getMonth() + 1).padStart(2, '0') + String(now.getDate()).padStart(2, '0')
         + '-' + String(now.getHours()).padStart(2, '0') + String(now.getMinutes()).padStart(2, '0');
-      const projectName = 'project-' + dateSuffix + randomBytes(1).toString('hex').charAt(0);
+      const rawProjectName = easyUrlCheck.searchParams.get('projectname') || '';
+      const sanitized = rawProjectName.replace(/[^\u4e00-\u9fff\w\-]/g, '').slice(0, 30);
+      const projectName = sanitized || ('project-' + dateSuffix + randomBytes(1).toString('hex').charAt(0));
       const easyHomeDir = (!auth.linuxUser || auth.linuxUser === 'root') ? (process.env.HOME || '/root') : `/home/${auth.linuxUser}`;
       const easyProjectDir = `${easyHomeDir}/coding/${projectName}`;
       try {
@@ -12227,6 +12273,11 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
 
   // Create new session: /terminal?action=new — proxy to PTY service
   if (action === 'new') {
+    if (!['alex', 'jack', 'root'].includes(auth.username || '')) {
+      res.writeHead(302, { 'Location': '/terminal/easy' });
+      res.end();
+      return;
+    }
     if (!(await checkSessionLimit(auth.username))) {
       const limitHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Session Limit</title><style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f5f5f7;color:#1d1d1f}.card{background:#fff;border-radius:16px;padding:40px;max-width:400px;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.08)}h2{margin:0 0 12px;font-size:20px}p{margin:0 0 24px;color:#86868b;font-size:15px;line-height:1.5}a{display:inline-block;padding:10px 24px;background:#007aff;color:#fff;border-radius:8px;text-decoration:none;font-size:15px}a:hover{background:#0066d6}</style></head><body><div class="card"><h2>Session Limit Reached</h2><p>You can have up to ${MAX_SESSIONS_PER_USER} sessions at the same time. Please close an existing session before creating a new one.</p><a href="/terminal">Back to Sessions</a></div></body></html>`;
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -12271,6 +12322,11 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
 
   // Terminal page: /terminal?session=xxx
   if (sessionId) {
+    if (!['alex', 'jack', 'root'].includes(auth.username || '')) {
+      res.writeHead(302, { 'Location': '/terminal/easy' });
+      res.end();
+      return;
+    }
     sendHtml(req, res, indexHtml, indexHtmlGz);
     return;
   }

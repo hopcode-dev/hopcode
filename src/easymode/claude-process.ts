@@ -307,7 +307,7 @@ export class ClaudeProcess {
       '-p', promptText,
       '--output-format', 'stream-json',
       '--verbose',
-      '--model', this.providerEnv.ANTHROPIC_DEFAULT_SONNET_MODEL ? 'sonnet' : 'MiniMax-M2.7-highspeed',
+      '--model', (this.providerEnv.ANTHROPIC_DEFAULT_SONNET_MODEL || this.providerEnv.ANTHROPIC_BASE_URL) ? 'sonnet' : 'MiniMax-M2.7-highspeed',
       '--include-partial-messages',
       '--mcp-config', mcpConfigPath,
       '--allowedTools',
