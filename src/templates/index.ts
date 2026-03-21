@@ -86,6 +86,7 @@ export function setupProjectTemplate(
   const baseUrl = process.env.PUBLIC_URL || 'https://gotong.gizwitsapi.com';
   const serveUrl = `${baseUrl}/serve/${encodeURIComponent(projectName)}/workspace/`;
   const deployInstructions = getDeployInstructions(username, projectName, port);
+  const liveUrl = config ? `${config.liveUrlBase}${projectName}/` : '';
 
   const content = template
     .replace(/\{\{SERVE_URL\}\}/g, serveUrl)
@@ -93,6 +94,8 @@ export function setupProjectTemplate(
     .replace(/\{\{PROJECT_DIR\}\}/g, projectDir)
     .replace(/\{\{PROJECT_NAME\}\}/g, projectName)
     .replace(/\{\{PORT\}\}/g, String(port))
+    .replace(/\{\{LIVE_URL\}\}/g, liveUrl)
+    .replace(/\{\{APP_COMMAND\}\}/g, config?.appCommand || '')
     .replace(/\{\{DEPLOY_INSTRUCTIONS\}\}/g, deployInstructions);
 
   // Also copy user's global CLAUDE.md content if it exists

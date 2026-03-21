@@ -60,6 +60,8 @@ interface UserConfig {
   disabled?: boolean;
   claudeProvider?: 'minimax' | 'glm' | 'ctok';
   claudeApiKey?: string;
+  portStart?: number;
+  portEnd?: number;
 }
 
 let usersConfig: Record<string, UserConfig> = {};
@@ -9635,6 +9637,7 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
     <div class="form-row">
       <input type="text" id="new-username" placeholder="Username" autocomplete="off" autocapitalize="off">
       <input type="text" id="new-password" placeholder="Password" autocomplete="off">
+      <input type="number" id="new-port-start" placeholder="端口起始 (如 8100)" style="width:160px" autocomplete="off">
       <button class="create-btn" id="create-btn">Create</button>
     </div>
   </div>
@@ -9700,10 +9703,19 @@ ${getI18nScript()}
             '<input class="provider-key" type="text" placeholder="API Key (留空保持不变)" data-user="' + u.username + '" value="">' +
             '<button class="save-provider-btn" data-user="' + u.username + '">保存</button>' +
             '</div>';
+          var portsInUseStr = u.portsInUse && u.portsInUse.length ? u.portsInUse.join(', ') : '无';
+          var portRow = '<div class="provider-row" style="margin-top:6px;align-items:center;gap:6px">' +
+            '<span style="font-size:12px;color:#6b7280;white-space:nowrap">端口范围</span>' +
+            '<input class="provider-key port-start-input" type="number" placeholder="开始" style="width:72px" data-user="' + u.username + '" value="' + (u.portStart||'') + '">' +
+            '<span style="color:#6b7280">—</span>' +
+            '<input class="provider-key port-end-input" type="number" placeholder="结束" style="width:72px" data-user="' + u.username + '" value="' + (u.portEnd||'') + '">' +
+            '<button class="save-provider-btn save-ports-btn" data-user="' + u.username + '">保存</button>' +
+            '<span style="font-size:11px;color:#9ca3af;margin-left:4px">在用: ' + portsInUseStr + '</span>' +
+            '</div>';
           card.innerHTML = '<div class="user-avatar" style="background:' + avatarColor(u.username) + '">' + initial + '</div>' +
             '<div class="user-info"><div class="user-name">' + u.username + ' ' + badges + '</div>' +
             '<div class="user-detail">' + u.linuxUser + ' · ' + (u.claudeProvider ? PROVIDER_LABELS[u.claudeProvider] : '默认') + (u.claudeApiKey ? ' ✓' : '') + '</div></div>' +
-            toggleBtnHtml + providerRow;
+            toggleBtnHtml + providerRow + portRow;
           list.appendChild(card);
 
           var toggleBtn = card.querySelector('.toggle-btn');
@@ -9739,6 +9751,23 @@ ${getI18nScript()}
               });
             });
           }
+
+          var savePortsBtn = card.querySelector('.save-ports-btn');
+          if (savePortsBtn) {
+            savePortsBtn.addEventListener('click', function() {
+              var name = this.getAttribute('data-user');
+              var startVal = card.querySelector('.port-start-input').value.trim();
+              var endVal = card.querySelector('.port-end-input').value.trim();
+              fetch('/terminal/api/admin/users/' + encodeURIComponent(name) + '/ports', {
+                method: 'PUT', credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ portStart: startVal ? parseInt(startVal) : null, portEnd: endVal ? parseInt(endVal) : null })
+              }).then(function(r) { return r.json(); }).then(function(d) {
+                if (d.success) { showToast(name + ' 端口已更新'); loadUsers(); }
+                else { showToast(d.error || 'Error', true); }
+              });
+            });
+          }
         });
       });
   }
@@ -9746,6 +9775,7 @@ ${getI18nScript()}
   document.getElementById('create-btn').addEventListener('click', function() {
     var username = document.getElementById('new-username').value.trim();
     var password = document.getElementById('new-password').value.trim();
+    var portStart = document.getElementById('new-port-start').value.trim();
     if (!username || !password) { showToast(_t('admin.error_empty'), true); return; }
     var btn = this;
     var origText = btn.textContent;
@@ -9755,7 +9785,7 @@ ${getI18nScript()}
     fetch('/terminal/api/admin/users', {
       method: 'POST', credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: username, password: password })
+      body: JSON.stringify({ username: username, password: password, portStart: portStart ? parseInt(portStart) : undefined })
     }).then(function(r) { return r.json(); }).then(function(d) {
       btn.disabled = false;
       btn.textContent = origText;
@@ -9764,6 +9794,7 @@ ${getI18nScript()}
         showToast(_t('admin.created', {name: username}));
         document.getElementById('new-username').value = '';
         document.getElementById('new-password').value = '';
+        document.getElementById('new-port-start').value = '';
         loadUsers();
       } else {
         showToast(d.error || 'Error', true);
@@ -10990,14 +11021,29 @@ const server = http.createServer(async (req, res) => {
     if (!isAuthenticated(req)) { res.writeHead(401); res.end('Unauthorized'); return; }
     const auth = getAuthInfo(req);
     if (!isAdminUser(auth.username)) { res.writeHead(403); res.end('Forbidden'); return; }
-    const users = Object.entries(usersConfig).map(([name, cfg]) => ({
-      username: name,
-      linuxUser: cfg.linuxUser,
-      disabled: !!cfg.disabled,
-      isAdmin: ADMIN_USERS.has(name),
-      claudeProvider: cfg.claudeProvider || null,
-      claudeApiKey: cfg.claudeApiKey ? '***' : null,
-    }));
+    const users = Object.entries(usersConfig).map(([name, cfg]) => {
+      // Parse ports in use from *-apps.conf
+      let portsInUse: number[] = [];
+      try {
+        const confPath = `/etc/nginx/${name}-apps.conf`;
+        const confContent = fs.readFileSync(confPath, 'utf-8');
+        const matches = confContent.matchAll(/proxy_pass\s+https?:\/\/127\.0\.0\.1:(\d+)/g);
+        const ports = new Set<number>();
+        for (const m of matches) ports.add(parseInt(m[1]));
+        portsInUse = Array.from(ports).sort((a, b) => a - b);
+      } catch {}
+      return {
+        username: name,
+        linuxUser: cfg.linuxUser,
+        disabled: !!cfg.disabled,
+        isAdmin: ADMIN_USERS.has(name),
+        claudeProvider: cfg.claudeProvider || null,
+        claudeApiKey: cfg.claudeApiKey ? '***' : null,
+        portStart: cfg.portStart ?? null,
+        portEnd: cfg.portEnd ?? null,
+        portsInUse,
+      };
+    });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(users));
     return;
@@ -11012,7 +11058,7 @@ const server = http.createServer(async (req, res) => {
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', async () => {
       try {
-        const { username: newUser, password: newPass } = JSON.parse(Buffer.concat(chunks).toString());
+        const { username: newUser, password: newPass, portStart: newPortStart } = JSON.parse(Buffer.concat(chunks).toString());
         if (!newUser || !newPass) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Username and password required' }));
@@ -11053,8 +11099,98 @@ const server = http.createServer(async (req, res) => {
           fs.writeFileSync(sudoersFile, `${newUser} ALL=(ALL) NOPASSWD: /usr/sbin/nginx -t\n${newUser} ALL=(ALL) NOPASSWD: /usr/bin/systemctl reload nginx\n`);
           fs.chmodSync(sudoersFile, 0o440);
         }
+        // Nginx per-user app infrastructure
+        const appScript = `/usr/local/bin/${newUser}-app`;
+        const appsConf = `/etc/nginx/${newUser}-apps.conf`;
+        const nginxSite = '/etc/nginx/sites-available/ghaa';
+        if (!fs.existsSync(appScript)) {
+          fs.writeFileSync(appScript, `#!/bin/bash
+# Helper script for ${newUser} to manage web apps under /${newUser}/
+# Usage: ${newUser}-app add <appname> <port> | remove <appname> | list
+CONF="/etc/nginx/${newUser}-apps.conf"
+case "$1" in
+  add)
+    [ -z "$2" ] || [ -z "$3" ] && echo "Usage: ${newUser}-app add <appname> <port>" && exit 1
+    APPNAME="$2"; PORT="$3"
+    [[ ! "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1024 ] || [ "$PORT" -gt 65535 ] && echo "Error: port must be 1024-65535" && exit 1
+    [[ ! "$APPNAME" =~ ^[a-zA-Z0-9_-]+$ ]] && echo "Error: invalid app name" && exit 1
+    grep -q "# app: $APPNAME" "$CONF" 2>/dev/null && echo "Error: '$APPNAME' already exists" && exit 1
+    cat >> "$CONF" <<NGINX
+# app: $APPNAME
+location /${newUser}/$APPNAME/ {
+    proxy_pass http://127.0.0.1:$PORT/;
+    proxy_http_version 1.1;
+    proxy_set_header Host \\$host;
+    proxy_set_header X-Real-IP \\$remote_addr;
+    proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
+    proxy_set_header Upgrade \\$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 86400;
+}
+NGINX
+    if sudo /usr/sbin/nginx -t 2>&1; then sudo /usr/bin/systemctl reload nginx && echo "Live at https://gotong.gizwitsapi.com/${newUser}/$APPNAME/"; else sed -i "/# app: $APPNAME/,/^$/d" "$CONF" && echo "nginx test failed" && exit 1; fi ;;
+  remove)
+    [ -z "$2" ] && echo "Usage: ${newUser}-app remove <appname>" && exit 1
+    APPNAME="$2"
+    grep -q "# app: $APPNAME" "$CONF" || { echo "Error: '$APPNAME' not found"; exit 1; }
+    sed -i "/# app: $APPNAME/,/^$/d" "$CONF"
+    sudo /usr/sbin/nginx -t 2>&1 && sudo /usr/bin/systemctl reload nginx && echo "Removed '$APPNAME'" ;;
+  list)
+    [ ! -s "$CONF" ] && echo "No apps configured." && exit 0
+    grep "# app:" "$CONF" | while read -r line; do
+      name=$(echo "$line" | sed 's/# app: //'); port=$(grep -A2 "$line" "$CONF" | grep proxy_pass | grep -oP ':\\K[0-9]+')
+      echo "  $name → port $port ��� https://gotong.gizwitsapi.com/${newUser}/$name/"; done ;;
+  *) echo "Usage: ${newUser}-app <add|remove|list>" ;;
+esac
+`);
+          fs.chmodSync(appScript, 0o755);
+        }
+        if (!fs.existsSync(appsConf)) {
+          fs.writeFileSync(appsConf, '');
+          try { execSync(`chown ${newUser}:${newUser} ${appsConf}`); } catch {}
+        }
+        // Add nginx include if not already present
+        try {
+          const nginxContent = fs.readFileSync(nginxSite, 'utf-8');
+          if (!nginxContent.includes(`${newUser}-apps.conf`)) {
+            const marker = '# QCR Annotation Tool';
+            const insertLine = `    # ${newUser}'s apps\n    include /etc/nginx/${newUser}-apps.conf;\n\n    `;
+            fs.writeFileSync(nginxSite, nginxContent.replace(marker, insertLine + marker));
+            execSync('/usr/sbin/nginx -t && /usr/bin/systemctl reload nginx');
+          }
+        } catch {}
         // Add to users.json
-        usersConfig[newUser] = { password: newPass, linuxUser: newUser };
+        const newCfg: UserConfig = { password: newPass, linuxUser: newUser };
+        if (newPortStart) { newCfg.portStart = parseInt(newPortStart); newCfg.portEnd = parseInt(newPortStart) + 99; }
+        usersConfig[newUser] = newCfg;
+        saveUsersConfig();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: (e as Error).message }));
+      }
+    });
+    return;
+  }
+
+  // PUT /api/admin/users/:username/ports — set port range
+  const portsMatch = (req.url || '').match(/^(?:\/terminal)?\/api\/admin\/users\/([^/]+)\/ports$/);
+  if (portsMatch && req.method === 'PUT') {
+    if (!isAuthenticated(req)) { res.writeHead(401); res.end('Unauthorized'); return; }
+    const auth = getAuthInfo(req);
+    if (!isAdminUser(auth.username)) { res.writeHead(403); res.end('Forbidden'); return; }
+    const targetUser = decodeURIComponent(portsMatch[1]!);
+    if (!usersConfig[targetUser]) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'User not found' })); return; }
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      try {
+        const { portStart, portEnd } = JSON.parse(Buffer.concat(chunks).toString());
+        if (portStart != null) usersConfig[targetUser]!.portStart = parseInt(portStart);
+        else delete usersConfig[targetUser]!.portStart;
+        if (portEnd != null) usersConfig[targetUser]!.portEnd = parseInt(portEnd);
+        else delete usersConfig[targetUser]!.portEnd;
         saveUsersConfig();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true }));
