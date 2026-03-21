@@ -58,6 +58,8 @@ interface UserConfig {
   password: string;
   linuxUser: string;
   disabled?: boolean;
+  claudeProvider?: 'minimax' | 'glm' | 'ctok';
+  claudeApiKey?: string;
 }
 
 let usersConfig: Record<string, UserConfig> = {};
@@ -93,6 +95,64 @@ function saveUsersConfig(): void {
   } catch (e) {
     console.error('[auth] Failed to save users.json:', (e as Error).message);
   }
+}
+
+function getProviderEnv(username: string): Record<string, string> {
+  const cfg = usersConfig[username];
+  console.log(`[getProviderEnv] username=${username} claudeProvider=${cfg?.claudeProvider}`);
+  if (!cfg?.claudeProvider) return {};
+  const key = cfg.claudeApiKey || '';
+  if (cfg.claudeProvider === 'minimax' && key) {
+    return {
+      ANTHROPIC_AUTH_TOKEN: key,
+      ANTHROPIC_BASE_URL: 'https://api.minimaxi.com/anthropic',
+      API_TIMEOUT_MS: '3000000',
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+      ANTHROPIC_MODEL: 'MiniMax-M2.5',
+      ANTHROPIC_SMALL_FAST_MODEL: 'MiniMax-M2.5',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'MiniMax-M2.5',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: 'MiniMax-M2.5',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'MiniMax-M2.5',
+    };
+  }
+  if (cfg.claudeProvider === 'glm') {
+    // GLM: always read from ~/.claude/glm.key file first, fallback to config key
+    const linuxUser = cfg.linuxUser || username;
+    const homeDir = linuxUser === 'root' ? '/root' : `/home/${linuxUser}`;
+    const glmKeyPath = path.join(homeDir, '.claude', 'glm.key');
+    let glmKey = '';
+    try {
+      glmKey = fs.readFileSync(glmKeyPath, 'utf-8').trim();
+      console.log(`[getProviderEnv] Read GLM key from ${glmKeyPath}: ${glmKey.substring(0, 20)}...`);
+    } catch (e: any) {
+      console.log(`[getProviderEnv] Failed to read GLM key from ${glmKeyPath}: ${e.message}`);
+    }
+    if (!glmKey && key) glmKey = key; // fallback to config key
+    console.log(`[getProviderEnv] glmKey length=${glmKey.length}`);
+    if (glmKey) {
+      return {
+        ANTHROPIC_AUTH_TOKEN: glmKey,
+        ANTHROPIC_BASE_URL: 'https://open.bigmodel.cn/api/anthropic',
+        API_TIMEOUT_MS: '3000000',
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm-4.5-air',
+        ANTHROPIC_DEFAULT_SONNET_MODEL: 'glm-4.7',
+        ANTHROPIC_DEFAULT_OPUS_MODEL: 'glm-5',
+      };
+    }
+  }
+  if (cfg.claudeProvider === 'ctok') {
+    // ctok.ai — use clean HOME so settings.json MiniMax vars don't override
+    const ctokKey = cfg.claudeApiKey || '';
+    return {
+      HOME: '/home/hopcode/.claude-ctok',
+      ANTHROPIC_AUTH_TOKEN: ctokKey,
+      ANTHROPIC_BASE_URL: 'https://api.ctok.ai',
+      API_TIMEOUT_MS: '3000000',
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+    };
+  }
+  return {};
 }
 
 function makeAuthToken(username: string): string {
@@ -4111,7 +4171,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     var escaped = escHtml(fixed);
     var withLinks = escaped.replace(/(https?:\\/\\/[^\\s<>'")\`\\u3000-\\u303F\\uFF00-\\uFF60]+)/g, function(m) {
       // Strip trailing punctuation (ASCII + CJK) that is not part of the URL
-      var url = m.replace(/[).,;:!?\`'"\\]}>\\u3001\\u3002\\uFF01\\uFF09\\uFF0C\\uFF0E\\uFF1A\\uFF1B\\uFF1F\\uFF5E]+$/, '');
+      var url = m.replace(/[).,;:!?\`'"\\]}>\\u3001\\u3002\\uFF01\\uFF09\\uFF0C\\uFF0E\\uFF1A\\uFF1B\\uFF1F\\uFF5E*]+$/, '');
       if (!url) url = m;
       var trail = m.substring(url.length);
       return '<a href="' + url + '" class="chat-link" style="color:#007aff;word-break:break-all;text-decoration:underline;">' + url + '</a>' + trail;
@@ -9505,6 +9565,14 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
 .toggle-btn:hover { border-color:#60a5fa; color:#60a5fa; }
 .toggle-btn.enable-btn { border-color:#22c55e; color:#22c55e; }
 .toggle-btn.enable-btn:hover { background:rgba(34,197,94,0.1); }
+.user-card { flex-wrap:wrap; }
+.provider-row { width:100%; display:flex; gap:6px; align-items:center; margin-top:8px; padding-top:8px; border-top:1px solid #0f172a; flex-wrap:wrap; }
+.provider-select { padding:5px 8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:12px; cursor:pointer; }
+.provider-key { flex:1; min-width:120px; padding:5px 8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:12px; outline:none; }
+.provider-key:focus { border-color:#60a5fa; }
+.provider-key::placeholder { color:#475569; }
+.save-provider-btn { padding:5px 12px; border-radius:6px; border:none; background:#3b82f6; color:#fff; font-size:12px; cursor:pointer; white-space:nowrap; }
+.save-provider-btn:hover { background:#2563eb; }
 
 .toast { position:fixed; bottom:30px; left:50%; transform:translateX(-50%) translateY(20px); background:#1e293b; color:#e2e8f0; padding:10px 24px; border-radius:20px; font-size:14px; opacity:0; transition:all 0.3s; z-index:100; box-shadow:0 4px 12px rgba(0,0,0,0.4); }
 .toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
@@ -9554,6 +9622,8 @@ ${getI18nScript()}
     setTimeout(function(){ t.classList.remove('show'); }, 2500);
   }
 
+  var PROVIDER_LABELS = { minimax: 'MiniMax', glm: 'GLM', ctok: 'CTOK', '': '默认(MiniMax)' };
+
   function loadUsers() {
     fetch('/terminal/api/admin/users', { credentials: 'include' })
       .then(function(r) { return r.json(); })
@@ -9567,35 +9637,61 @@ ${getI18nScript()}
           var badges = '';
           if (u.isAdmin) badges += '<span class="badge badge-admin">' + _t('admin.admin_badge') + '</span>';
           if (u.disabled) badges += '<span class="badge badge-disabled">' + _t('admin.disabled') + '</span>';
-          var btnHtml = '';
+          var toggleBtnHtml = '';
           if (!u.isAdmin) {
             if (u.disabled) {
-              btnHtml = '<button class="toggle-btn enable-btn" data-user="' + u.username + '">' + _t('admin.enable') + '</button>';
+              toggleBtnHtml = '<button class="toggle-btn enable-btn" data-user="' + u.username + '">' + _t('admin.enable') + '</button>';
             } else {
-              btnHtml = '<button class="toggle-btn" data-user="' + u.username + '">' + _t('admin.disable') + '</button>';
+              toggleBtnHtml = '<button class="toggle-btn" data-user="' + u.username + '">' + _t('admin.disable') + '</button>';
             }
           }
+          var curProvider = u.claudeProvider || '';
+          var providerRow = '<div class="provider-row">' +
+            '<select class="provider-select" data-user="' + u.username + '">' +
+            '<option value=""' + (curProvider===''?' selected':'') + '>默认(MiniMax)</option>' +
+            '<option value="minimax"' + (curProvider==='minimax'?' selected':'') + '>MiniMax</option>' +
+            '<option value="glm"' + (curProvider==='glm'?' selected':'') + '>GLM</option>' +
+            '<option value="ctok"' + (curProvider==='ctok'?' selected':'') + '>CTOK</option>' +
+            '</select>' +
+            '<input class="provider-key" type="text" placeholder="API Key (留空保持不变)" data-user="' + u.username + '" value="">' +
+            '<button class="save-provider-btn" data-user="' + u.username + '">保存</button>' +
+            '</div>';
           card.innerHTML = '<div class="user-avatar" style="background:' + avatarColor(u.username) + '">' + initial + '</div>' +
             '<div class="user-info"><div class="user-name">' + u.username + ' ' + badges + '</div>' +
-            '<div class="user-detail">' + u.linuxUser + ' · ' + (u.disabled ? _t('admin.disabled') : _t('admin.enabled')) + '</div></div>' +
-            btnHtml;
+            '<div class="user-detail">' + u.linuxUser + ' · ' + (u.claudeProvider ? PROVIDER_LABELS[u.claudeProvider] : '默认') + (u.claudeApiKey ? ' ✓' : '') + '</div></div>' +
+            toggleBtnHtml + providerRow;
           list.appendChild(card);
 
-          var btn = card.querySelector('.toggle-btn');
-          if (btn) {
-            btn.addEventListener('click', function() {
+          var toggleBtn = card.querySelector('.toggle-btn');
+          if (toggleBtn) {
+            toggleBtn.addEventListener('click', function() {
               var name = this.getAttribute('data-user');
               var msg = u.disabled ? _t('admin.confirm_enable', {name: name}) : _t('admin.confirm_disable', {name: name});
               if (!confirm(msg)) return;
               fetch('/terminal/api/admin/users/' + encodeURIComponent(name) + '/toggle', {
                 method: 'PUT', credentials: 'include'
               }).then(function(r) { return r.json(); }).then(function(d) {
-                if (d.success) {
-                  showToast(_t('admin.updated', {name: name}));
-                  loadUsers();
-                } else {
-                  showToast(d.error || 'Error', true);
-                }
+                if (d.success) { showToast(_t('admin.updated', {name: name})); loadUsers(); }
+                else { showToast(d.error || 'Error', true); }
+              });
+            });
+          }
+
+          var saveBtn = card.querySelector('.save-provider-btn');
+          if (saveBtn) {
+            saveBtn.addEventListener('click', function() {
+              var name = this.getAttribute('data-user');
+              var sel = card.querySelector('.provider-select');
+              var keyInput = card.querySelector('.provider-key');
+              var provider = sel.value;
+              var apiKey = keyInput.value.trim();
+              fetch('/terminal/api/admin/users/' + encodeURIComponent(name) + '/provider', {
+                method: 'PUT', credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ provider: provider || null, apiKey: apiKey || undefined })
+              }).then(function(r) { return r.json(); }).then(function(d) {
+                if (d.success) { showToast(name + ' 已更新'); loadUsers(); }
+                else { showToast(d.error || 'Error', true); }
               });
             });
           }
@@ -9948,6 +10044,7 @@ function loadEasyRegistry(): void {
       const cp = new ClaudeProcess(entry.id, entry.projectDir, noop);
       cp.owner = entry.owner;
       cp.linuxUser = usersConfig[entry.owner]?.linuxUser || '';
+      cp.providerEnv = getProviderEnv(entry.owner);
       cp.removeListener(noop);
       const info: EasySessionInfo = {
         cp,
@@ -10005,6 +10102,7 @@ function scanOrphanEasySessions(): void {
           const cp = new ClaudeProcess(id, projDir, noop);
           cp.owner = owner;
           cp.linuxUser = usersConfig[owner]?.linuxUser || '';
+          cp.providerEnv = getProviderEnv(owner);
           cp.removeListener(noop);
           const stat = fs.statSync(stateFile);
           easySessions.set(id, {
@@ -10033,6 +10131,8 @@ loadEasyRegistry();
 
 // Task scheduler for Easy Mode scheduled tasks
 const taskScheduler = new TaskScheduler();
+// Track which owners have been initialized to prevent duplicate callbacks
+const initializedTaskOwners = new Set<string>();
 
 function broadcastTaskCount(sessionId: string, info: EasySessionInfo, count: number): void {
   for (const [, sockets] of info.connectedUsers) {
@@ -10043,6 +10143,9 @@ function broadcastTaskCount(sessionId: string, info: EasySessionInfo, count: num
 }
 
 function initTaskSchedulerForUser(owner: string): void {
+  // Mark as initialized to prevent duplicate callbacks
+  initializedTaskOwners.add(owner);
+
   const linuxUser = usersConfig[owner]?.linuxUser || '';
   const userHome = linuxUser ? getUserHome(linuxUser) : (process.env.HOME || '/root');
 
@@ -10101,6 +10204,7 @@ function createSessionForUser(owner: string): EasySessionInfo {
   const cp = new ClaudeProcess(sessionId, projectDir, noop);
   cp.owner = owner;
   cp.linuxUser = userCfg?.linuxUser || '';
+  cp.providerEnv = getProviderEnv(owner);
   cp.removeListener(noop);
   const info: EasySessionInfo = {
     cp, owner, project: projectName, name: projectName,
@@ -10110,7 +10214,10 @@ function createSessionForUser(owner: string): EasySessionInfo {
   };
   easySessions.set(sessionId, info);
   saveEasyRegistry();
-  initTaskSchedulerForUser(info.owner);
+  // Only initialize task scheduler if this owner hasn't been initialized yet
+  if (!initializedTaskOwners.has(owner)) {
+    initTaskSchedulerForUser(owner);
+  }
   console.log(`[easy] Created session ${sessionId} for ${owner} via WeComBridge in ${projectDir}`);
   return info;
 }
@@ -10437,7 +10544,11 @@ const server = http.createServer(async (req, res) => {
           if (!targetId) {
             // Create new easy session for the same project dir
             targetId = 'easy_' + randomBytes(12).toString('hex');
-            fs.mkdirSync(projectDir, { recursive: true });
+            try { fs.mkdirSync(projectDir, { recursive: true }); } catch {
+              if (auth.linuxUser && auth.linuxUser !== 'root') {
+                try { execFileSync('sudo', ['-u', auth.linuxUser, 'mkdir', '-p', projectDir], { timeout: 3000 }); } catch {}
+              }
+            }
             if (!fs.existsSync(path.join(projectDir, 'CLAUDE.md'))) {
               try { setupProjectTemplate(projectDir, auth.linuxUser || auth.username, projectName); } catch {}
             }
@@ -10840,6 +10951,8 @@ const server = http.createServer(async (req, res) => {
       linuxUser: cfg.linuxUser,
       disabled: !!cfg.disabled,
       isAdmin: ADMIN_USERS.has(name),
+      claudeProvider: cfg.claudeProvider || null,
+      claudeApiKey: cfg.claudeApiKey ? '***' : null,
     }));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(users));
@@ -10969,6 +11082,43 @@ const server = http.createServer(async (req, res) => {
     saveUsersConfig();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ success: true, disabled: !!usersConfig[targetUser]!.disabled }));
+    return;
+  }
+
+  // PUT /api/admin/users/:username/provider — set claude provider + key
+  const providerMatch = (req.url || '').match(/^(?:\/terminal)?\/api\/admin\/users\/([^/]+)\/provider$/);
+  if (providerMatch && req.method === 'PUT') {
+    if (!isAuthenticated(req)) { res.writeHead(401); res.end('Unauthorized'); return; }
+    const auth = getAuthInfo(req);
+    if (!isAdminUser(auth.username)) { res.writeHead(403); res.end('Forbidden'); return; }
+    const targetUser = decodeURIComponent(providerMatch[1]!);
+    if (!usersConfig[targetUser]) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'User not found' }));
+      return;
+    }
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      try {
+        const { provider, apiKey } = JSON.parse(Buffer.concat(chunks).toString());
+        if (provider) usersConfig[targetUser]!.claudeProvider = provider;
+        else delete usersConfig[targetUser]!.claudeProvider;
+        if (apiKey !== undefined) usersConfig[targetUser]!.claudeApiKey = apiKey || undefined;
+        saveUsersConfig();
+        // Update providerEnv on any live sessions for this user
+        for (const [, info] of easySessions) {
+          if (info.owner === targetUser) {
+            info.cp.providerEnv = getProviderEnv(targetUser);
+          }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: (e as Error).message }));
+      }
+    });
     return;
   }
 
@@ -11611,15 +11761,31 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
 
       const actualName = await autoRename(targetDir, filename, false);
       const filePath = path.join(targetDir, actualName);
-      await fs.promises.writeFile(filePath, body);
 
       // Multi-user: chown file to appropriate uid/gid
       // For Easy Mode uploads, use the session owner's uid/gid so files are owned correctly
       const chownUser = uploadEasyAccess && uploadEasyInfo
         ? getUserPosixInfo(uploadEasyInfo.owner)
         : posixUser;
-      if (chownUser) {
-        try { fs.chownSync(filePath, chownUser.uid, chownUser.gid); } catch {}
+
+      try {
+        await fs.promises.writeFile(filePath, body);
+        if (chownUser) {
+          try { fs.chownSync(filePath, chownUser.uid, chownUser.gid); } catch {}
+        }
+      } catch {
+        // hopcode can't write to user dirs — use sudo tee as the target linux user
+        const writeUser = (uploadEasyAccess && uploadEasyInfo ? uploadEasyInfo.owner : null)
+          || auth.linuxUser;
+        if (writeUser && writeUser !== 'root') {
+          await new Promise<void>((resolve, reject) => {
+            const proc = spawn('sudo', ['-u', writeUser, 'tee', filePath], { stdio: ['pipe', 'ignore', 'ignore'] });
+            proc.stdin.end(body);
+            proc.on('close', (code) => code === 0 ? resolve() : reject(new Error(`tee failed: ${code}`)));
+          });
+        } else {
+          throw new Error('Permission denied writing file');
+        }
       }
 
       // Auto-commit uploaded file to version history
@@ -11941,8 +12107,25 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
     req.on('end', async () => {
       if (aborted) return;
       try {
-        await fs.promises.mkdir(userDir, { recursive: true, mode: 0o755 });
-        await fs.promises.writeFile(filePath, Buffer.concat(chunks));
+        try {
+          await fs.promises.mkdir(userDir, { recursive: true, mode: 0o755 });
+        } catch {
+          if (auth.linuxUser && auth.linuxUser !== 'root') {
+            execFileSync('sudo', ['-u', auth.linuxUser, 'mkdir', '-p', userDir], { timeout: 3000 });
+          }
+        }
+        const fileData = Buffer.concat(chunks);
+        try {
+          await fs.promises.writeFile(filePath, fileData);
+        } catch {
+          if (auth.linuxUser && auth.linuxUser !== 'root') {
+            await new Promise<void>((resolve, reject) => {
+              const proc = spawn('sudo', ['-u', auth.linuxUser, 'tee', filePath], { stdio: ['pipe', 'ignore', 'ignore'] });
+              proc.stdin.end(fileData);
+              proc.on('close', (code) => code === 0 ? resolve() : reject(new Error('tee failed')));
+            });
+          } else throw new Error('Permission denied');
+        }
         // Multi-user: chown directory and file to user's uid/gid
         const posixUser = auth.linuxUser ? getUserPosixInfo(auth.linuxUser) : null;
         if (posixUser) {
@@ -12058,8 +12241,14 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
     const proHomeDir = (!auth.linuxUser || auth.linuxUser === 'root') ? (process.env.HOME || '/root') : `/home/${auth.linuxUser}`;
     const proProjectDir = `${proHomeDir}/coding/${proProjectName}`;
     try {
-      // Create project directory with template
-      fs.mkdirSync(proProjectDir, { recursive: true });
+      // Create project directory with template (use sudo if hopcode can't write to user's home)
+      try {
+        fs.mkdirSync(proProjectDir, { recursive: true });
+      } catch {
+        if (auth.linuxUser && auth.linuxUser !== 'root') {
+          execFileSync('sudo', ['-u', auth.linuxUser, 'mkdir', '-p', proProjectDir], { timeout: 3000 });
+        }
+      }
       try { setupProjectTemplate(proProjectDir, auth.linuxUser || auth.username, proProjectName); } catch {}
       const sessionBody: Record<string, any> = { id, name: proProjectName, owner: auth.username, cwd: proProjectDir, projectDir: proProjectDir };
       if (auth.linuxUser) sessionBody.linuxUser = auth.linuxUser;
@@ -12229,6 +12418,7 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
     cp = new ClaudeProcess(sessionId, projectDir, sendToClient);
     cp.owner = wsAuth.username;
     cp.linuxUser = wsAuth.linuxUser || '';
+    cp.providerEnv = getProviderEnv(wsAuth.username);
     info = { cp, owner: wsAuth.username, project: projectParam, name: projectParam || sessionId, createdAt: Date.now(), lastActivity: Date.now(), connectedUsers: new Map(), sharedWith: new Set(), _fileAccessUsers: new Set(), _leaveTimers: new Map() };
     easySessions.set(sessionId, info);
     saveEasyRegistry();

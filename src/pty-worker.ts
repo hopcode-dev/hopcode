@@ -142,7 +142,7 @@ function initPty(msg: InitMessage) {
 
   if (msg.linuxUser) {
     // Multi-user mode: spawn shell as target Linux user
-    ptyProcess = pty.spawn('/bin/su', ['-', msg.linuxUser], {
+    ptyProcess = pty.spawn('sudo', ['-i', '-u', msg.linuxUser], {
       name: 'xterm-256color',
       cols: 120,
       rows: 30,

@@ -42,3 +42,4 @@ package-lock.json
 users.json
 .cursor/
 data/recordings/
+src/easymode/tesla-mcp-server/tokens.json

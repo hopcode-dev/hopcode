@@ -7,11 +7,14 @@
 import { spawn, execFileSync, ChildProcess } from 'child_process';
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync } from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 
 const MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'task-mcp-server.ts');
 const BROWSER_MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'browser-mcp-server.ts');
 const WECHAT_MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'wechat-mcp-server.ts');
 const YUYI_SALES_MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'yuyi-sales-mcp-server.ts');
+const TESLA_MCP_SERVER_SCRIPT = '/home/chief/chief-workspace/tesla/mcp-server.mjs';
+const SEARCH_MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'search-mcp-server.ts');
 import type { EasyServerMessage } from './protocol.js';
 import { VersionTracker } from './version-tracker.js';
 
@@ -54,11 +57,12 @@ export class ClaudeProcess {
   private _messageQueue: { text: string; sender?: string; mentions?: string[]; participantCount: number }[] = [];
   private _idleTimer: ReturnType<typeof setTimeout> | null = null;
   private _idleNotified = false;
-  private static IDLE_TIMEOUT = 3 * 60 * 1000; // 3 min without output = stuck
+  private static IDLE_TIMEOUT = 2 * 60 * 1000; // 2 min without output = stuck
 
   private stateFile: string;
   owner: string = '';
   linuxUser: string = '';
+  providerEnv: Record<string, string> = {};
 
   constructor(
     sessionId: string,
@@ -158,14 +162,24 @@ export class ClaudeProcess {
   }
 
   private saveState(): void {
+    const data = JSON.stringify({
+      claudeSessionId: this.claudeSessionId,
+      history: this.history,
+      lastPreviewUrl: this.lastPreviewUrl,
+      previewUrls: this.previewUrls,
+    });
     try {
-      writeFileSync(this.stateFile, JSON.stringify({
-        claudeSessionId: this.claudeSessionId,
-        history: this.history,
-        lastPreviewUrl: this.lastPreviewUrl,
-        previewUrls: this.previewUrls,
-      }), 'utf-8');
-    } catch {}
+      writeFileSync(this.stateFile, data, 'utf-8');
+    } catch {
+      // hopcode can't write to user project dirs — use sudo
+      if (this.linuxUser && this.linuxUser !== 'root') {
+        try {
+          execFileSync('sudo', ['-u', this.linuxUser, 'tee', this.stateFile], {
+            input: data, timeout: 3000, stdio: ['pipe', 'ignore', 'ignore'],
+          });
+        } catch {}
+      }
+    }
   }
 
   sendMessage(text: string, sender?: string, mentions?: string[], participantCount: number = 1): void {
@@ -266,24 +280,34 @@ export class ClaudeProcess {
           command: tsxPath,
           args: [YUYI_SALES_MCP_SERVER_SCRIPT],
         },
+        'search': {
+          command: tsxPath,
+          args: [SEARCH_MCP_SERVER_SCRIPT],
+          env: {
+            SEARXNG_URL: 'http://localhost:8888',
+          },
+        },
+        // Tesla MCP - only for jack and root
+        ...((['jack', 'root'].includes(this.owner)) ? {
+          'tesla': {
+            command: 'node',
+            args: [TESLA_MCP_SERVER_SCRIPT],
+          },
+        } : {}),
       },
     };
-    const mcpConfigPath = path.join(this.projectDir, '.mcp-config.json');
-    try { mkdirSync(this.projectDir, { recursive: true }); } catch {}
-    try {
-      writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig));
-      // Ensure file is owned by the linux user
-      if (this.linuxUser && this.linuxUser !== 'root') {
-        try { execFileSync('chown', [`${this.linuxUser}:${this.linuxUser}`, mcpConfigPath], { timeout: 2000 }); } catch {}
-      }
-    } catch {}
+    // Write to a tmp dir we control (hopcode service user can't write to user project dirs)
+    const tmpDir = path.join(os.tmpdir(), 'hopcode-mcp');
+    try { mkdirSync(tmpDir, { recursive: true }); } catch {}
+    const mcpConfigPath = path.join(tmpDir, `${this.sessionId}.json`);
+    try { writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig)); } catch {}
 
     // Build command args
     const args = [
       '-p', promptText,
       '--output-format', 'stream-json',
       '--verbose',
-      '--model', 'sonnet',
+      '--model', this.providerEnv.ANTHROPIC_DEFAULT_SONNET_MODEL ? 'sonnet' : 'MiniMax-M2.7-highspeed',
       '--include-partial-messages',
       '--mcp-config', mcpConfigPath,
       '--allowedTools',
@@ -292,6 +316,8 @@ export class ClaudeProcess {
       'mcp__wechat__wechat_login', 'mcp__wechat__wechat_status', 'mcp__wechat__wechat_send', 'mcp__wechat__wechat_read', 'mcp__wechat__wechat_contacts', 'mcp__wechat__wechat_search',
       ...(['jack', 'root', 'alex'].includes(this.owner) ? ['mcp__yuyi-sales__sales_attendance', 'mcp__yuyi-sales__sales_bd_activity', 'mcp__yuyi-sales__sales_shipment_stats', 'mcp__yuyi-sales__sales_activation_stats', 'mcp__yuyi-sales__sales_order_stats', 'mcp__yuyi-sales__sales_team_overview', 'mcp__yuyi-sales__sales_dealer_ranking', 'mcp__yuyi-sales__sales_daily_report'] : []),
       ...(['jack', 'root'].includes(this.owner) ? ['mcp__tesla__check_battery', 'mcp__tesla__wake_vehicle'] : []),
+      'mcp__search__web_search',
+      'mcp__search__news_search',
       '--append-system-prompt',
       `You are 小码 (Xiaoma), a friendly action-oriented AI assistant in Hopcode Easy Mode. When users confirm or agree (好的/试试/做吧/go ahead/ok), START DOING THE WORK immediately — write code, create files. Never just say "ok let me know". Be concise — this is a mobile chat UI. Reply in the same language as the user.
 
@@ -324,15 +350,24 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
       args.push('--resume', this.claudeSessionId);
     }
 
-    // Ensure project directory exists
-    try { mkdirSync(this.projectDir, { recursive: true }); } catch {}
+    // Ensure project directory exists (create as the linux user if needed)
+    try { mkdirSync(this.projectDir, { recursive: true }); } catch {
+      if (this.linuxUser && this.linuxUser !== 'root') {
+        try { execFileSync('sudo', ['-u', this.linuxUser, 'mkdir', '-p', this.projectDir], { timeout: 3000 }); } catch {}
+      }
+    }
 
     // Spawn claude process (always as root — claude auth is under root's config)
-    const env = { ...process.env };
+    const env = { ...process.env, ...this.providerEnv };
     delete env.CLAUDECODE;  // prevent child inheriting parent's claude-code session
+    // Remove empty-string overrides (used by ctok provider to clear MiniMax vars)
+    for (const key of Object.keys(env)) {
+      if (env[key] === '') delete env[key];
+    }
 
     console.log(`[claude-process] ${this.sessionId} spawning: claude ${args.join(' ').substring(0, 200)} cwd=${this.projectDir} resume=${this.claudeSessionId || 'none'}`);
-    const child = spawn('claude', args, {
+    console.log(`[claude-process] ${this.sessionId} ANTHROPIC_BASE_URL=${env.ANTHROPIC_BASE_URL} ANTHROPIC_MODEL=${env.ANTHROPIC_MODEL} providerEnv=${JSON.stringify(this.providerEnv)}`);
+    const child = spawn(process.env.CLAUDE_BIN || 'claude', args, {
       cwd: this.projectDir,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -482,15 +517,18 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
         }
       }
 
-      if (isCurrentChild && code !== 0 && code !== null && !fullResponseText) {
-        console.error(`[claude-process] ${this.sessionId} crashed with code ${code}`);
-        // If resume failed (stale session), clear sessionId so next attempt starts fresh
-        if (this.claudeSessionId) {
-          console.log(`[claude-process] ${this.sessionId} clearing stale claudeSessionId ${this.claudeSessionId}`);
-          this.claudeSessionId = null;
-          this.saveState();
+      if (isCurrentChild && code !== null && !fullResponseText) {
+        if (code !== 0) {
+          console.error(`[claude-process] ${this.sessionId} crashed with code ${code}`);
+          // If resume failed (stale session), clear sessionId so next attempt starts fresh
+          if (this.claudeSessionId) {
+            console.log(`[claude-process] ${this.sessionId} clearing stale claudeSessionId ${this.claudeSessionId}`);
+            this.claudeSessionId = null;
+            this.saveState();
+          }
+          this.broadcast({ type: 'error', message: `Claude exited unexpectedly (code ${code}). You can retry your message.` });
         }
-        this.broadcast({ type: 'error', message: `Claude exited unexpectedly (code ${code}). You can retry your message.` });
+        // code=0 with no response: auth error already broadcast via result event
       }
     });
 
@@ -702,6 +740,12 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
         } else if (event.subtype === 'error') {
           const errMsg = event.error || event.result || 'Unknown error';
           console.error(`[claude-process] ${this.sessionId} result error: ${errMsg}`);
+          if (!getResponseText()) {
+            this.broadcast({ type: 'error', message: `Claude error: ${errMsg}` });
+          }
+        } else if (event.is_error) {
+          const errMsg = event.result || 'Authentication failed — please login via terminal';
+          this.broadcast({ type: 'error', message: errMsg });
         }
         break;
       }

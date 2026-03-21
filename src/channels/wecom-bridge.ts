@@ -344,10 +344,12 @@ export class WeComBridge {
     if (!bindMatch) return false;
 
     const [, username, password] = bindMatch as RegExpMatchArray;
+    // Normalize full-width to half-width characters
+    const normalizedPassword = password!.replace(/[\uFF01-\uFF5E]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
     const users = this.loadUsers();
     const userEntry = users[username!];
 
-    if (!userEntry || userEntry.password !== password) {
+    if (!userEntry || userEntry.password !== normalizedPassword) {
       this.sendReply(channel, userId, undefined, '绑定失败：用户名或密码错误。');
       return true;
     }
@@ -390,8 +392,12 @@ export class WeComBridge {
         return true;
       }
 
-      const activeId = this.activeSession.get(userId)
-        || this.findActiveSession(hopcodeUser);
+      // Verify active session owner matches (handles re-bind scenario)
+      const cachedSessionId = this.activeSession.get(userId);
+      const cachedSession = cachedSessionId ? this.easySessions.get(cachedSessionId) : null;
+      const activeId = (cachedSession && cachedSession.owner === hopcodeUser)
+        ? cachedSessionId
+        : this.findActiveSession(hopcodeUser);
       const lines = sessions.map((s, i) => {
         const marker = s.id === activeId ? ' ← 当前' : '';
         return `${i + 1}. ${s.name || s.project || s.id}${marker}`;
@@ -444,7 +450,12 @@ export class WeComBridge {
 
     // Version history
     if (trimmed === '版本' || trimmed === '历史' || trimmed === '版本历史') {
-      const sessionId = this.activeSession.get(userId) || this.findActiveSession(hopcodeUser);
+      // Verify active session owner matches (handles re-bind scenario)
+      const cachedSessionId = this.activeSession.get(userId);
+      const cachedSession = cachedSessionId ? this.easySessions.get(cachedSessionId) : null;
+      const sessionId = (cachedSession && cachedSession.owner === hopcodeUser)
+        ? cachedSessionId
+        : this.findActiveSession(hopcodeUser);
       const sessionInfo = sessionId ? this.easySessions.get(sessionId) : null;
       if (!sessionInfo) {
         await this.sendReply(channel, userId, chatId, '没有活跃的项目。');
@@ -471,7 +482,12 @@ export class WeComBridge {
     const rollbackMatch = trimmed.match(/^回滚\s+(\S+)$/);
     if (rollbackMatch) {
       const target = rollbackMatch[1]!.trim();
-      const sessionId = this.activeSession.get(userId) || this.findActiveSession(hopcodeUser);
+      // Verify active session owner matches (handles re-bind scenario)
+      const cachedSessionId = this.activeSession.get(userId);
+      const cachedSession = cachedSessionId ? this.easySessions.get(cachedSessionId) : null;
+      const sessionId = (cachedSession && cachedSession.owner === hopcodeUser)
+        ? cachedSessionId
+        : this.findActiveSession(hopcodeUser);
       const sessionInfo = sessionId ? this.easySessions.get(sessionId) : null;
       if (!sessionInfo) {
         await this.sendReply(channel, userId, chatId, '没有活跃的项目。');
@@ -649,7 +665,9 @@ export class WeComBridge {
   ): Promise<void> {
     // Find target session
     let sessionId = this.activeSession.get(userId);
-    if (!sessionId || !this.easySessions.has(sessionId)) {
+    // Also verify session owner matches the bound user (handles re-bind scenario)
+    const existingSession = sessionId ? this.easySessions.get(sessionId) : null;
+    if (!sessionId || !existingSession || existingSession.owner !== hopcodeUser) {
       sessionId = this.findActiveSession(hopcodeUser);
     }
 

@@ -56,7 +56,7 @@ type TaskCallback = (result: TaskRunResult) => void;
 type CountCallback = (count: number) => void;
 
 const MAX_TASKS = 10;
-const TASK_EXECUTION_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+const TASK_EXECUTION_TIMEOUT = 15 * 60 * 1000; // 15 minutes
 const MAX_CONSECUTIVE_ERRORS = 3;
 
 interface OwnerState {
@@ -385,7 +385,6 @@ export class TaskScheduler {
         '-p', prompt,
         '--output-format', 'stream-json',
         '--verbose',
-        '--model', 'sonnet',
         ...(hasMcpConfig ? ['--mcp-config', mcpConfigPath] : []),
         '--allowedTools', ...allowedTools,
       ];
@@ -432,7 +431,7 @@ export class TaskScheduler {
       child.on('close', (code) => {
         clearTimeout(timeout);
         if (timedOut) {
-          reject(new Error('Task execution timed out (5 minutes)'));
+          reject(new Error('Task execution timed out (15 minutes)'));
         } else if (code !== 0 && !fullText) {
           reject(new Error(`claude exited with code ${code}`));
         } else {

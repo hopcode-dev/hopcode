@@ -110,8 +110,15 @@ export function setupProjectTemplate(
 
   const claudeMdPath = path.join(projectDir, 'CLAUDE.md');
   try {
-    fs.mkdirSync(projectDir, { recursive: true });
-    fs.mkdirSync(path.join(projectDir, 'workspace'), { recursive: true });
+    try {
+      fs.mkdirSync(projectDir, { recursive: true });
+      fs.mkdirSync(path.join(projectDir, 'workspace'), { recursive: true });
+    } catch {
+      // hopcode service user can't write to user home dirs — create as the linux user
+      if (username && username !== 'root') {
+        execFileSync('sudo', ['-u', username, 'mkdir', '-p', path.join(projectDir, 'workspace')], { timeout: 3000 });
+      }
+    }
     fs.writeFileSync(claudeMdPath, finalContent, 'utf-8');
     // chown project dir to the linux user (so claude -p running as that user can read/write)
     if (username && username !== 'root') {

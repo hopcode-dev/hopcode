@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <!-- Style C: 圆润可爱小马 — 活泼友好 -->
+  <circle cx="256" cy="256" r="240" fill="#1e293b"/>
+
+  <defs>
+    <linearGradient id="warm" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="100%" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 马头 — 圆润卡通风 -->
+  <!-- 头部主体 -->
+  <ellipse cx="255" cy="240" rx="100" ry="110" fill="url(#warm)"/>
+  <!-- 脸/嘴部 — 稍浅色 -->
+  <ellipse cx="255" cy="290" rx="65" ry="55" fill="#5eead4"/>
+
+  <!-- 耳朵 -->
+  <ellipse cx="195" cy="155" rx="18" ry="35" transform="rotate(-15, 195, 155)" fill="url(#warm)"/>
+  <ellipse cx="195" cy="155" rx="10" ry="22" transform="rotate(-15, 195, 155)" fill="#1e293b" opacity="0.3"/>
+  <ellipse cx="315" cy="155" rx="18" ry="35" transform="rotate(15, 315, 155)" fill="url(#warm)"/>
+  <ellipse cx="315" cy="155" rx="10" ry="22" transform="rotate(15, 315, 155)" fill="#1e293b" opacity="0.3"/>
+
+  <!-- 眼睛 — 大而有神 -->
+  <ellipse cx="215" cy="220" rx="20" ry="22" fill="#1e293b"/>
+  <ellipse cx="295" cy="220" rx="20" ry="22" fill="#1e293b"/>
+  <circle cx="222" cy="215" r="7" fill="#fff"/>
+  <circle cx="302" cy="215" r="7" fill="#fff"/>
+  <circle cx="210" cy="225" r="3.5" fill="#fff" opacity="0.5"/>
+  <circle cx="290" cy="225" r="3.5" fill="#fff" opacity="0.5"/>
+
+  <!-- 鼻孔 -->
+  <circle cx="238" cy="290" r="6" fill="#1e293b" opacity="0.4"/>
+  <circle cx="272" cy="290" r="6" fill="#1e293b" opacity="0.4"/>
+
+  <!-- 嘴巴 — 微笑 -->
+  <path d="M235 308 Q255 322 275 308" stroke="#1e293b" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.5"/>
+
+  <!-- 鬃毛 — 蓬松波浪 -->
+  <path d="M195 155 Q165 130 180 100 Q200 80 220 95 Q235 70 255 85 Q270 65 290 80 Q310 68 320 90 Q335 80 340 105 Q350 120 330 145" stroke="none" fill="#14b8a6" opacity="0.7"/>
+
+  <!-- Terminal >_ on forehead -->
+  <path d="M230 182 L248 192 L230 202" stroke="#1e293b" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <line x1="255" y1="192" x2="280" y2="192" stroke="#1e293b" stroke-width="4.5" stroke-linecap="round"/>
+</svg>

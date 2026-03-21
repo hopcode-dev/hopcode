@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <!-- Style D: 奔腾剪影 — 经典纹章风 -->
+  <circle cx="256" cy="256" r="240" fill="#0a0a1a"/>
+
+  <defs>
+    <linearGradient id="ember" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff6b35"/>
+      <stop offset="50%" stop-color="#f7c948"/>
+      <stop offset="100%" stop-color="#ff6b35"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 腾跃骏马 — 经典纹章姿态 -->
+  <path d="
+    M310 140
+    Q300 125 285 130
+    Q275 120 265 130
+    L255 120
+    Q248 108 240 118
+    L235 135
+    Q220 140 215 160
+    L200 180
+    Q185 200 185 225
+    Q180 250 175 270
+    L155 310
+    L140 345
+    L160 340
+    L175 315
+    L180 330
+    L165 370
+    L185 365
+    L200 335
+    Q210 310 220 290
+    Q240 300 260 305
+    Q275 310 290 300
+    L300 320
+    L310 365
+    L330 360
+    L315 310
+    L325 290
+    L345 340
+    L360 335
+    L338 280
+    Q350 255 345 230
+    Q340 210 330 195
+    Q340 180 345 165
+    Q350 148 340 140
+    Q330 130 320 142
+    Z
+  " fill="url(#ember)"/>
+
+  <!-- 眼睛 -->
+  <circle cx="243" cy="142" r="4" fill="#0a0a1a"/>
+
+  <!-- 鬃毛 — 飘逸火焰线条 -->
+  <path d="M310 140 Q330 110 315 90 Q305 100 295 85 Q285 100 275 88 Q270 105 260 95 Q255 115 255 120" fill="#f59e0b" opacity="0.6"/>
+
+  <!-- 尾巴 — 火焰般飘扬 -->
+  <path d="M175 270 Q145 250 130 270 Q115 290 130 305 Q120 310 125 325 Q115 335 125 345" stroke="#f59e0b" stroke-width="6" fill="none" stroke-linecap="round" opacity="0.7"/>
+
+  <!-- Terminal >_ -->
+  <path d="M195 430 L218 445 L195 460" stroke="#f7c948" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <line x1="230" y1="445" x2="268" y2="445" stroke="#f7c948" stroke-width="5.5" stroke-linecap="round"/>
+</svg>
