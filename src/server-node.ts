@@ -25,7 +25,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as zlib from 'zlib';
 import { fileURLToPath } from 'url';
-import { randomUUID, randomBytes, createHmac } from 'crypto';
+import { randomUUID, randomBytes, createHmac, createHash } from 'crypto';
 
 import {
   PTY_SERVICE_PORT,
@@ -66,6 +66,70 @@ interface UserConfig {
 
 let usersConfig: Record<string, UserConfig> = {};
 let isMultiUser = false;
+
+// --- Serve ID mapping (for Chinese filenames in QR codes) ---
+// Maps projectDir -> { id -> relativePath }
+const serveIdCache = new Map<string, Record<string, string>>();
+const servePathToId = new Map<string, string>(); // "projectDir/relPath" -> id
+
+function getServeMapPath(projectDir: string): string {
+  return path.join(projectDir, '.serve-map.json');
+}
+
+function loadServeMap(projectDir: string): Record<string, string> {
+  if (serveIdCache.has(projectDir)) return serveIdCache.get(projectDir)!;
+  const mapPath = getServeMapPath(projectDir);
+  try {
+    const data = fs.readFileSync(mapPath, 'utf-8');
+    const map = JSON.parse(data);
+    serveIdCache.set(projectDir, map);
+    // Rebuild reverse index
+    for (const [id, relPath] of Object.entries(map)) {
+      servePathToId.set(projectDir + '/' + relPath, id);
+    }
+    return map;
+  } catch {
+    const empty: Record<string, string> = {};
+    serveIdCache.set(projectDir, empty);
+    return empty;
+  }
+}
+
+function getOrCreateServeId(projectDir: string, relPath: string): string {
+  const key = projectDir + '/' + relPath;
+  if (servePathToId.has(key)) return servePathToId.get(key)!;
+
+  // Load existing map
+  const map = loadServeMap(projectDir);
+
+  // Find existing id for this relPath
+  for (const [id, rp] of Object.entries(map)) {
+    if (rp === relPath) {
+      servePathToId.set(key, id);
+      return id;
+    }
+  }
+
+  // Create new id: first 4 bytes of shake256 hash of projectDir+relPath, as hex (8 chars)
+  // Include projectDir so same filename in different projects gets a different ID
+  const hash = createHash('shake256').update(projectDir + '\0' + relPath).digest().slice(0, 4).toString('hex');
+  const id = hash.substring(0, 8);
+
+  // Save to disk
+  map[id] = relPath;
+  serveIdCache.set(projectDir, map);
+  servePathToId.set(key, id);
+  try {
+    fs.writeFileSync(getServeMapPath(projectDir), JSON.stringify(map), 'utf-8');
+  } catch {}
+
+  return id;
+}
+
+function resolveServeId(projectDir: string, id: string): string | null {
+  const map = loadServeMap(projectDir);
+  return map[id] || null;
+}
 
 // System administrators — full access to all sessions, recordings, user management
 const ADMIN_USERS = new Set(['root', 'jack']);
@@ -3002,10 +3066,18 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     if (previewTitles[url]) return previewTitles[url];
     try {
       var p = url.split('?')[0].replace(/\\/+$/, '');
-      var name = p.split('/').pop() || url;
+      var parts = p.split('/');
+      var name = parts.pop() || url;
       if (name === 'index.html') {
-        var parts = p.split('/');
-        name = parts.length >= 2 ? parts[parts.length - 2] : name;
+        name = parts.length >= 1 ? parts[parts.length - 1] : 'index';
+      }
+      // For ID URLs (8 hex chars), show the full path segment before the ID as the label
+      if (/^[a-f0-9]{8}$/i.test(name) && parts.length >= 2) {
+        var prev = parts[parts.length - 1];
+        if (prev && prev !== 'workspace') return prev + '/' + name;
+        if (prev === 'workspace' && parts.length >= 3) {
+          return parts[parts.length - 2] + '/' + name;
+        }
       }
       return name.replace(/\\.(html|htm)$/, '') || url.substring(0, 20);
     } catch(e) { return url.substring(0, 20); }
@@ -3218,20 +3290,39 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   function setPreviewUrl(url, forceReload, addOnly) {
     if (!url) return;
     // Skip localhost/127.0.0.1 URLs — not reachable from client browser
-    if (/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:|\\/)/.test(url)) return;
-    // Skip URLs the user has explicitly deleted
-    if (_deletedPreviews[url]) return;
+    if (url.indexOf('http://localhost') === 0 || url.indexOf('https://localhost') === 0 ||
+        url.indexOf('http://127.0.0.1') === 0 || url.indexOf('https://127.0.0.1') === 0) return;
+    // Skip URLs the user has explicitly deleted — but forceReload (explicit user click) overrides deletion
+    if (_deletedPreviews[url] && !forceReload) return;
+    // If user explicitly re-opens a deleted URL, un-delete it
+    if (_deletedPreviews[url] && forceReload) {
+      delete _deletedPreviews[url];
+      try { localStorage.setItem('easy_preview_deleted_' + sessionId, JSON.stringify(_deletedPreviews)); } catch(e) {}
+    }
+    // For /serve/ URLs: dedupe by base URL (ignore ?render=1 difference)
+    // So /serve/{s}/{id} and /serve/{s}/{id}?render=1 are treated as the same
+    var isServeUrl = url.indexOf('/serve/') === 0;
+    var baseUrl = url;
+    if (isServeUrl) {
+      baseUrl = url.indexOf('?') >= 0 ? url.slice(0, url.indexOf('?')) : url;
+    }
+    // Find existing entry with same base URL
+    var existingIdx = -1;
+    for (var _ei = 0; _ei < previewUrls.length; _ei++) {
+      var ex = previewUrls[_ei];
+      var exBase = isServeUrl ? (ex.indexOf('?') >= 0 ? ex.slice(0, ex.indexOf('?')) : ex) : ex;
+      if (exBase === baseUrl) { existingIdx = _ei; break; }
+    }
     // Add to list (dedup)
-    var idx = previewUrls.indexOf(url);
     if (addOnly) {
       // Just ensure it's in the list, don't reorder or switch
-      if (idx < 0) {
+      if (existingIdx < 0) {
         previewUrls.push(url);
         if (previewUrls.length > MAX_PREVIEW_PILLS) previewUrls.length = MAX_PREVIEW_PILLS;
       }
     } else {
-      // Remove duplicate if exists, then add to front (newest first)
-      if (idx >= 0) previewUrls.splice(idx, 1);
+      // Remove existing (may have different ?render=1) then add to front
+      if (existingIdx >= 0) previewUrls.splice(existingIdx, 1);
       previewUrls.unshift(url);
       if (previewUrls.length > MAX_PREVIEW_PILLS) previewUrls.length = MAX_PREVIEW_PILLS;
       // Load the URL — hard refresh to bypass all caches
@@ -3257,12 +3348,32 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   try {
     var savedPreview = JSON.parse(localStorage.getItem('easy_preview_' + sessionId) || '');
     if (savedPreview && savedPreview.urls && savedPreview.urls.length > 0) {
-      previewUrls = savedPreview.urls.filter(function(u) { return !_deletedPreviews[u]; });
-      currentPreviewUrl = (!_deletedPreviews[savedPreview.current] && savedPreview.current) || previewUrls[0] || '';
-      hardRefreshPreview(currentPreviewUrl);
-      previewFrame.classList.add('loaded');
-      document.getElementById('preview-guide').style.display = 'none';
-      renderPreviewNav();
+      // Filter out stale absolute URLs (old format before ID mapping) — keep only relative /serve/ paths and external tunnel URLs
+      var isValidPreviewUrl = function(u) {
+        if (!u) return false;
+        if (_deletedPreviews[u]) return false;
+        // Allow relative /serve/ paths
+        if (u.indexOf('/serve/') === 0) return true;
+        // Allow external tunnel URLs (cloudflare, ngrok etc) but not same-origin absolute URLs
+        if (u.indexOf('http://') === 0 || u.indexOf('https://') === 0) {
+          var slashAfterProto = u.indexOf('//');
+          var pathStart = slashAfterProto >= 0 ? u.indexOf('/', slashAfterProto + 2) : -1;
+          var host = pathStart >= 0 ? u.slice(0, pathStart) : u;
+          // Reject same-origin absolute URLs (they should be relative paths)
+          if (location && host === location.protocol + '//' + location.host) return false;
+          return true;
+        }
+        return false;
+      };
+      previewUrls = savedPreview.urls.filter(isValidPreviewUrl);
+      var savedCurrent = savedPreview.current;
+      currentPreviewUrl = (isValidPreviewUrl(savedCurrent) && savedCurrent) || previewUrls[0] || '';
+      if (currentPreviewUrl) {
+        hardRefreshPreview(currentPreviewUrl);
+        previewFrame.classList.add('loaded');
+        document.getElementById('preview-guide').style.display = 'none';
+        renderPreviewNav();
+      }
     }
   } catch(e) {}
 
@@ -3362,8 +3473,60 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     return location.protocol + '//' + location.host + path;
   }
 
-  function showShareQR() {
-    var shareUrl = getShareUrl();
+  // Convert a raw /serve/{project}/{relPath} URL to a serve-map ID URL.
+  // Falls back to original URL if API call fails.
+  async function toServeIdUrl(rawUrl) {
+    var servePrefix = '/serve/';
+    // Strip origin if it's an absolute URL pointing to the same host
+    var workUrl = rawUrl;
+    if (workUrl.indexOf('http://') === 0 || workUrl.indexOf('https://') === 0) {
+      // Extract path by finding the third slash (after "https://host")
+      var slashAfterProto = workUrl.indexOf('//');
+      if (slashAfterProto >= 0) {
+        var pathStart = workUrl.indexOf('/', slashAfterProto + 2);
+        if (pathStart >= 0) workUrl = workUrl.slice(pathStart);
+        else workUrl = '/';
+      }
+    }
+    if (!workUrl.startsWith(servePrefix)) return rawUrl;
+    var withoutServe = workUrl.slice(servePrefix.length);
+    var qIdx = withoutServe.indexOf('?');
+    var suffix = qIdx >= 0 ? withoutServe.slice(qIdx) : '';
+    var pathPart = qIdx >= 0 ? withoutServe.slice(0, qIdx) : withoutServe;
+    var slashIdx = pathPart.indexOf('/');
+    if (slashIdx < 0) return rawUrl;
+    var project = pathPart.slice(0, slashIdx);
+    var relPath = decodeURIComponent(pathPart.slice(slashIdx + 1));
+    try {
+      var resp = await fetch('/terminal/api/serve-map', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: sessionId, relPath: relPath })
+      });
+      if (resp.ok) {
+        var data = await resp.json();
+        if (data.id) return '/serve/' + sessionId + '/' + data.id + suffix;
+      }
+    } catch(e) {}
+    return rawUrl;
+  }
+
+  // Get shareable URL: currentPreviewUrl is already an ID URL, just make it absolute
+  async function getShareableUrl() {
+    var baseUrl = getShareUrl();
+    if (!baseUrl) return null;
+    // External URLs (e.g. tunnel links) — use as-is
+    if (baseUrl.startsWith('http://') || baseUrl.startsWith('https://')) return baseUrl;
+    // currentPreviewUrl is already a /serve/{project}/{id} URL — just make it absolute
+    var p = currentPreviewUrl;
+    if (!p.startsWith('/')) p = '/' + p;
+    if (!p.startsWith('/terminal/')) p = '/terminal' + p;
+    return location.protocol + '//' + location.host + p;
+  }
+
+  async function showShareQR() {
+    var shareUrl = await getShareableUrl();
     if (!shareUrl) return;
 
     if (!_easyShareModal) {
@@ -4233,8 +4396,25 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     var a = e.target.closest && e.target.closest('a.chat-link');
     if (!a) return;
     e.preventDefault();
-    setPreviewUrl(a.href, true);
-    if (!isDesktop()) showTab('preview');
+    var href = a.getAttribute('data-serve-id') || a.href;
+    var originalUrl = href.replace(location.origin, '');
+    toServeIdUrl(originalUrl).then(function(idUrl) {
+      // If the resolved ID URL is different from the original, the original was likely
+      // a Chinese filename URL — remove it from previewUrls to avoid duplicates,
+      // and extract the filename to use as display title for the ID URL.
+      if (idUrl !== originalUrl && originalUrl.indexOf('/serve/') === 0) {
+        var idx = previewUrls.indexOf(originalUrl);
+        if (idx >= 0) previewUrls.splice(idx, 1);
+        // Extract filename from original URL path for the title
+        try {
+          var slashIdx = originalUrl.lastIndexOf('/');
+          var fname = slashIdx >= 0 ? decodeURIComponent(originalUrl.slice(slashIdx + 1).split('?')[0]) : originalUrl;
+          if (fname && fname.indexOf('.') >= 0) previewTitles[idUrl] = fname;
+        } catch(e) {}
+      }
+      setPreviewUrl(idUrl, true);
+      if (!isDesktop()) showTab('preview');
+    });
   });
 
   // ---- Participants ----
@@ -4413,12 +4593,18 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       chatArea.appendChild(wrap);
     }
     // Auto-detect preview URL — only trigger reload if URL changed
-    // Skip during history replay to avoid re-adding old URLs
+    // Skip same-origin /serve/ URLs here — click handler converts to ID + dedupes
+    // Only auto-detect external tunnel URLs (cloudflare, ngrok etc.)
     if (!_suppressUrlDetection) {
       var detectedUrl = detectPreviewUrl(text);
       if (detectedUrl && detectedUrl !== _lastDetectedUrl) {
         _lastDetectedUrl = detectedUrl;
-        setPreviewUrl(detectedUrl, true);
+        // Skip same-origin URLs — click handler converts to ID and deduplicates
+        if (detectedUrl.indexOf('https://') === 0 && detectedUrl.indexOf(location.host) > 0) {
+          /* skip same-origin, handled by click */
+        } else {
+          toServeIdUrl(detectedUrl).then(function(idUrl) { setPreviewUrl(idUrl, true); });
+        }
       }
       // Badge on chat tab if user is on preview
       if (activeTab === 'preview') chatBadge.classList.add('show');
@@ -4439,7 +4625,12 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     var detectedUrl = detectPreviewUrl(text);
     if (detectedUrl && detectedUrl !== _lastDetectedUrl) {
       _lastDetectedUrl = detectedUrl;
-      setPreviewUrl(detectedUrl, true);
+      // Skip same-origin URLs — click handler converts to ID and deduplicates
+      if (detectedUrl.indexOf('https://') === 0 && detectedUrl.indexOf(location.host) > 0) {
+        /* skip same-origin, handled by click */
+      } else {
+        toServeIdUrl(detectedUrl).then(function(idUrl) { setPreviewUrl(idUrl, true); });
+      }
     }
     if (activeTab === 'preview') chatBadge.classList.add('show');
     saveChatHistory();
@@ -5201,10 +5392,14 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
               pvBtn.className = 'fp-act';
               pvBtn.title = 'Preview';
               pvBtn.innerHTML = '&#9654;';  // ▶
-              pvBtn.addEventListener('click', function(e) {
+              pvBtn.addEventListener('click', async function(e) {
                 e.stopPropagation();
-                var url = makeServeUrl(dir, item.name);
-                if (url) { setPreviewUrl(url, true); if (!isDesktop()) showTab('preview'); }
+                var url = await makeServeUrl(dir, item.name);
+                if (url) {
+                  previewTitles[url] = item.name; // Store human-readable name for pill label
+                  setPreviewUrl(url, true);
+                  if (!isDesktop()) showTab('preview');
+                }
               });
               acts.appendChild(pvBtn);
             }
@@ -5242,9 +5437,9 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
             row.appendChild(acts);
 
             // Row click: preview if possible, else download
-            row.addEventListener('click', function() {
+            row.addEventListener('click', async function() {
               if (preview) {
-                var url = makeServeUrl(dir, item.name);
+                var url = await makeServeUrl(dir, item.name);
                 if (url) { setPreviewUrl(url, true); if (!isDesktop()) showTab('preview'); }
               } else {
                 var a = document.createElement('a');
@@ -5273,22 +5468,44 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     var ext = (name.split('.').pop() || '').toLowerCase();
     return _previewExts.indexOf(ext) >= 0;
   }
-  function makeServeUrl(dir, name) {
-    if (!_projectDir) return '';
+  function makeServeRelPath(dir, name) {
+    if (!_projectDir) return null;
     var parts = _projectDir.split('/').filter(Boolean);
-    // If _projectDir ends with /workspace, project name is the parent dir
     var project = (parts[parts.length - 1] === 'workspace' && parts.length >= 2)
       ? parts[parts.length - 2] : parts[parts.length - 1];
-    if (!project) return '';
+    if (!project) return null;
     var relPath = (dir + '/' + name).replace(_projectDir + '/', '');
-    // If browsing inside workspace/, prefix the serve path with workspace/
     if (_projectDir.endsWith('/workspace') || _projectDir.endsWith('/workspace/')) relPath = 'workspace/' + relPath;
+    return { project: project, relPath: relPath };
+  }
+
+  function makeServeUrlSuffix(name) {
     var ext = (name.split('.').pop() || '').toLowerCase();
-    var url = '/serve/' + project + '/' + relPath;
-    if (ext === 'csv' || ext === 'md') url += '?render=1';
+    var suffix = '';
+    if (ext === 'csv' || ext === 'md') suffix = '?render=1';
     var imgExts = ['png','jpg','jpeg','gif','webp','svg','bmp','ico'];
-    if (imgExts.indexOf(ext) >= 0) url += '?preview=1';
-    return url;
+    if (imgExts.indexOf(ext) >= 0) suffix = '?preview=1';
+    return suffix;
+  }
+
+  // Returns a serve-map ID URL (async), falls back to raw filename URL
+  async function makeServeUrl(dir, name) {
+    var info = makeServeRelPath(dir, name);
+    if (!info) return '';
+    var suffix = makeServeUrlSuffix(name);
+    try {
+      var resp = await fetch('/terminal/api/serve-map', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: sessionId, relPath: info.relPath })
+      });
+      if (resp.ok) {
+        var data = await resp.json();
+        if (data.id) return '/serve/' + sessionId + '/' + data.id + suffix;
+      }
+    } catch(e) {}
+    return '/serve/' + info.project + '/' + info.relPath + suffix;
   }
 
   function fileIcon(name) {
@@ -10760,6 +10977,59 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // POST /terminal/api/serve-map — register a file path and get a short ID for QR-safe sharing
+  if ((req.url || '').match(/^(?:\/terminal)?\/api\/serve-map$/) && req.method === 'POST') {
+    if (!isAuthenticated(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      req.resume();
+      return;
+    }
+    let body = '';
+    req.on('data', (c: Buffer) => { body += c.toString(); });
+    req.on('end', () => {
+      try {
+        const { sessionId, relPath } = JSON.parse(body);
+        if (!sessionId || !relPath) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'sessionId and relPath required' }));
+          return;
+        }
+        const info = easySessions.get(sessionId);
+        if (!info) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Session not found' }));
+          return;
+        }
+        const auth = getAuthInfo(req);
+        if (info.owner !== auth.username && !isAdminUser(auth.username)) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Forbidden' }));
+          return;
+        }
+        // Find the projectDir where the file actually lives.
+        // The relPath may come from a different project's URL — scan all session dirs.
+        let projectDir = info.cp.projectDir;
+        const testFile = path.join(projectDir, relPath);
+        if (!fs.existsSync(testFile)) {
+          // File not in current session's dir — search other sessions owned by same user
+          for (const [, eInfo] of easySessions) {
+            if (eInfo.owner !== info.owner) continue;
+            const alt = path.join(eInfo.cp.projectDir, relPath);
+            if (fs.existsSync(alt)) { projectDir = eInfo.cp.projectDir; break; }
+          }
+        }
+        const id = getOrCreateServeId(projectDir, relPath);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id }));
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid request body' }));
+      }
+    });
+    return;
+  }
+
   // GET /terminal/api/sessions — list sessions as JSON
   if ((req.url || '').match(/^(?:\/terminal)?\/api\/sessions(\?.*)?$/) && req.method === 'GET') {
     if (!isAuthenticated(req)) {
@@ -11657,33 +11927,80 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
 
     // Find project directory: collect all candidates
     const candidates: string[] = [];
-    // 1. All easy session dirs matching this project name
+    // 1. If project segment is a session ID (easy_*), look it up directly
+    if (project.startsWith('easy_')) {
+      const eInfo = easySessions.get(project);
+      if (eInfo) candidates.push(eInfo.cp.projectDir);
+    }
+    // 2. All easy session dirs matching this project name
     for (const [, eInfo] of easySessions) {
       if (eInfo.project === project || path.basename(eInfo.cp.projectDir) === project) {
         if (candidates.indexOf(eInfo.cp.projectDir) === -1) candidates.push(eInfo.cp.projectDir);
       }
     }
-    // 2. All users' coding dirs
+    // 3. All users' coding dirs
     try {
       for (const u of fs.readdirSync('/home')) {
         const c = path.join('/home', u, 'coding', project);
         if (candidates.indexOf(c) === -1) candidates.push(c);
       }
     } catch {}
-    // 3. Root's coding dir
+    // 4. Root's coding dir
     const rootCandidate = path.join(process.env.HOME || '/root', 'coding', project);
     if (candidates.indexOf(rootCandidate) === -1) candidates.push(rootCandidate);
 
     // Find first candidate that has the requested file
     let projectRoot = candidates[0];
+    let resolvedFilePart = filePart;
+    // If no candidates yet (session not loaded in memory), still try ID lookup via disk scan
+    if (!projectRoot && /^[a-f0-9]{8}$/.test(filePart.split('/').pop() || '')) {
+      projectRoot = '__disk_scan__';
+    }
     if (projectRoot) {
-      for (const c of candidates) {
-        const testPath = path.resolve(c, '.' + filePart);
-        if (testPath.startsWith(c + '/') || testPath === c) {
-          try { fs.accessSync(testPath); projectRoot = c; break; } catch {}
+      // Check if filePart is a serve ID that needs resolution
+      const idSegment = filePart.split('/').pop() || '';
+      if (idSegment && /^[a-f0-9]{8}$/.test(idSegment)) {
+        // Search candidates first, then all session dirs in memory, then scan disk
+        const allDirs = [...candidates];
+        for (const [, eInfo] of easySessions) {
+          if (allDirs.indexOf(eInfo.cp.projectDir) === -1) allDirs.push(eInfo.cp.projectDir);
+        }
+        // Also scan all coding dirs on disk (catches sessions not yet loaded in memory)
+        try {
+          for (const u of fs.readdirSync('/home')) {
+            const codingDir = path.join('/home', u, 'coding');
+            try {
+              for (const proj of fs.readdirSync(codingDir)) {
+                const pd = path.join(codingDir, proj);
+                if (allDirs.indexOf(pd) === -1) allDirs.push(pd);
+              }
+            } catch {}
+          }
+        } catch {}
+        for (const c of allDirs) {
+          const resolvedRelPath = resolveServeId(c, idSegment);
+          if (resolvedRelPath) {
+            const idIndex = filePart.lastIndexOf('/' + idSegment);
+            if (idIndex >= 0) {
+              resolvedFilePart = filePart.substring(0, idIndex) + '/' + resolvedRelPath;
+            } else {
+              resolvedFilePart = '/' + resolvedRelPath;
+            }
+            projectRoot = c;
+            break;
+          }
         }
       }
-      const filePath = path.resolve(projectRoot, '.' + filePart);
+      if (resolvedFilePart === filePart) {
+        // No ID match found — use original path lookup
+        for (const c of candidates) {
+          const testPath = path.resolve(c, '.' + filePart);
+          if (testPath.startsWith(c + '/') || testPath === c) {
+            try { fs.accessSync(testPath); projectRoot = c; break; } catch {}
+          }
+        }
+      }
+      const filePath = path.resolve(projectRoot, '.' + resolvedFilePart);
 
       // Security: sandbox to project root — don't allow path traversal above it
       if (!filePath.startsWith(projectRoot + '/') && filePath !== projectRoot) {
@@ -11702,8 +12019,8 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
             res.writeHead(404); res.end('Not found'); return;
           }
         }
-        const wantRender = parsedUrl.searchParams.get('render') === '1';
         const ext = path.extname(filePath).toLowerCase();
+        const wantRender = parsedUrl.searchParams.get('render') === '1' || ext === '.md' || ext === '.csv';
         if (wantRender && ext === '.csv') {
           const raw = await fs.promises.readFile(filePath, 'utf-8');
           const rows = raw.split('\n').filter(r => r.trim());
@@ -11722,11 +12039,12 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
           const escHtml = (s: string) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
           const lines = raw.split('\n');
           let html = '';
+          let pageTitle = '';
           let inList = false;
           for (const line of lines) {
             const trimmed = line.trim();
             if (!trimmed) { if (inList) { html += '</ul>'; inList = false; } html += '<br>'; continue; }
-            if (trimmed.startsWith('# ')) { html += `<h1>${escHtml(trimmed.slice(2))}</h1>`; continue; }
+            if (trimmed.startsWith('# ') && !pageTitle) { pageTitle = trimmed.slice(2); html += `<h1>${escHtml(pageTitle)}</h1>`; continue; }
             if (trimmed.startsWith('## ')) { html += `<h2>${escHtml(trimmed.slice(3))}</h2>`; continue; }
             if (trimmed.startsWith('### ')) { html += `<h3>${escHtml(trimmed.slice(4))}</h3>`; continue; }
             if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
@@ -11743,7 +12061,8 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
             html += `<p>${p}</p>`;
           }
           if (inList) html += '</ul>';
-          const page = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font-family:system-ui;margin:16px;color:#1d1d1f;line-height:1.6;max-width:720px}h1,h2,h3{margin:1em 0 .5em}code{background:#f5f5f7;padding:2px 6px;border-radius:4px;font-size:13px}a{color:#007aff}ul{padding-left:20px}li{margin:4px 0}</style></head><body>${html}</body></html>`;
+          const titleTag = pageTitle ? `<title>${escHtml(pageTitle)}</title>` : '';
+          const page = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">${titleTag}<style>body{font-family:system-ui;margin:16px;color:#1d1d1f;line-height:1.6;max-width:720px}h1,h2,h3{margin:1em 0 .5em}code{background:#f5f5f7;padding:2px 6px;border-radius:4px;font-size:13px}a{color:#007aff}ul{padding-left:20px}li{margin:4px 0}</style></head><body>${html}</body></html>`;
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
           res.end(page);
         } else if (isPreviewableImage(filePath)) {
@@ -11986,6 +12305,7 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
   }
 
   if ((pathname === '/terminal/files' || pathname === '/files') && req.method === 'GET') {
+    let dirPath = '';
     try {
       const sid = parsedUrl.searchParams.get('session');
       if (!sid) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Session not found' })); return; }
@@ -12003,7 +12323,6 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
       const userHome = getUserHome(auth.linuxUser);
 
       let requestedPath = parsedUrl.searchParams.get('path') || '';
-      let dirPath: string;
 
       // For Easy Mode sessions with file access, lock to workspace/ subdir (output only)
       if (isEasyWithAccess && easyProjectDir) {
@@ -12095,8 +12414,14 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ path: dirPath, cwd: sessionCwd, items }));
     } catch (e: any) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message || 'Failed to list directory' }));
+      console.error(`[files] Error listing ${dirPath}:`, e.message);
+      if (e.code === 'ENOENT') {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Directory not found. The project may not have been created successfully.' }));
+      } else {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message || 'Failed to list directory' }));
+      }
     }
     return;
   }
@@ -12351,7 +12676,7 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
       const easyProjectDir = `${easyHomeDir}/coding/${projectName}`;
       try {
         try {
-          setupProjectTemplate(easyProjectDir, auth.linuxUser || auth.username, projectName);
+          setupProjectTemplate(easyProjectDir, auth.linuxUser || auth.username, projectName, id);
           console.log(`[easy] Project template created: ${easyProjectDir}/CLAUDE.md`);
         } catch (e) {
           console.error('[easy] Failed to setup project template:', e);

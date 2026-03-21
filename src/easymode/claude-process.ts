@@ -303,11 +303,16 @@ export class ClaudeProcess {
     try { writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig)); } catch {}
 
     // Build command args
+    // Only pass --model if providerEnv has a base URL (i.e. ctok/custom provider).
+    // For users with MiniMax configured in their own settings.json, let the settings take effect.
+    const modelArg = this.providerEnv.ANTHROPIC_BASE_URL
+      ? [(this.providerEnv.ANTHROPIC_DEFAULT_SONNET_MODEL ? 'sonnet' : 'MiniMax-M2.7-highspeed')]
+      : [];
     const args = [
       '-p', promptText,
       '--output-format', 'stream-json',
       '--verbose',
-      '--model', (this.providerEnv.ANTHROPIC_DEFAULT_SONNET_MODEL || this.providerEnv.ANTHROPIC_BASE_URL) ? 'sonnet' : 'MiniMax-M2.7-highspeed',
+      ...(modelArg.length ? ['--model', modelArg[0]] : []),
       '--include-partial-messages',
       '--mcp-config', mcpConfigPath,
       '--allowedTools',
@@ -357,8 +362,44 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
       }
     }
 
+    // Each user gets an isolated HOME so their ~/.claude/ session state, history,
+    // and session-env files don't mix with other users running under the same process.
+    // providerEnv may override HOME again (e.g. ctok uses its own directory).
+    let claudeHome: string;
+    if (this.providerEnv.HOME) {
+      // Provider already sets a custom HOME (e.g. ctok)
+      claudeHome = this.providerEnv.HOME;
+    } else if (this.linuxUser && this.linuxUser !== 'root') {
+      claudeHome = `/root/.claude-users/${this.linuxUser}`;
+    } else {
+      claudeHome = process.env.HOME || '/root';
+    }
+
+    // Bootstrap the isolated claude home on first use
+    if (claudeHome !== (process.env.HOME || '/root')) {
+      try {
+        const settingsPath = `${claudeHome}/.claude/settings.json`;
+        let needsBootstrap = false;
+        try { readFileSync(settingsPath); } catch { needsBootstrap = true; }
+        if (needsBootstrap) {
+          mkdirSync(`${claudeHome}/.claude`, { recursive: true });
+          const rootSettings = readFileSync('/root/.claude/settings.json', 'utf-8');
+          writeFileSync(settingsPath, rootSettings);
+          try {
+            const mmKey = readFileSync('/root/.claude/minimax.key', 'utf-8');
+            writeFileSync(`${claudeHome}/.claude/minimax.key`, mmKey);
+          } catch {}
+          // chown entire claudeHome to the service process user so claude can read/write it
+          try { execFileSync('chown', ['-R', 'hopcode:hopcode', claudeHome]); } catch {}
+          console.log(`[claude-process] bootstrapped claude home for ${this.linuxUser}: ${claudeHome}`);
+        }
+      } catch (e) {
+        console.error(`[claude-process] failed to bootstrap claude home for ${this.linuxUser}:`, e);
+      }
+    }
+
     // Spawn claude process (always as root — claude auth is under root's config)
-    const env = { ...process.env, ...this.providerEnv };
+    const env = { ...process.env, HOME: claudeHome, ...this.providerEnv };
     delete env.CLAUDECODE;  // prevent child inheriting parent's claude-code session
     // Remove empty-string overrides (used by ctok provider to clear MiniMax vars)
     for (const key of Object.keys(env)) {

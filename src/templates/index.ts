@@ -71,6 +71,7 @@ export function setupProjectTemplate(
   projectDir: string,
   username: string,
   projectName: string,
+  sessionId?: string,
 ): void {
   const templatePath = path.join(__dirname, 'easy-project-claude.md');
 
@@ -84,9 +85,13 @@ export function setupProjectTemplate(
 
   const port = getNextPort(username);
   const baseUrl = process.env.PUBLIC_URL || 'https://gotong.gizwitsapi.com';
-  const serveUrl = `${baseUrl}/serve/${encodeURIComponent(projectName)}/workspace/`;
+  // Use session ID in serve URL so it's ASCII-safe (no Chinese in URL)
+  const serveUrl = sessionId
+    ? `${baseUrl}/serve/${sessionId}/workspace/`
+    : `${baseUrl}/serve/${encodeURIComponent(projectName)}/workspace/`;
   const deployInstructions = getDeployInstructions(username, projectName, port);
-  const liveUrl = config ? `${config.liveUrlBase}${projectName}/` : '';
+  const userConfig = userConfigs[username];
+  const liveUrl = userConfig ? `${userConfig.liveUrlBase}${projectName}/` : '';
 
   const content = template
     .replace(/\{\{SERVE_URL\}\}/g, serveUrl)
@@ -95,7 +100,7 @@ export function setupProjectTemplate(
     .replace(/\{\{PROJECT_NAME\}\}/g, projectName)
     .replace(/\{\{PORT\}\}/g, String(port))
     .replace(/\{\{LIVE_URL\}\}/g, liveUrl)
-    .replace(/\{\{APP_COMMAND\}\}/g, config?.appCommand || '')
+    .replace(/\{\{APP_COMMAND\}\}/g, userConfig?.appCommand || '')
     .replace(/\{\{DEPLOY_INSTRUCTIONS\}\}/g, deployInstructions);
 
   // Also copy user's global CLAUDE.md content if it exists
