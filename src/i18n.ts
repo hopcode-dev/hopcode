@@ -65,6 +65,13 @@ const en: Record<string, string> = {
   'portal.rename_title': 'Rename session',
   'portal.delete_title': 'Delete session',
   'portal.lang_label': 'Language',
+  'portal.new_project_title': 'Name your project',
+  'portal.new_project_sub': 'So you can find it later',
+  'portal.new_project_placeholder': 'e.g. my-website',
+  'portal.new_project_auto': 'Generate random name',
+  'portal.new_project_cancel': 'Cancel',
+  'portal.new_project_ok': 'Start creating →',
+  'portal.new_project_names': 'My Work,Creative Gallery,Personal Page,Fun Game,Data Dashboard,Toolbox,Inspiration Notes,Dynamic Display,Interactive Story,Cool Effects',
 
   // Easy Mode
   'easy.title': 'Hopcode Easy Mode',
@@ -388,6 +395,13 @@ const zh: Record<string, string> = {
   'portal.rename_title': '重命名会话',
   'portal.delete_title': '删除会话',
   'portal.lang_label': '语言',
+  'portal.new_project_title': '给项目起个名字',
+  'portal.new_project_sub': '方便以后找到它',
+  'portal.new_project_placeholder': '例：我的网站',
+  'portal.new_project_auto': '随机生成名字',
+  'portal.new_project_cancel': '取消',
+  'portal.new_project_ok': '开始创作 →',
+  'portal.new_project_names': '我的作品,创意画廊,个人主页,趣味游戏,数据看板,小工具箱,灵感笔记,动态展示,互动故事,酷炫特效',
 
   // Easy Mode
   'easy.title': '立码 简单模式',

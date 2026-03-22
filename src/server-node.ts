@@ -1361,11 +1361,11 @@ async function buildSessionsHtml(username?: string): Promise<string> {
         <a class="new-btn" id="new-project-btn" href="/terminal/easy" data-i18n="portal.btn_new_project">+ New Project</a>
       </div>
       ${!isProUser ? `
-      <div id="project-name-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:999;display:flex;align-items:center;justify-content:center;padding:16px">
+      <div id="project-name-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:999;align-items:center;justify-content:center;padding:16px">
         <div style="background:#fff;border-radius:20px;padding:28px 24px;width:100%;max-width:360px;box-shadow:0 8px 40px rgba(0,0,0,.18)">
           <div style="font-size:18px;font-weight:700;color:#1d1d1f;margin-bottom:6px" data-i18n="portal.new_project_title">给项目起个名字</div>
           <div style="font-size:13px;color:#86868b;margin-bottom:18px" data-i18n="portal.new_project_sub">方便以后找到它</div>
-          <input id="pn-input" type="text" placeholder="例：我的网站" maxlength="30"
+          <input id="pn-input" type="text" data-i18n-placeholder="portal.new_project_placeholder" placeholder="例：我的网站" maxlength="30"
             style="width:100%;box-sizing:border-box;padding:11px 14px;border-radius:12px;border:1.5px solid #e5e5ea;font-size:15px;outline:none;margin-bottom:10px">
           <button id="pn-auto" style="width:100%;padding:9px;border-radius:10px;border:1.5px solid #e5e5ea;background:#f5f5f7;font-size:13px;color:#007aff;cursor:pointer;margin-bottom:16px" data-i18n="portal.new_project_auto">随机生成名字</button>
           <div style="display:flex;gap:8px">
@@ -1409,7 +1409,7 @@ async function buildSessionsHtml(username?: string): Promise<string> {
       var pnAuto = document.getElementById('pn-auto');
       var pnCancel = document.getElementById('pn-cancel');
       var pnOk = document.getElementById('pn-ok');
-      var _autoNames = ['我的作品','创意画廊','个人主页','趣味游戏','数据看板','小工具箱','灵感笔记','动态展示','互动故事','酷炫特效'];
+      var _autoNames = _t('portal.new_project_names').split(',');
       function _randName() { return _autoNames[Math.floor(Math.random()*_autoNames.length)] + Math.floor(Math.random()*100); }
       function showModal() {
         pnInput.value = '';
