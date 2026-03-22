@@ -11349,16 +11349,19 @@ const server = http.createServer(async (req, res) => {
         }
         // Create coding dir
         const home = `/home/${newUser}`;
-        fs.mkdirSync(`${home}/coding`, { recursive: true });
+        execSync(`sudo mkdir -p ${home}/coding`);
         // Claude CLI permissions
         const claudeDir = `${home}/.claude`;
-        fs.mkdirSync(claudeDir, { recursive: true });
-        fs.writeFileSync(`${claudeDir}/settings.json`, JSON.stringify({
+        execSync(`sudo mkdir -p ${claudeDir}`);
+        const settingsJson = JSON.stringify({
           permissions: {
             allow: ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Bash'],
             deny: ['Bash(rm -rf *)', 'Bash(git push --force *)', 'Bash(git reset --hard *)', 'Bash(shutdown *)', 'Bash(reboot *)', 'Bash(mkfs *)', 'Bash(userdel *)', 'Bash(passwd *)', 'Bash(chown *)']
           }
-        }, null, 2) + '\n');
+        }, null, 2) + '\n';
+        const tmpSettings = '/tmp/claude-settings.json';
+        fs.writeFileSync(tmpSettings, settingsJson);
+        execSync(`sudo mv ${tmpSettings} ${claudeDir}/settings.json`);
         // chown
         try { execSync(`sudo chown -R ${newUser}:${newUser} ${home}/.claude ${home}/coding`); } catch {}
         // git safe.directory for version tracking
