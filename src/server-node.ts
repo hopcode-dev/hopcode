@@ -11328,7 +11328,11 @@ const server = http.createServer(async (req, res) => {
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', async () => {
       try {
-        const { username: newUser, password: newPass, portStart: newPortStart } = JSON.parse(Buffer.concat(chunks).toString());
+        const _parsed = JSON.parse(Buffer.concat(chunks).toString());
+        const newUser: string = _parsed.username;
+        // Normalize fullwidth ASCII characters (e.g. ！→! ＠→@ ８→8) to halfwidth
+        const newPass: string = (_parsed.password || '').replace(/[\uff01-\uff5e]/g, (c: string) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
+        const newPortStart: string = _parsed.portStart;
         if (!newUser || !newPass) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Username and password required' }));
