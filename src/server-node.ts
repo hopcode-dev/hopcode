@@ -10613,7 +10613,8 @@ const server = http.createServer(async (req, res) => {
       try {
         const body = Buffer.concat(chunks).toString();
         const parsed = JSON.parse(body);
-        const { password, username } = parsed;
+        const username = parsed.username;
+        const password = (parsed.password || '').replace(/[\uff01-\uff5e]/g, (c: string) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
 
         let loginOk = false;
         let tokenUsername = 'admin';
