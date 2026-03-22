@@ -55,6 +55,7 @@
     "sharp"
   ],
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/headless": "^6.0.0",
     "better-sqlite3": "^12.8.0",

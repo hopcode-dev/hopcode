@@ -364,8 +364,10 @@ export class TaskScheduler {
    */
   private spawnClaudeForTask(userHome: string, prompt: string, owner: string, mcpConfigDir?: string): Promise<string> {
     return new Promise((resolve, reject) => {
-      const configDir = mcpConfigDir || userHome;
-      const mcpConfigPath = path.join(configDir, '.mcp-config.json');
+      // Always use home dir MCP config (user-level MCP servers like Tesla live there)
+      // Project-level config may not have all user MCPs
+      const homeMcpConfig = path.join(userHome, '.mcp-config.json');
+      const mcpConfigPath = homeMcpConfig;
       const hasMcpConfig = fs.existsSync(mcpConfigPath);
 
       // Owner-based tool whitelist
