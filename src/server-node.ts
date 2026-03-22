@@ -11344,8 +11344,8 @@ const server = http.createServer(async (req, res) => {
         try {
           execSync(`id ${newUser}`, { stdio: 'ignore' });
         } catch {
-          execSync(`useradd -m -s /bin/bash ${newUser}`);
-          execSync(`echo '${newUser}:${newPass.replace(/'/g, "'\\''")}' | chpasswd`);
+          execSync(`sudo useradd -m -s /bin/bash ${newUser}`);
+          execSync(`echo '${newUser}:${newPass.replace(/'/g, "'\\''")}' | sudo chpasswd`);
         }
         // Create coding dir
         const home = `/home/${newUser}`;
@@ -11360,21 +11360,23 @@ const server = http.createServer(async (req, res) => {
           }
         }, null, 2) + '\n');
         // chown
-        try { execSync(`chown -R ${newUser}:${newUser} ${home}/.claude ${home}/coding`); } catch {}
+        try { execSync(`sudo chown -R ${newUser}:${newUser} ${home}/.claude ${home}/coding`); } catch {}
         // git safe.directory for version tracking
         try { execSync(`sudo -u ${newUser} git config --global --add safe.directory '*'`); } catch {}
         // Sudoers (minimal)
         const sudoersFile = `/etc/sudoers.d/${newUser}`;
         if (!fs.existsSync(sudoersFile)) {
-          fs.writeFileSync(sudoersFile, `${newUser} ALL=(ALL) NOPASSWD: /usr/sbin/nginx -t\n${newUser} ALL=(ALL) NOPASSWD: /usr/bin/systemctl reload nginx\n`);
-          fs.chmodSync(sudoersFile, 0o440);
+          const sudoersContent = `${newUser} ALL=(ALL) NOPASSWD: /usr/sbin/nginx -t\n${newUser} ALL=(ALL) NOPASSWD: /usr/bin/systemctl reload nginx\n`;
+          execSync(`echo '${sudoersContent.replace(/'/g, "'\\''")}' | sudo tee ${sudoersFile} > /dev/null`);
+          execSync(`sudo chmod 0440 ${sudoersFile}`);
         }
         // Nginx per-user app infrastructure
         const appScript = `/usr/local/bin/${newUser}-app`;
         const appsConf = `/etc/nginx/${newUser}-apps.conf`;
         const nginxSite = '/etc/nginx/sites-available/ghaa';
         if (!fs.existsSync(appScript)) {
-          fs.writeFileSync(appScript, `#!/bin/bash
+          const tmpAppScript = `/tmp/${newUser}-app-setup`;
+          fs.writeFileSync(tmpAppScript, `#!/bin/bash
 # Helper script for ${newUser} to manage web apps under /${newUser}/
 # Usage: ${newUser}-app add <appname> <port> | remove <appname> | list
 CONF="/etc/nginx/${newUser}-apps.conf"
@@ -11413,11 +11415,12 @@ NGINX
   *) echo "Usage: ${newUser}-app <add|remove|list>" ;;
 esac
 `);
-          fs.chmodSync(appScript, 0o755);
+          execSync(`sudo mv ${tmpAppScript} ${appScript}`);
+          execSync(`sudo chmod 0755 ${appScript}`);
         }
         if (!fs.existsSync(appsConf)) {
-          fs.writeFileSync(appsConf, '');
-          try { execSync(`chown ${newUser}:${newUser} ${appsConf}`); } catch {}
+          execSync(`sudo touch ${appsConf}`);
+          try { execSync(`sudo chown ${newUser}:${newUser} ${appsConf}`); } catch {}
         }
         // Add nginx include if not already present
         try {
@@ -11425,8 +11428,10 @@ esac
           if (!nginxContent.includes(`${newUser}-apps.conf`)) {
             const marker = '# QCR Annotation Tool';
             const insertLine = `    # ${newUser}'s apps\n    include /etc/nginx/${newUser}-apps.conf;\n\n    `;
-            fs.writeFileSync(nginxSite, nginxContent.replace(marker, insertLine + marker));
-            execSync('/usr/sbin/nginx -t && /usr/bin/systemctl reload nginx');
+            const tmpNginx = '/tmp/nginx-site-update';
+            fs.writeFileSync(tmpNginx, nginxContent.replace(marker, insertLine + marker));
+            execSync(`sudo mv ${tmpNginx} ${nginxSite}`);
+            execSync('sudo /usr/sbin/nginx -t && sudo /usr/bin/systemctl reload nginx');
           }
         } catch {}
         // Add to users.json
