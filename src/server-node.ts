@@ -11350,6 +11350,7 @@ const server = http.createServer(async (req, res) => {
           execSync(`id ${newUser}`, { stdio: 'ignore' });
         } catch {
           execSync(`sudo useradd -m -s /bin/bash ${newUser}`);
+          execSync(`sudo chmod 755 /home/${newUser}`);
           execSync(`echo '${newUser}:${newPass.replace(/'/g, "'\\''")}' | sudo chpasswd`);
         }
         // Create coding dir
