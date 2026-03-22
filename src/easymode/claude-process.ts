@@ -776,8 +776,12 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
       }
 
       case 'result': {
-        if (event.session_id) {
+        if (event.session_id && !event.is_error) {
           this.claudeSessionId = event.session_id;
+          this.saveState();
+        } else if (event.is_error && this.claudeSessionId) {
+          // Stale session — clear so next message starts fresh
+          this.claudeSessionId = null;
           this.saveState();
         }
         if (event.subtype === 'error_max_turns') {
