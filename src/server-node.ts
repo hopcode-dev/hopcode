@@ -12186,7 +12186,17 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
         actualName = await autoRename(parentDir, folderName, true);
         newDir = path.join(parentDir, actualName);
       }
-      await fs.promises.mkdir(newDir, { recursive: false });
+      try {
+        await fs.promises.mkdir(newDir, { recursive: false });
+      } catch (mkdirErr: any) {
+        // Fallback: create as the linux user if hopcode lacks write permission
+        if ((mkdirErr.code === 'EACCES' || mkdirErr.code === 'EPERM') && auth.linuxUser && auth.linuxUser !== 'root') {
+          const { execFileSync } = await import('child_process');
+          execFileSync('sudo', ['-u', auth.linuxUser, 'mkdir', newDir], { timeout: 5000 });
+        } else {
+          throw mkdirErr;
+        }
+      }
       if (posixUser) {
         try { fs.chownSync(newDir, posixUser.uid, posixUser.gid); } catch {}
       }
