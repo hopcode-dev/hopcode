@@ -389,6 +389,10 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
             const mmKey = readFileSync('/root/.claude/minimax.key', 'utf-8');
             writeFileSync(`${claudeHome}/.claude/minimax.key`, mmKey);
           } catch {}
+          try {
+            const creds = readFileSync('/root/.claude/.credentials.json', 'utf-8');
+            writeFileSync(`${claudeHome}/.claude/.credentials.json`, creds);
+          } catch {}
           // chown entire claudeHome to the service process user so claude can read/write it
           try { execFileSync('chown', ['-R', 'hopcode:hopcode', claudeHome]); } catch {}
           console.log(`[claude-process] bootstrapped claude home for ${this.linuxUser}: ${claudeHome}`);
