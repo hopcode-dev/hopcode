@@ -3512,17 +3512,15 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     return rawUrl;
   }
 
-  // Get shareable URL: currentPreviewUrl is already an ID URL, just make it absolute
+  // Get shareable URL: convert /serve/{project}/{id}/{relPath} to /serve/{sessionId}/{id}/{relPath}
   async function getShareableUrl() {
     var baseUrl = getShareUrl();
     if (!baseUrl) return null;
-    // External URLs (e.g. tunnel links) — use as-is
-    if (baseUrl.startsWith('http://') || baseUrl.startsWith('https://')) return baseUrl;
-    // currentPreviewUrl is already a /serve/{project}/{id} URL — just make it absolute
-    var p = currentPreviewUrl;
-    if (!p.startsWith('/')) p = '/' + p;
-    if (!p.startsWith('/terminal/')) p = '/terminal' + p;
-    return location.protocol + '//' + location.host + p;
+    // External tunnel URLs (e.g. tunnel links) — use as-is
+    if ((baseUrl.startsWith('http://') || baseUrl.startsWith('https://'))
+        && baseUrl.indexOf(location.host) < 0) return baseUrl;
+    // Convert project-based serve URL to ID-based URL (handles both paths and same-host absolute URLs)
+    return await toServeIdUrl(baseUrl);
   }
 
   async function showShareQR() {
