@@ -131,7 +131,7 @@ export function setupProjectTemplate(
     // chown project dir to the linux user (so claude -p running as that user can read/write)
     if (username && username !== 'root') {
       try {
-        execFileSync('chown', ['-R', `${username}:${username}`, projectDir], { timeout: 5000 });
+        execFileSync('sudo', ['chown', '-R', `${username}:${username}`, projectDir], { timeout: 5000 });
       } catch (e) {
         console.error(`[template] chown failed for ${projectDir}:`, e);
       }
