@@ -361,6 +361,10 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
         try { execFileSync('sudo', ['-u', this.linuxUser, 'mkdir', '-p', this.projectDir], { timeout: 3000 }); } catch {}
       }
     }
+    // Ensure hopcode can write to project directory (chmod 777 so Claude can create files)
+    if (this.linuxUser && this.linuxUser !== 'root') {
+      try { execFileSync('sudo', ['chmod', '-R', '777', this.projectDir], { timeout: 3000 }); } catch {}
+    }
 
     // Each user gets an isolated HOME so their ~/.claude/ session state, history,
     // and session-env files don't mix with other users running under the same process.

@@ -139,6 +139,7 @@ const en: Record<string, string> = {
   'easy.menu.projects': 'Projects',
   'easy.menu.new_project': 'New Project',
   'easy.menu.lang': 'Language',
+  'easy.menu.getting_started': 'Get Started',
 
   // Files panel
   'easy.files.title': 'Files',
@@ -469,6 +470,7 @@ const zh: Record<string, string> = {
   'easy.menu.projects': '项目',
   'easy.menu.new_project': '新建项目',
   'easy.menu.lang': '语言',
+  'easy.menu.getting_started': '新手指南',
 
   // Files panel
   'easy.files.title': '文件',
@@ -672,6 +674,21 @@ const translations: Record<string, Record<string, string>> = { en, zh };
  */
 export function getI18nScript(): string {
   return `
+// --- Global error handler ---
+window.__errors = [];
+window.onerror = function(msg, src, line, col, err) {
+  var srcName = src ? src.split('/').pop() : 'unknown';
+  var e = msg + ' at ' + srcName + ':' + line;
+  window.__errors.push(e);
+  console.error('[Hopcode Error]', e, err);
+  // Show error banner if not already visible
+  var banner = document.getElementById('__error-banner');
+  if (banner) {
+    banner.textContent = '⚠ ' + e;
+    banner.style.display = 'block';
+  }
+  return false;
+};
 // --- i18n ---
 var _i18n = ${JSON.stringify(translations)};
 var _lang = (function() {

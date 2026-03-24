@@ -3806,7 +3806,10 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         // Server detected new/modified HTML — auto-load preview
         // During initial reconnect, just add to list without switching active URL
         if (d.url) {
-          setPreviewUrl(d.url, true, _initialPreviewSync);
+          // Convert to ID-based URL to handle Chinese filenames (WeChat compatibility)
+          toServeIdUrl(d.url).then(function(idUrl) {
+            setPreviewUrl(idUrl, true, _initialPreviewSync);
+          });
         }
       } else if (d.type === 'preview_suggest') {
         // Non-previewable file generated — suggest HTML preview
@@ -4351,10 +4354,10 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       var line = lines[i];
       // If line contains a URL that ends at end-of-line without punctuation/space,
       // and next line starts with URL-valid chars — it's likely a wrapped URL
-      while (i + 1 < lines.length && /https?:\\/\\/[^\\s]+[a-zA-Z0-9/\\-_~]$/.test(line.trimEnd())) {
+      while (i + 1 < lines.length && /https?:\\/\\/[^\\s]+[a-zA-Z0-9/\\-_~\u4e00-\u9fff]$/.test(line.trimEnd())) {
         var nextTrimmed = lines[i + 1].trim();
         var nextWord = (nextTrimmed.split(/\\s/)[0] || '');
-        if (nextWord && /^[a-zA-Z0-9\\-._~:/?#\\[\\]@!$&'()*+,;=%]+$/.test(nextWord)) {
+        if (nextWord && /^[a-zA-Z0-9\\-._~:/?#\\[\\]@!$&'()*+,;=%\u4e00-\u9fff]+$/.test(nextWord)) {
           // Join: append next line's first word (or whole line if single word)
           if (nextWord === nextTrimmed) {
             line = line.trimEnd() + nextTrimmed;
@@ -4376,17 +4379,30 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   function linkify(text) {
     var fixed = joinSplitUrls(text);
     var escaped = escHtml(fixed);
-    var withLinks = escaped.replace(/(https?:\\/\\/[^\\s<>'")\`\\u3000-\\u303F\\uFF00-\\uFF60]+)/g, function(m) {
+    // First, handle markdown links [text](url) - store them as placeholders
+    var markdownLinks = [];
+    var withMarkdownLinks = escaped.replace(/\[([^\]]+)\]\((https?:\/\/[^\s<>'")\`\u3000-\u303F\uFF00-\uFF60]+)\)/g, function(m, linkText, url) {
+      markdownLinks.push({text: linkText, url: url});
+      return '___MDLINK_' + (markdownLinks.length - 1) + '___';
+    });
+    // Then handle bare URLs
+    var withLinks = withMarkdownLinks.replace(/(https?:\\/\\/[^\\s<>'")\`\u3000-\u303F\uFF00-\uFF60\u4e00-\u9fff]+)/g, function(m) {
       // Strip trailing punctuation (ASCII + CJK) that is not part of the URL
-      var url = m.replace(/[).,;:!?\`'"\\]}>\\u3001\\u3002\\uFF01\\uFF09\\uFF0C\\uFF0E\\uFF1A\\uFF1B\\uFF1F\\uFF5E*]+$/, '');
+      var url = m.replace(/[).,;:!?\`'"\]}>\u3001\u3002\uFF01\uFF09\uFF0C\uFF0E\uFF1A\uFF1B\uFF1F\uFF5E*]+$/, '');
       if (!url) url = m;
       var trail = m.substring(url.length);
       return '<a href="' + url + '" class="chat-link" style="color:#007aff;word-break:break-all;text-decoration:underline;">' + url + '</a>' + trail;
     });
+    // Restore markdown links as styled links
+    for (var i = 0; i < markdownLinks.length; i++) {
+      var md = markdownLinks[i];
+      withLinks = withLinks.replace('___MDLINK_' + i + '___', 
+        '<a href="' + md.url + '" class="chat-link" style="color:#007aff;word-break:break-all;text-decoration:underline;">' + md.text + '</a>');
+    }
     // Highlight @mentions
     var withMentions = withLinks.replace(/@([\w\u4e00-\u9fff]+)/g, '<span class="mention">@$1</span>');
     // Convert newlines to HTML breaks
-    return withMentions.replace(/\\n{2,}/g, '<br><br>').replace(/\\n/g, ' ');
+    return withMentions.replace(/\n{2,}/g, '<br><br>').replace(/\n/g, ' ');
   }
 
   // Intercept link clicks in chat — open in preview instead of navigating away
