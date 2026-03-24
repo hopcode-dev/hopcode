@@ -1477,7 +1477,7 @@ async function buildSessionsHtml(username?: string): Promise<string> {
       var overlay = document.createElement('div');
       overlay.className = 'confirm-overlay';
       overlay.innerHTML = '<div class="confirm-box">' +
-        '<p>' + _t('portal.confirm_delete', {name: sessionName.replace(/</g,'&lt;')}) + '</p>' +
+        '<p>' + _t('portal.confirm_delete', {name: sessionName.replace(/\x3c/g,'&lt;')}) + '</p>' +
         '<div class="confirm-btns">' +
         '<button class="btn-cancel">' + _t('cancel') + '</button>' +
         '<button class="btn-delete">' + _t('delete') + '</button>' +
@@ -5280,7 +5280,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       var displayMsg = _translateVersionMsg(entry.message);
       div.innerHTML = '<div style="display:flex;align-items:center;gap:8px;">'
         + '<span style="color:#4ade80;font-size:12px;min-width:40px;">' + timeStr + '</span>'
-        + '<span style="color:#e0e0e0;font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + displayMsg.replace(/</g,'&lt;') + '</span>'
+        + '<span style="color:#e0e0e0;font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + displayMsg.replace(/\x3c/g,'&lt;') + '</span>'
         + (i > 0 ? '<button class="ver-restore key-btn" data-idx="' + idx + '" style="font-size:11px;padding:2px 8px;white-space:nowrap;">' + _t('easy.version.restore') + '</button>' : '<span style="color:#888;font-size:11px;">' + _t('easy.version.current') + '</span>')
         + '</div>'
         + '<div style="color:#888;font-size:11px;margin-top:2px;">' + entry.author + '</div>'
@@ -5312,7 +5312,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       var idx = i + 1;
       div.innerHTML = '<div style="display:flex;align-items:center;gap:8px;">'
         + '<span style="color:#4ade80;font-size:12px;min-width:40px;">' + timeStr + '</span>'
-        + '<span style="color:#e0e0e0;font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + displayMsg.replace(/</g,'&lt;') + '</span>'
+        + '<span style="color:#e0e0e0;font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + displayMsg.replace(/\x3c/g,'&lt;') + '</span>'
         + (i > 0 ? '<button class="ver-file-restore key-btn" data-idx="' + idx + '" style="font-size:11px;padding:2px 8px;white-space:nowrap;">' + _t('easy.version.restore') + '</button>' : '<span style="color:#888;font-size:11px;">' + _t('easy.version.current') + '</span>')
         + '</div>'
         + '<div style="color:#888;font-size:11px;margin-top:2px;">' + entry.author + '</div>';
@@ -5556,7 +5556,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   }
 
   function escHtml(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return s.replace(/&/g, '&amp;').replace(/\x3c/g, '&lt;').replace(/\x3e/g, '&gt;');
   }
 
   // File upload (from files panel — uses filePath which is the panel's current dir)
@@ -9286,7 +9286,7 @@ const indexHtml = `<!DOCTYPE html>
     }
 
     function fbEsc(s) { return s.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'"); }
-    function fbEscHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+    function fbEscHtml(s) { return s.replace(/&/g,'&amp;').replace(/\x3c/g,'&lt;').replace(/\x3e/g,'&gt;'); }
 
     // Double-click on file → confirm then open/download
     fbList.addEventListener('dblclick', function(e) {
@@ -9820,6 +9820,8 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
 .form-row { display:flex; gap:10px; flex-wrap:wrap; }
 .form-row input { flex:1; min-width:120px; padding:10px 12px; border-radius:8px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:14px; outline:none; }
 .form-row input:focus { border-color:#60a5fa; }
+.admin-input:focus { border-color:#60a5fa !important; }
+.admin-input:not(:focus) { border-color:#334155; }
 .form-row input::placeholder { color:#475569; }
 .create-btn { padding:10px 20px; border-radius:8px; border:none; background:#3b82f6; color:#fff; font-size:14px; font-weight:600; cursor:pointer; white-space:nowrap; }
 .create-btn:hover { background:#2563eb; }
@@ -10004,7 +10006,7 @@ ${getI18nScript()}
           'value="' + escAttr(val) + '" ' +
           'placeholder="' + escAttr(f.placeholder || '') + '" ' +
           'style="flex:1;min-width:0;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;font-size:12px;font-family:monospace;outline:none" ' +
-          'onfocus="this.style.borderColor=\'#60a5fa\'" onblur="this.style.borderColor=\'#334155\'">' +
+          'class="admin-input">' +
           (f.secret ? '<button onclick="toggleSecret(this)" style="padding:4px 8px;border-radius:6px;border:1px solid #334155;background:transparent;color:#64748b;font-size:11px;cursor:pointer;white-space:nowrap;flex-shrink:0">显示</button>' : '') +
           '</div>' +
           (f.desc ? '<div style="font-size:11px;color:#475569;margin-top:6px;line-height:1.5">' + escHtml(f.desc) + '</div>' : '');
@@ -10015,8 +10017,8 @@ ${getI18nScript()}
     });
   }
 
-  function escAttr(s) { return s.replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
-  function escHtml(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+  function escAttr(s) { return s.replace(/"/g, '&quot;').replace(/\x3c/g, '&lt;'); }
+  function escHtml(s) { return s.replace(/&/g, '&amp;').replace(/\x3c/g, '&lt;').replace(/\x3e/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 
   window.toggleSecret = function(btn) {
     var input = btn.previousElementSibling;
