@@ -169,8 +169,16 @@ function getProviderEnv(username: string): Record<string, string> {
   console.log(`[getProviderEnv] username=${username} claudeProvider=${provider}`);
   const key = cfg?.claudeApiKey || '';
   if (provider === 'minimax') {
+    // Fall back to shared hopcode minimax key if user has no personal key
+    let minimaxKey = key;
+    if (!minimaxKey) {
+      try {
+        const sharedSettings = JSON.parse(fs.readFileSync('/home/hopcode/.claude/settings.json', 'utf-8'));
+        minimaxKey = sharedSettings?.env?.ANTHROPIC_AUTH_TOKEN || '';
+      } catch {}
+    }
     return {
-      ANTHROPIC_AUTH_TOKEN: key,
+      ANTHROPIC_AUTH_TOKEN: minimaxKey,
       ANTHROPIC_BASE_URL: 'https://api.minimaxi.com/anthropic',
       API_TIMEOUT_MS: '3000000',
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
