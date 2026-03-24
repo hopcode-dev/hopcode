@@ -278,8 +278,10 @@ export class WeComBot implements Channel {
     onConnected?: () => void,
     onFailed?: (e: Error) => void,
   ): Promise<void> {
+    const raw = JSON.stringify(data).slice(0, 200);
     const cmd = String(data.cmd ?? '').trim().toLowerCase();
     const reqId = String(data.headers?.req_id ?? '').trim();
+    this.log(`[FRAME-IN] cmd="${cmd}" reqId="${reqId}" data=${raw}`);
 
     // 1. Check if this is an ACK for a pending reply
     if (reqId && this.pendingAcks.has(reqId)) {
@@ -328,21 +330,21 @@ export class WeComBot implements Channel {
         this.log(`Command rejected reqId=${reqId}: errcode=${errcode} errmsg=${errmsg}`);
       }
     }
+
+    // 5. Unrecognized frame — log for debugging
+    this.log(`[WECOM-RECV-RAW] Unrecognized frame: cmd="${cmd}" reqId="${reqId}" keys=${Object.keys(data).join(',')} body=${JSON.stringify(data).slice(0, 300)}`);
   }
 
   private async handleIncomingMessage(reqId: string, body: any, cmd: string): Promise<void> {
-    if (!reqId || !body) return;
-
-    // Log unknown userId messages for debugging (WeCom API may have changed)
-    if (cmd === CMD_EVENT_CALLBACK && !body.msgtype) {
-      const unknownUserId = body.from?.userid;
-      if (!unknownUserId) {
-        this.log(`[DEBUG] Unknown userId message: cmd=${cmd} keys=${Object.keys(body).join(',')} body=${JSON.stringify(body).slice(0, 300)}`);
-      }
-      return;
-    }
+    if (!body) return;
 
     const userId = body.from?.userid;
+
+    // Log unknown userId messages for debugging (WeCom API may have changed)
+    if (cmd === CMD_EVENT_CALLBACK && !body.msgtype && !userId) {
+      this.log(`[DEBUG] Unknown userId message: cmd=${cmd} keys=${Object.keys(body).join(',')} body=${JSON.stringify(body).slice(0, 300)}`);
+      return;
+    }
     const chatId = body.chatid || body.from?.chatid || '';
     const msgId = body.msgid;
     const responseUrl = body.response_url;
@@ -413,7 +415,7 @@ export class WeComBot implements Channel {
       imageUrl = fileUrl; // reuse imageUrl field for download
       content = `[用户发送了文件: ${fileName}]`;
     } else {
-      this.log(`Skipped ${msgtype} message from ${userId || 'unknown'}`);
+      this.log(`[WECOM-RECV] Skipped unknown msgtype="${msgtype}" from userId="${userId || 'unknown'}" cmd="${cmd}" reqId="${reqId}" fullBody=${JSON.stringify(body).slice(0, 500)}`);
       return;
     }
 
