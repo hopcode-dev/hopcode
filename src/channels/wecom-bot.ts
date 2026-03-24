@@ -333,8 +333,14 @@ export class WeComBot implements Channel {
   private async handleIncomingMessage(reqId: string, body: any, cmd: string): Promise<void> {
     if (!reqId || !body) return;
 
-    // For event_callback without msgtype, it's an event — skip
-    if (cmd === CMD_EVENT_CALLBACK && !body.msgtype) return;
+    // Log unknown userId messages for debugging (WeCom API may have changed)
+    if (cmd === CMD_EVENT_CALLBACK && !body.msgtype) {
+      const unknownUserId = body.from?.userid;
+      if (!unknownUserId) {
+        this.log(`[DEBUG] Unknown userId message: cmd=${cmd} keys=${Object.keys(body).join(',')} body=${JSON.stringify(body).slice(0, 300)}`);
+      }
+      return;
+    }
 
     const userId = body.from?.userid;
     const chatId = body.chatid || body.from?.chatid || '';
