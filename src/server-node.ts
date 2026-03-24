@@ -12264,18 +12264,17 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
       }
       if (resolvedFilePart === filePart) {
         // No ID match found — use original path lookup
+        let foundDirect = false;
         for (const c of candidates) {
           const testPath = path.resolve(c, '.' + filePart);
           if (testPath.startsWith(c + '/') || testPath === c) {
-            try { fs.accessSync(testPath); projectRoot = c; break; } catch {}
+            try { fs.accessSync(testPath); projectRoot = c; foundDirect = true; break; } catch {}
           }
         }
         // Fallback: check workspace/ subdirectory (HTML files use relative img paths)
-        if (!projectRoot) {
-          for (const c of candidates) {
-            const wsPath = path.resolve(c, './workspace' + filePart);
-            try { fs.accessSync(wsPath); projectRoot = c; resolvedFilePart = '/workspace' + filePart; break; } catch {}
-          }
+        if (!foundDirect && projectRoot) {
+          const wsPath = path.resolve(projectRoot, './workspace' + filePart);
+          try { fs.accessSync(wsPath); resolvedFilePart = '/workspace' + filePart; } catch {}
         }
       }
       const filePath = path.resolve(projectRoot, '.' + resolvedFilePart);
