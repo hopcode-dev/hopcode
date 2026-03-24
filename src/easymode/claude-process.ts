@@ -417,11 +417,12 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
 
     let child: ChildProcess;
     if (this.linuxUser && this.linuxUser !== 'root') {
-      // Run as the actual user via sudo -u
+      // Run as the actual user via sudo -u, passing env vars explicitly
+      // (sudo strips env by default, so we pass them via `env KEY=VAL ...`)
       const claudeBin = process.env.CLAUDE_BIN || 'claude';
-      child = spawn('sudo', ['-u', this.linuxUser, claudeBin, ...args], {
+      const envPairs = Object.entries(env).map(([k, v]) => `${k}=${v}`);
+      child = spawn('sudo', ['-u', this.linuxUser, 'env', ...envPairs, claudeBin, ...args], {
         cwd: this.projectDir,
-        env,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } else {
