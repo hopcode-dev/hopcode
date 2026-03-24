@@ -12270,6 +12270,13 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
             try { fs.accessSync(testPath); projectRoot = c; break; } catch {}
           }
         }
+        // Fallback: check workspace/ subdirectory (HTML files use relative img paths)
+        if (!projectRoot) {
+          for (const c of candidates) {
+            const wsPath = path.resolve(c, './workspace' + filePart);
+            try { fs.accessSync(wsPath); projectRoot = c; resolvedFilePart = '/workspace' + filePart; break; } catch {}
+          }
+        }
       }
       const filePath = path.resolve(projectRoot, '.' + resolvedFilePart);
 
