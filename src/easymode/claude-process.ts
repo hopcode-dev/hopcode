@@ -306,7 +306,7 @@ export class ClaudeProcess {
     // Only pass --model if providerEnv has a base URL (i.e. ctok/custom provider).
     // For users with MiniMax configured in their own settings.json, let the settings take effect.
     const modelArg = this.providerEnv.ANTHROPIC_BASE_URL
-      ? [(this.providerEnv.ANTHROPIC_DEFAULT_SONNET_MODEL ? 'sonnet' : 'MiniMax-M2.7-highspeed')]
+      ? [this.providerEnv.ANTHROPIC_DEFAULT_SONNET_MODEL || 'MiniMax-M2.7-highspeed']
       : [];
     const args = [
       '-p', promptText,
