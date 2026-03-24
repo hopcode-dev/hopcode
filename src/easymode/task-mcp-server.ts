@@ -65,24 +65,22 @@ const TOOLS = [
   },
   {
     name: 'delete_task',
-    description: 'Delete a scheduled task by ID.',
+    description: 'Delete a scheduled task. If no id is provided, deletes the most recent draft task (useful when user says "delete" after seeing a test result).',
     inputSchema: {
       type: 'object',
       properties: {
-        id: { type: 'string', description: 'The task ID to delete' },
+        id: { type: 'string', description: 'The task ID to delete. If not provided, deletes the most recent draft task.' },
       },
-      required: ['id'],
     },
   },
   {
     name: 'activate_task',
-    description: 'Activate a draft task after user approves the test run result.',
+    description: 'Activate a draft task after user approves the test run result. If no id is provided, activates the most recent draft task (useful when user says "activate" after seeing a test result).',
     inputSchema: {
       type: 'object',
       properties: {
-        id: { type: 'string', description: 'The task ID to activate' },
+        id: { type: 'string', description: 'The task ID to activate. If not provided, activates the most recent draft task.' },
       },
-      required: ['id'],
     },
   },
 ];
@@ -169,9 +167,22 @@ function handleListTasks(): string {
 
 function handleDeleteTask(input: any): string {
   const tasks = readTasks();
-  const idx = tasks.findIndex(t => t.id === input.id);
-  if (idx < 0) return `Error: task "${input.id}" not found.`;
-  const name = tasks[idx]!.name;
+  let task: TaskDef | undefined;
+  let idx: number;
+  if (input.id) {
+    idx = tasks.findIndex(t => t.id === input.id);
+    if (idx < 0) return `Error: task "${input.id}" not found.`;
+    task = tasks[idx];
+  } else {
+    // No id provided — find the most recent draft task
+    const drafts = tasks.filter(t => t.status === 'draft');
+    if (drafts.length === 0) return 'No draft task found to delete.';
+    // Use the most recently created draft
+    drafts.sort((a, b) => b.createdAt - a.createdAt);
+    task = drafts[0];
+    idx = tasks.findIndex(t => t.id === task!.id);
+  }
+  const name = task!.name;
   tasks.splice(idx, 1);
   writeTasks(tasks);
   return `Deleted task "${name}".`;
@@ -179,8 +190,17 @@ function handleDeleteTask(input: any): string {
 
 function handleActivateTask(input: any): string {
   const tasks = readTasks();
-  const task = tasks.find(t => t.id === input.id);
-  if (!task) return `Error: task "${input.id}" not found.`;
+  let task: TaskDef | undefined;
+  if (input.id) {
+    task = tasks.find(t => t.id === input.id);
+    if (!task) return `Error: task "${input.id}" not found.`;
+  } else {
+    // No id provided — find the most recent draft task
+    const drafts = tasks.filter(t => t.status === 'draft');
+    if (drafts.length === 0) return 'No draft task found to activate.';
+    drafts.sort((a, b) => b.createdAt - a.createdAt);
+    task = drafts[0];
+  }
   if (task.status === 'active') return `Task "${task.name}" is already active.`;
   task.status = 'active';
   writeTasks(tasks);

@@ -165,10 +165,10 @@ function saveUsersConfig(): void {
 
 function getProviderEnv(username: string): Record<string, string> {
   const cfg = usersConfig[username];
-  console.log(`[getProviderEnv] username=${username} claudeProvider=${cfg?.claudeProvider}`);
-  if (!cfg?.claudeProvider) return {};
-  const key = cfg.claudeApiKey || '';
-  if (cfg.claudeProvider === 'minimax' && key) {
+  const provider = cfg?.claudeProvider || 'minimax'; // default to minimax
+  console.log(`[getProviderEnv] username=${username} claudeProvider=${provider}`);
+  const key = cfg?.claudeApiKey || '';
+  if (provider === 'minimax') {
     return {
       ANTHROPIC_AUTH_TOKEN: key,
       ANTHROPIC_BASE_URL: 'https://api.minimaxi.com/anthropic',
@@ -181,7 +181,7 @@ function getProviderEnv(username: string): Record<string, string> {
       ANTHROPIC_DEFAULT_OPUS_MODEL: 'MiniMax-M2.5',
     };
   }
-  if (cfg.claudeProvider === 'glm') {
+  if (provider === 'glm') {
     // GLM: always read from ~/.claude/glm.key file first, fallback to config key
     const linuxUser = cfg.linuxUser || username;
     const homeDir = linuxUser === 'root' ? '/root' : `/home/${linuxUser}`;
@@ -207,7 +207,7 @@ function getProviderEnv(username: string): Record<string, string> {
       };
     }
   }
-  if (cfg.claudeProvider === 'ctok') {
+  if (provider === 'ctok') {
     // ctok.ai — use clean HOME so settings.json MiniMax vars don't override
     const ctokKey = cfg.claudeApiKey || '';
     return {
@@ -4379,30 +4379,30 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   function linkify(text) {
     var fixed = joinSplitUrls(text);
     var escaped = escHtml(fixed);
-    // First, handle markdown links [text](url) - store them as placeholders
+    var linkStyle = 'color:#007aff;word-break:break-all;text-decoration:underline;';
+    // Handle markdown links [text](url) - store as placeholders
     var markdownLinks = [];
-    var withMarkdownLinks = escaped.replace(/\[([^\]]+)\]\((https?:\/\/[^\s<>'")\`\u3000-\u303F\uFF00-\uFF60]+)\)/g, function(m, linkText, url) {
+    var withMarkdownLinks = escaped.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)<>"]+)\\)/g, function(m, linkText, url) {
       markdownLinks.push({text: linkText, url: url});
       return '___MDLINK_' + (markdownLinks.length - 1) + '___';
     });
-    // Then handle bare URLs
-    var withLinks = withMarkdownLinks.replace(/(https?:\\/\\/[^\\s<>'")\`\u3000-\u303F\uFF00-\uFF60\u4e00-\u9fff]+)/g, function(m) {
-      // Strip trailing punctuation (ASCII + CJK) that is not part of the URL
-      var url = m.replace(/[).,;:!?\`'"\]}>\u3001\u3002\uFF01\uFF09\uFF0C\uFF0E\uFF1A\uFF1B\uFF1F\uFF5E*]+$/, '');
+    // Handle bare URLs
+    var withLinks = withMarkdownLinks.replace(/(https?:\\/\\/[^\\s<>"()\\[\\]]+)/g, function(m) {
+      var url = m.replace(/[).,;:!?'"\\]}>*]+$/, '');
       if (!url) url = m;
       var trail = m.substring(url.length);
-      return '<a href="' + url + '" class="chat-link" style="color:#007aff;word-break:break-all;text-decoration:underline;">' + url + '</a>' + trail;
+      return '<a href="' + url + '" class="chat-link" style="' + linkStyle + '">' + url + '</a>' + trail;
     });
-    // Restore markdown links as styled links
+    // Restore markdown links
     for (var i = 0; i < markdownLinks.length; i++) {
       var md = markdownLinks[i];
-      withLinks = withLinks.replace('___MDLINK_' + i + '___', 
-        '<a href="' + md.url + '" class="chat-link" style="color:#007aff;word-break:break-all;text-decoration:underline;">' + md.text + '</a>');
+      withLinks = withLinks.replace('___MDLINK_' + i + '___',
+        '<a href="' + md.url + '" class="chat-link" style="' + linkStyle + '">' + md.text + '</a>');
     }
     // Highlight @mentions
-    var withMentions = withLinks.replace(/@([\w\u4e00-\u9fff]+)/g, '<span class="mention">@$1</span>');
+    var withMentions = withLinks.replace(/@(\\w+)/g, '<span class="mention">@$1</span>');
     // Convert newlines to HTML breaks
-    return withMentions.replace(/\n{2,}/g, '<br><br>').replace(/\n/g, ' ');
+    return withMentions.replace(/\\n{2,}/g, '<br><br>').replace(/\\n/g, ' ');
   }
 
   // Intercept link clicks in chat — open in preview instead of navigating away
@@ -9854,26 +9854,57 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
 .toast { position:fixed; bottom:30px; left:50%; transform:translateX(-50%) translateY(20px); background:#1e293b; color:#e2e8f0; padding:10px 24px; border-radius:20px; font-size:14px; opacity:0; transition:all 0.3s; z-index:100; box-shadow:0 4px 12px rgba(0,0,0,0.4); }
 .toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
 .toast.error { border:1px solid #ef4444; }
+
+.tabs { display:flex; gap:8px; margin-bottom:20px; border-bottom:1px solid #1e293b; }
+.tab { padding:10px 16px; background:transparent; border:none; color:#64748b; font-size:14px; cursor:pointer; border-bottom:2px solid transparent; transition:all 0.2s; }
+.tab:hover { color:#94a3b8; }
+.tab.active { color:#60a5fa; border-bottom-color:#60a5fa; }
+.tab-content { display:none; }
+.tab-content.active { display:block; }
+.config-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:12px; }
+.config-item { background:#0f172a; padding:12px; border-radius:8px; }
+.config-label { font-size:11px; color:#64748b; margin-bottom:4px; }
+.config-value { font-size:13px; color:#e2e8f0; font-family:monospace; }
 </style>
 </head>
 <body>
 <div class="container">
   <div class="header">
-    <h1 id="page-title">User Management</h1>
+    <h1 id="page-title">Admin</h1>
     <a class="back-link" href="/terminal" id="back-link">← Back</a>
   </div>
 
-  <div class="create-form">
-    <h2 id="create-title">Create User</h2>
-    <div class="form-row">
-      <input type="text" id="new-username" placeholder="Username" autocomplete="off" autocapitalize="off">
-      <input type="text" id="new-password" placeholder="Password" autocomplete="off">
-      <input type="number" id="new-port-start" placeholder="端口起始 (如 8100)" style="width:160px" autocomplete="off">
-      <button class="create-btn" id="create-btn">Create</button>
-    </div>
+  <div class="tabs">
+    <button class="tab active" data-tab="users">用户管理</button>
+    <button class="tab" data-tab="config">系统配置</button>
   </div>
 
-  <div class="user-list" id="user-list"></div>
+  <div class="tab-content active" id="tab-users">
+    <div class="create-form">
+      <h2 id="create-title">Create User</h2>
+      <div class="form-row">
+        <input type="text" id="new-username" placeholder="Username" autocomplete="off" autocapitalize="off">
+        <input type="text" id="new-password" placeholder="Password" autocomplete="off">
+        <input type="number" id="new-port-start" placeholder="端口起始 (如 8100)" style="width:160px" autocomplete="off">
+        <button class="create-btn" id="create-btn">Create</button>
+      </div>
+    </div>
+    <div class="user-list" id="user-list"></div>
+  </div>
+
+  <div class="tab-content" id="tab-config">
+    <div class="create-form" id="config-form-wrap">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <h2>系统配置</h2>
+        <div style="display:flex;gap:8px">
+          <button class="create-btn" id="save-config-btn" style="padding:7px 18px;font-size:13px">保存</button>
+        </div>
+      </div>
+      <div id="config-groups" style="display:flex;flex-direction:column;gap:20px">
+        <div style="color:#64748b;font-size:13px">加载中...</div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -9881,6 +9912,138 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
 <script>
 ${getI18nScript()}
 (function() {
+  // Tab switching
+  document.querySelectorAll('.tab').forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      var target = this.getAttribute('data-tab');
+      document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+      document.querySelectorAll('.tab-content').forEach(function(c) { c.classList.remove('active'); });
+      this.classList.add('active');
+      document.getElementById('tab-' + target).classList.add('active');
+      if (target === 'config') loadConfig();
+    });
+  });
+
+  // Config management
+  var CONFIG_GROUPS = [
+    { label: "Basic Config", desc: "Required server settings", fields: [
+      { key: "AUTH_PASSWORD", label: "Login Password", secret: true, required: true, placeholder: "all users password", desc: "Required. Web login password, generates HMAC auth token" },
+      { key: "PORT", label: "UI Port", placeholder: "3000", desc: "HTTP server port, default 3000" },
+      { key: "PTY_SERVICE_PORT", label: "PTY Internal Port", placeholder: "3002", desc: "Internal PTY service port, default 3002" },
+      { key: "SHELL_CMD", label: "Shell Command", placeholder: "bash", desc: "Shell for terminal sessions, default bash" },
+      { key: "CLAUDE_BIN", label: "Claude CLI Path", placeholder: "/usr/bin/claude", desc: "Claude Code CLI binary path" },
+      { key: "PUBLIC_URL", label: "Public URL", placeholder: "https://your-domain.com", desc: "Public URL for share links and QR codes" },
+      { key: "CLOUDFLARE_TUNNEL", label: "Cloudflare Tunnel", placeholder: "1", desc: "Set to 1 for auto Cloudflare Tunnel on startup" },
+      { key: "RECORDING_RETENTION_DAYS", label: "Recording Retention", placeholder: "30", desc: "Days to keep terminal recordings, default 30" },
+    ]},
+    { label: "Voice - Volcano Engine", desc: "Volcano speech recognition and TTS", fields: [
+      { key: "VOLCANO_APP_ID", label: "App ID", required: true, placeholder: "7564153230", desc: "Volcano Engine App ID, https://www.volcengine.com/" },
+      { key: "VOLCANO_TOKEN", label: "Token", secret: true, required: true, placeholder: "Volcano Token", desc: "Volcano Engine auth token" },
+      { key: "VOLCANO_ASR_RESOURCE_ID", label: "ASR Resource ID", placeholder: "volc.bigasr.sauc.duration", desc: "Speech recognition resource ID" },
+      { key: "VOLCANO_RESOURCE_ID", label: "TTS Resource ID", placeholder: "seed-tts-2.0", desc: "Text-to-speech resource ID" },
+      { key: "VOLCANO_VOICE", label: "TTS Voice", placeholder: "zh_female_wanwanxiaohe_moon_bigtts", desc: "TTS voice ID" },
+    ]},
+    { label: "WeCom Bot (WebSocket)", desc: "WeChat Work bot WebSocket channel", fields: [
+      { key: "WECOM_BOT_ID", label: "Bot ID 1", placeholder: "aib0o1yXItTA4yx1yltr-xxx", desc: "WeCom bot ID" },
+      { key: "WECOM_BOT_SECRET", label: "Bot Secret 1", secret: true, placeholder: "Bot Secret", desc: "WeCom bot Secret" },
+      { key: "WECOM_BOT_ID_2", label: "Bot ID 2", placeholder: "Bot ID 2", desc: "Optional second bot" },
+      { key: "WECOM_BOT_SECRET_2", label: "Bot Secret 2", secret: true, placeholder: "Bot Secret 2", desc: "Optional second bot secret" },
+      { key: "WECOM_BOT_ID_3", label: "Bot ID 3", placeholder: "Bot ID 3", desc: "Optional third bot" },
+      { key: "WECOM_BOT_SECRET_3", label: "Bot Secret 3", secret: true, placeholder: "Bot Secret 3", desc: "Optional third bot secret" },
+    ]},
+    { label: "WeCom App (HTTP Callback)", desc: "WeChat Work app HTTP callback channel", fields: [
+      { key: "WECOM_CORP_ID", label: "Corp ID", placeholder: "ww1234567890abcdef", desc: "WeCom Corp ID" },
+      { key: "WECOM_SECRET", label: "App Secret", secret: true, placeholder: "App Secret", desc: "WeCom app Secret" },
+      { key: "WECOM_AGENT_ID", label: "Agent ID", placeholder: "1000001", desc: "WeCom Agent ID" },
+      { key: "WECOM_CALLBACK_TOKEN", label: "Callback Token", placeholder: "random string", desc: "WeCom callback verification token" },
+      { key: "WECOM_CALLBACK_ENCODING_AES_KEY", label: "Callback AES Key", secret: true, placeholder: "43-char AES key", desc: "WeCom callback AES encryption key" },
+      { key: "WECOM_CALLBACK_PORT", label: "Callback Port", placeholder: "3003", desc: "HTTP callback server port, default 3003" },
+      { key: "USER_WECOM_ID", label: "Notify User ID", placeholder: "user001", desc: "Default WeCom user ID for notifications" },
+    ]},
+    { label: "Search / Browser Proxy", desc: "Claude web search and browser tools", fields: [
+      { key: "SEARXNG_URL", label: "SearXNG URL", placeholder: "http://localhost:8888", desc: "Self-hosted SearXNG for Claude web search fallback" },
+      { key: "BROWSER_PROXY_URL", label: "Browser Proxy URL", placeholder: "http://127.0.0.1:3004", desc: "Browser proxy for Claude to access web pages" },
+    ]},
+  ];
+
+  var configData = {};
+
+  function loadConfig() {
+    fetch('/terminal/api/admin/config', { credentials: 'include' })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        configData = data;
+        renderConfig();
+      });
+  }
+
+  function renderConfig() {
+    var wrap = document.getElementById('config-groups');
+    wrap.innerHTML = '';
+    CONFIG_GROUPS.forEach(function(group) {
+      var section = document.createElement('div');
+      section.innerHTML =
+        '<div style="font-size:13px;font-weight:700;color:#e2e8f0;margin-bottom:4px">' + group.label + '</div>' +
+        (group.desc ? '<div style="font-size:12px;color:#64748b;margin-bottom:12px">' + group.desc + '</div>' : '');
+      var grid = document.createElement('div');
+      grid.className = 'config-grid';
+      group.fields.forEach(function(f) {
+        var val = configData[f.key] || '';
+        var hasVal = !!val;
+        var item = document.createElement('div');
+        item.className = 'config-item';
+        item.style.cssText = 'border:1px solid ' + (f.required && !hasVal ? '#7f1d1d' : '#1e293b') + ';transition:border-color 0.2s';
+        item.innerHTML =
+          '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">' +
+          '<span class="config-label" style="margin:0">' + f.label + '</span>' +
+          (f.required ? '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:' + (hasVal ? '#14532d' : '#7f1d1d') + ';color:' + (hasVal ? '#86efac' : '#fca5a5') + '">' + (hasVal ? '已配置' : '必填') + '</span>' : '') +
+          '</div>' +
+          '<div style="display:flex;gap:6px">' +
+          '<input type="' + (f.secret ? 'password' : 'text') + '" ' +
+          'data-key="' + f.key + '" ' +
+          'value="' + escAttr(val) + '" ' +
+          'placeholder="' + escAttr(f.placeholder || '') + '" ' +
+          'style="flex:1;min-width:0;padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;font-size:12px;font-family:monospace;outline:none" ' +
+          'onfocus="this.style.borderColor=\'#60a5fa\'" onblur="this.style.borderColor=\'#334155\'">' +
+          (f.secret ? '<button onclick="toggleSecret(this)" style="padding:4px 8px;border-radius:6px;border:1px solid #334155;background:transparent;color:#64748b;font-size:11px;cursor:pointer;white-space:nowrap;flex-shrink:0">显示</button>' : '') +
+          '</div>' +
+          (f.desc ? '<div style="font-size:11px;color:#475569;margin-top:6px;line-height:1.5">' + escHtml(f.desc) + '</div>' : '');
+        grid.appendChild(item);
+      });
+      section.appendChild(grid);
+      wrap.appendChild(section);
+    });
+  }
+
+  function escAttr(s) { return s.replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+  function escHtml(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+
+  window.toggleSecret = function(btn) {
+    var input = btn.previousElementSibling;
+    if (input.type === 'password') { input.type = 'text'; btn.textContent = '隐藏'; }
+    else { input.type = 'password'; btn.textContent = '显示'; }
+  };
+
+  document.getElementById('save-config-btn').addEventListener('click', function() {
+    var updates = {};
+    document.querySelectorAll('#config-groups input[data-key]').forEach(function(inp) {
+      updates[inp.getAttribute('data-key')] = inp.value;
+    });
+    var btn = this;
+    btn.disabled = true;
+    btn.textContent = '保存中...';
+    fetch('/terminal/api/admin/config', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates)
+    }).then(function(r) { return r.json(); }).then(function(d) {
+      btn.disabled = false;
+      btn.textContent = '保存';
+      if (d.success) { showToast('配置已保存'); configData = Object.assign(configData, updates); }
+      else { showToast(d.error || 'Error', true); }
+    }).catch(function() { btn.disabled = false; btn.textContent = '保存'; showToast('保存失败', true); });
+  });
+
   // i18n
   document.getElementById('page-title').textContent = _t('admin.title');
   document.getElementById('create-title').textContent = _t('admin.create_user');
@@ -10470,8 +10633,14 @@ function initTaskSchedulerForUser(owner: string): void {
     }
     // Push to WeChat
     if (wecomBridge) {
-      const prefix = result.isDraft ? `📋 测试预览 — ${result.taskName}` : `⏰ ${result.taskName}`;
-      wecomBridge.notifyUser(owner, `${prefix}\n${result.text}`).catch(() => {});
+      if (result.isDraft) {
+        // Draft result → ask user to confirm activation
+        const confirmMsg = `📋 测试预览 — ${result.taskName}\n\n${result.text}\n\n✅ 测试完成！请回复"激活"正式开启定时任务，或回复"删除"取消。`;
+        wecomBridge.notifyUser(owner, confirmMsg).catch(() => {});
+      } else {
+        const prefix = `⏰ ${result.taskName}`;
+        wecomBridge.notifyUser(owner, `${prefix}\n${result.text}`).catch(() => {});
+      }
     }
   };
 
@@ -11589,6 +11758,70 @@ esac
           if (info.owner === targetUser) {
             info.cp.providerEnv = getProviderEnv(targetUser);
           }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: (e as Error).message }));
+      }
+    });
+    return;
+  }
+
+  // GET /api/admin/config — read .env config
+  if ((req.url || '').match(/^(?:\/terminal)?\/api\/admin\/config$/) && req.method === 'GET') {
+    if (!isAuthenticated(req)) { res.writeHead(401); res.end('Unauthorized'); return; }
+    const auth = getAuthInfo(req);
+    if (!isAdminUser(auth.username)) { res.writeHead(403); res.end('Forbidden'); return; }
+    const envPath = path.join(process.cwd(), '.env');
+    const envVars: Record<string, string> = {};
+    try {
+      const content = fs.readFileSync(envPath, 'utf8');
+      for (const line of content.split('\n')) {
+        const m = line.match(/^([A-Z_0-9]+)=(.*)$/);
+        if (m) envVars[m[1]!] = m[2]!.replace(/^["']|["']$/g, '');
+      }
+    } catch {}
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(envVars));
+    return;
+  }
+
+  // POST /api/admin/config — write .env config
+  if ((req.url || '').match(/^(?:\/terminal)?\/api\/admin\/config$/) && req.method === 'POST') {
+    if (!isAuthenticated(req)) { res.writeHead(401); res.end('Unauthorized'); return; }
+    const auth = getAuthInfo(req);
+    if (!isAdminUser(auth.username)) { res.writeHead(403); res.end('Forbidden'); return; }
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      try {
+        const updates: Record<string, string> = JSON.parse(Buffer.concat(chunks).toString());
+        const envPath = path.join(process.cwd(), '.env');
+        // Read existing lines
+        let lines: string[] = [];
+        try { lines = fs.readFileSync(envPath, 'utf8').split('\n'); } catch {}
+        // Update or add each key
+        const handled = new Set<string>();
+        lines = lines.map(line => {
+          const m = line.match(/^([A-Z_0-9]+)=/);
+          if (m && m[1] && m[1] in updates) {
+            handled.add(m[1]);
+            const v = updates[m[1]!]!;
+            return v === '' ? '' : `${m[1]}=${v}`;
+          }
+          return line;
+        });
+        for (const [k, v] of Object.entries(updates)) {
+          if (!handled.has(k) && v !== '') lines.push(`${k}=${v}`);
+        }
+        // Remove blank lines at end, keep one newline
+        const content = lines.filter((l, i) => l !== '' || i < lines.length - 1).join('\n').trimEnd() + '\n';
+        fs.writeFileSync(envPath, content, 'utf8');
+        // Apply to current process.env immediately
+        for (const [k, v] of Object.entries(updates)) {
+          if (v === '') delete process.env[k]; else process.env[k] = v;
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true }));

@@ -361,10 +361,6 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
         try { execFileSync('sudo', ['-u', this.linuxUser, 'mkdir', '-p', this.projectDir], { timeout: 3000 }); } catch {}
       }
     }
-    // Ensure hopcode can write to project directory (chmod 777 so Claude can create files)
-    if (this.linuxUser && this.linuxUser !== 'root') {
-      try { execFileSync('sudo', ['chmod', '-R', '777', this.projectDir], { timeout: 3000 }); } catch {}
-    }
 
     // Each user gets an isolated HOME so their ~/.claude/ session state, history,
     // and session-env files don't mix with other users running under the same process.
@@ -374,7 +370,7 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
       // Provider already sets a custom HOME (e.g. ctok)
       claudeHome = this.providerEnv.HOME;
     } else if (this.linuxUser && this.linuxUser !== 'root') {
-      claudeHome = `/root/.claude-users/${this.linuxUser}`;
+      claudeHome = `/home/${this.linuxUser}/.claude-hopcode`;
     } else {
       claudeHome = process.env.HOME || '/root';
     }
@@ -397,8 +393,10 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
             const creds = readFileSync('/root/.claude/.credentials.json', 'utf-8');
             writeFileSync(`${claudeHome}/.claude/.credentials.json`, creds);
           } catch {}
-          // chown entire claudeHome to the service process user so claude can read/write it
-          try { execFileSync('chown', ['-R', 'hopcode:hopcode', claudeHome]); } catch {}
+          // chown to actual user (not hopcode) since Claude now runs as that user
+          if (this.linuxUser && this.linuxUser !== 'root') {
+            try { execFileSync('sudo', ['chown', '-R', `${this.linuxUser}:${this.linuxUser}`, claudeHome]); } catch {}
+          }
           console.log(`[claude-process] bootstrapped claude home for ${this.linuxUser}: ${claudeHome}`);
         }
       } catch (e) {
@@ -416,11 +414,24 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
 
     console.log(`[claude-process] ${this.sessionId} spawning: claude ${args.join(' ').substring(0, 200)} cwd=${this.projectDir} resume=${this.claudeSessionId || 'none'}`);
     console.log(`[claude-process] ${this.sessionId} ANTHROPIC_BASE_URL=${env.ANTHROPIC_BASE_URL} ANTHROPIC_MODEL=${env.ANTHROPIC_MODEL} providerEnv=${JSON.stringify(this.providerEnv)}`);
-    const child = spawn(process.env.CLAUDE_BIN || 'claude', args, {
-      cwd: this.projectDir,
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+
+    let child: ChildProcess;
+    if (this.linuxUser && this.linuxUser !== 'root') {
+      // Run as the actual user via sudo -u
+      const claudeBin = process.env.CLAUDE_BIN || 'claude';
+      child = spawn('sudo', ['-u', this.linuxUser, claudeBin, ...args], {
+        cwd: this.projectDir,
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } else {
+      // Run as current user (hopcode or root)
+      child = spawn(process.env.CLAUDE_BIN || 'claude', args, {
+        cwd: this.projectDir,
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    }
     this.activeChild = child;
     console.log(`[claude-process] ${this.sessionId} spawned pid=${child.pid}`);
 
@@ -808,7 +819,8 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
   /** Inject a task result into chat history and broadcast to all listeners */
   injectTaskResult(taskName: string, text: string, isDraft: boolean): void {
     const prefix = isDraft ? `📋 测试预览 — ${taskName}` : `⏰ 定时任务 — ${taskName}`;
-    const fullText = `${prefix}\n${text}`;
+    const suffix = isDraft ? '\n\n✅ 测试完成！请回复"激活"正式开启定时任务，或回复"删除"取消。' : '';
+    const fullText = `${prefix}\n${text}${suffix}`;
 
     // Add to history
     const entry: HistoryEntry = {
@@ -824,7 +836,7 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
       type: 'task_result' as any,
       taskId: '',
       taskName,
-      text,
+      text: text + suffix,
       timestamp: Date.now(),
       isDraft,
     });
