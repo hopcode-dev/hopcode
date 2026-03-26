@@ -17,26 +17,68 @@ interface UserDeployConfig {
   liveUrlBase: string;          // e.g. 'https://gotong.gizwitsapi.com/alex/'
 }
 
-// User deployment configs — derived from their global CLAUDE.md
-const userConfigs: Record<string, UserDeployConfig> = {
-  alex: {
-    portRange: [9001, 9999],
-    appCommand: 'alex-app',
-    liveUrlBase: 'https://gotong.gizwitsapi.com/alex/',
-  },
-  pony: {
-    portRange: [8001, 8999],
-    appCommand: 'pony-app',
-    liveUrlBase: 'https://gotong.gizwitsapi.com/pony/',
-  },
-};
+/**
+ * Load user deployment configs from users.json
+ */
+function loadUserConfigs(): Record<string, UserDeployConfig> {
+  const configs: Record<string, UserDeployConfig> = {};
+  try {
+    const usersPath = path.join(process.cwd(), 'users.json');
+    const usersData = JSON.parse(fs.readFileSync(usersPath, 'utf-8'));
+
+    for (const [username, userData] of Object.entries(usersData)) {
+      const data = userData as any;
+      if (data.portStart && data.portEnd) {
+        configs[username] = {
+          portRange: [data.portStart, data.portEnd],
+          appCommand: `${username}-app`,
+          liveUrlBase: `https://gotong.gizwitsapi.com/${username}/`,
+        };
+      }
+    }
+  } catch (e) {
+    console.error('[template] Failed to load users.json:', e);
+  }
+
+  // Fallback to hardcoded configs for backward compatibility
+  if (!configs['alex']) {
+    configs['alex'] = {
+      portRange: [9001, 9999],
+      appCommand: 'alex-app',
+      liveUrlBase: 'https://gotong.gizwitsapi.com/alex/',
+    };
+  }
+  if (!configs['pony']) {
+    configs['pony'] = {
+      portRange: [8001, 8999],
+      appCommand: 'pony-app',
+      liveUrlBase: 'https://gotong.gizwitsapi.com/pony/',
+    };
+  }
+
+  return configs;
+}
+
+// User deployment configs — loaded from users.json
+const userConfigs: Record<string, UserDeployConfig> = loadUserConfigs();
 
 // Track assigned ports per user to avoid collisions within a session
 const assignedPorts: Record<string, Set<number>> = {};
 
-function getNextPort(username: string): number {
+function getNextPort(username: string, projectDir: string): number {
   const config = userConfigs[username];
   if (!config) return 8080;
+
+  // Try to read existing port from CLAUDE.md
+  const existingPort = readExistingPort(projectDir);
+  if (existingPort) {
+    // Track it so we don't assign it to other projects
+    if (!assignedPorts[username]) assignedPorts[username] = new Set();
+    assignedPorts[username]!.add(existingPort);
+    return existingPort;
+  }
+
+  // Allocate new port
   if (!assignedPorts[username]) assignedPorts[username] = new Set();
   const [min, max] = config.portRange;
   for (let p = min; p <= max; p++) {
@@ -46,6 +88,24 @@ function getNextPort(username: string): number {
     }
   }
   return min;
+}
+
+/**
+ * Read existing port from CLAUDE.md if it exists
+ */
+function readExistingPort(projectDir: string): number | null {
+  try {
+    const claudeMdPath = path.join(projectDir, 'CLAUDE.md');
+    const content = fs.readFileSync(claudeMdPath, 'utf-8');
+    // Match patterns like: --port 6100 or --port 6700
+    const portMatch = content.match(/--port\s+(\d+)/);
+    if (portMatch) {
+      return parseInt(portMatch[1], 10);
+    }
+  } catch {
+    // File doesn't exist or can't be read
+  }
+  return null;
 }
 
 function getDeployInstructions(username: string, projectName: string, port: number): string {
@@ -83,7 +143,7 @@ export function setupProjectTemplate(
     template = `# Project Rules\n\nFiles are auto-served at: {{SERVE_URL}}\nJust create index.html and tell the user the URL.\n\n{{DEPLOY_INSTRUCTIONS}}`;
   }
 
-  const port = getNextPort(username);
+  const port = getNextPort(username, projectDir);
   const baseUrl = process.env.PUBLIC_URL || 'https://gotong.gizwitsapi.com';
   // Use session ID in serve URL so it's ASCII-safe (no Chinese in URL)
   const serveUrl = sessionId

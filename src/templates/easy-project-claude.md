@@ -97,14 +97,28 @@
 
 **只在用户明确需要多人共享数据时才走这条路。**
 
+部署步骤（必须按顺序执行）：
+
 1. 后端代码放在项目根目录 `{{PROJECT_DIR}}`
 2. 前端页面放在 `{{PROJECT_DIR}}/workspace/`
 3. 用 pm2 启动服务（不要用 `&`，关窗口就死）：
    ```bash
    cd {{PROJECT_DIR}} && pm2 start server.js --name {{PROJECT_NAME}} -- --port {{PORT}}
    ```
-4. 注册公网地址：`{{APP_COMMAND}} add {{PROJECT_NAME}} {{PORT}}`
-5. 对外地址：`{{LIVE_URL}}`
+
+   **进程管理提示：**
+   - 如果端口被占用，先停掉旧进程：`pm2 delete {{PROJECT_NAME}}` 或 `pm2 delete 0`
+   - 查看所有进程：`pm2 list`
+   - 如果无法删除（权限问题），换个端口启动：`--port {{PORT}}` 改成 `--port {{PORT}}1`
+4. **【关键】注册公网地址（必须执行，否则用户无法访问）：**
+   ```bash
+   {{APP_COMMAND}} add {{PROJECT_NAME}} {{PORT}}
+   ```
+5. **【关键】告诉用户的访问地址必须是：**
+   ```
+   {{LIVE_URL}}
+   ```
+   ❌ 禁止给用户 `http://localhost:{{PORT}}` 或 `http://127.0.0.1` 链接
 
 **数据存储首选 SQLite（`better-sqlite3`），不需要单独安装数据库服务。**
 

@@ -508,7 +508,7 @@ const MIME_TYPES: Record<string, string> = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
   '.svg': 'image/svg+xml', '.webp': 'image/webp', '.ico': 'image/x-icon', '.bmp': 'image/bmp',
   '.pdf': 'application/pdf', '.zip': 'application/zip', '.gz': 'application/gzip',
-  '.tar': 'application/x-tar', '.mp3': 'audio/mpeg', '.mp4': 'video/mp4',
+  '.tar': 'application/x-tar', '.mp3': 'audio/mpeg', '.mp4': 'video/mp4', '.mov': 'video/quicktime',
   '.sh': 'text/x-shellscript', '.py': 'text/x-python', '.ts': 'text/typescript',
   '.tsx': 'text/typescript', '.jsx': 'application/javascript', '.rs': 'text/x-rust',
   '.go': 'text/x-go', '.java': 'text/x-java', '.c': 'text/x-c', '.cpp': 'text/x-c++',
@@ -525,6 +525,11 @@ function getMimeType(filePath: string): string {
 function isPreviewableImage(filePath: string): boolean {
   const ext = path.extname(filePath).toLowerCase();
   return ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico', '.bmp'].includes(ext);
+}
+
+function isPreviewableVideo(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  return ['.mp4', '.mov', '.avi', '.mkv', '.webm'].includes(ext);
 }
 
 function isTextFile(filePath: string): boolean {
@@ -1428,8 +1433,24 @@ async function buildSessionsHtml(username?: string): Promise<string> {
       function doCreate() {
         var name = pnInput.value.trim();
         if (!name) { pnInput.focus(); return; }
-        hideModal();
-        window.location.href = '/terminal/easy?projectname=' + encodeURIComponent(name);
+        pnOk.disabled = true;
+        pnOk.textContent = '创建中...';
+        fetch('/terminal/api/easy/create', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ projectName: name })
+        }).then(function(r) { return r.json(); }).then(function(d) {
+          if (d.id) {
+            window.location.href = '/terminal/easy?session=' + encodeURIComponent(d.id) + '&project=' + encodeURIComponent(d.project);
+          } else {
+            throw new Error('Invalid response');
+          }
+        }).catch(function(e) {
+          pnOk.disabled = false;
+          pnOk.textContent = '开始创作 →';
+          alert('创建失败，请重试');
+        });
       }
       newBtn.addEventListener('click', function(e) { e.preventDefault(); showModal(); });
       pnAuto.addEventListener('click', function() { pnInput.value = _randName(); pnInput.focus(); });
@@ -1738,6 +1759,155 @@ interface GuestOptions {
   guestSessionId?: string;
   guestToken?: string;
   guestExpires?: string;
+}
+
+// Portal page shown when visiting /terminal/easy without a session
+// User must explicitly click "New Project" to create a session
+function getEasyModePortalHtml(auth: AuthInfo): string {
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Hopcode Easy Mode</title>
+<link rel="icon" type="image/png" href="./icons/logo-horse.png?v=7">
+<link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png?v=7">
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif; background:#f5f5f7; color:#1d1d1f; }
+#app { display:flex; flex-direction:column; height:100%; height:100dvh; align-items:center; justify-content:center; padding:20px; }
+.card { background:#fff; border-radius:20px; padding:40px 32px; max-width:400px; width:100%; text-align:center; box-shadow:0 4px 24px rgba(0,0,0,0.08); }
+.logo { width:64px; height:64px; margin:0 auto 20px; background:#007aff; border-radius:16px; display:flex; align-items:center; justify-content:center; font-size:32px; }
+.logo::after { content: "🚀"; }
+h1 { font-size:24px; font-weight:600; margin-bottom:8px; }
+.subtitle { font-size:15px; color:#86868b; margin-bottom:32px; line-height:1.5; }
+.btn { display:block; width:100%; padding:14px 24px; border-radius:12px; font-size:16px; font-weight:600; cursor:pointer; border:none; margin-bottom:12px; transition:all 0.2s; }
+.btn-primary { background:#007aff; color:#fff; }
+.btn-primary:hover { background:#0066d6; }
+.btn-primary:active { transform:scale(0.98); }
+.btn-secondary { background:#f2f2f7; color:#1d1d1f; }
+.btn-secondary:hover { background:#e5e5ea; }
+.btn:disabled { opacity:0.5; cursor:not-allowed; }
+.loading { display:none; align-items:center; justify-content:center; gap:8px; margin-top:16px; }
+.loading.show { display:flex; }
+.spinner { width:20px; height:20px; border:2px solid #e5e5ea; border-top-color:#007aff; border-radius:50%; animation:spin 1s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+.error { display:none; color:#ff3b30; font-size:14px; margin-top:12px; padding:10px; background:#ffebee; border-radius:8px; }
+.error.show { display:block; }
+.existing-projects { margin-top:24px; text-align:left; }
+.existing-projects h3 { font-size:13px; color:#86868b; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:12px; }
+.project-list { display:flex; flex-direction:column; gap:8px; }
+.project-item { display:flex; align-items:center; gap:10px; padding:12px; background:#f9f9fb; border-radius:10px; cursor:pointer; text-decoration:none; color:#1d1d1f; transition:background 0.2s; }
+.project-item:hover { background:#f2f2f7; }
+.project-item .dot { width:8px; height:8px; border-radius:50%; background:#34c759; }
+.project-item .name { flex:1; font-size:14px; }
+.project-item .arrow { color:#c7c7cc; }
+#project-name-input { width:100%; padding:12px 16px; border:1px solid #d2d2d7; border-radius:10px; font-size:16px; margin-bottom:12px; outline:none; }
+#project-name-input:focus { border-color:#007aff; }
+.input-hint { font-size:12px; color:#86868b; margin-bottom:16px; text-align:left; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="card">
+    <div class="logo"></div>
+    <h1>Easy Mode</h1>
+    <p class="subtitle">AI-powered coding assistant.<br>Create a new project to get started.</p>
+
+    <input type="text" id="project-name-input" placeholder="Project name (optional)" maxlength="30">
+    <p class="input-hint">Leave empty for auto-generated name</p>
+
+    <button class="btn btn-primary" id="new-project-btn" onclick="createProject()">
+      🚀 New Project
+    </button>
+    <a href="/terminal" class="btn btn-secondary" style="text-decoration:none;display:flex;align-items:center;justify-content:center;">
+      🔙 Back to Sessions
+    </a>
+
+    <div class="loading" id="loading">
+      <div class="spinner"></div>
+      <span>Creating project...</span>
+    </div>
+    <div class="error" id="error"></div>
+
+    <div class="existing-projects" id="existing-projects" style="display:none;">
+      <h3>Recent Projects</h3>
+      <div class="project-list" id="project-list"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+async function createProject() {
+  const btn = document.getElementById('new-project-btn');
+  const loading = document.getElementById('loading');
+  const error = document.getElementById('error');
+  const projectName = document.getElementById('project-name-input').value.trim();
+
+  btn.disabled = true;
+  loading.classList.add('show');
+  error.classList.remove('show');
+
+  try {
+    const resp = await fetch('/terminal/api/easy/create', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectName: projectName || undefined })
+    });
+
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      throw new Error(data.error || 'Failed to create project');
+    }
+
+    const data = await resp.json();
+    // Redirect to the new session
+    window.location.href = '/terminal/easy?session=' + encodeURIComponent(data.id) + '&project=' + encodeURIComponent(data.project);
+  } catch (e) {
+    btn.disabled = false;
+    loading.classList.remove('show');
+    error.textContent = e.message;
+    error.classList.add('show');
+  }
+}
+
+// Load existing projects from registry
+async function loadExistingProjects() {
+  try {
+    const resp = await fetch('/terminal/api/sessions?mode=easy', { credentials: 'include' });
+    if (!resp.ok) return;
+    const sessions = await resp.json();
+    const easySessions = sessions.filter(s => s.mode === 'easy' && s.id?.startsWith('easy_'));
+
+    if (easySessions.length > 0) {
+      const container = document.getElementById('existing-projects');
+      const list = document.getElementById('project-list');
+      container.style.display = 'block';
+
+      easySessions.slice(0, 5).forEach(s => {
+        const item = document.createElement('a');
+        item.className = 'project-item';
+        item.href = '/terminal/easy?session=' + encodeURIComponent(s.id) + '&project=' + encodeURIComponent(s.project || s.name);
+        item.innerHTML = '<div class="dot"></div><div class="name">' + (s.name || s.project || 'Untitled') + '</div><div class="arrow">›</div>';
+        list.appendChild(item);
+      });
+    }
+  } catch (e) {}
+}
+
+loadExistingProjects();
+
+// Allow Enter key to submit
+document.getElementById('project-name-input').addEventListener('keypress', function(e) {
+  if (e.key === 'Enter') createProject();
+});
+</script>
+</body>
+</html>`;
 }
 
 function getEasyModeHtml(auth: AuthInfo, guestOpts?: GuestOptions): string {
@@ -2247,7 +2417,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   <!-- Status bar -->
   <div id="status-bar">
     <span class="status-dot yellow" id="status-dot"></span>
-    <span id="status-text">Starting Claude...</span>
+    <span id="status-text">Starting AI...</span>
     <span id="participants-indicator" style="display:none"></span>
   </div>
 
@@ -2306,6 +2476,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     <div id="input-bar" style="position:relative;">
     <div id="mention-dropdown"></div>
     <button class="input-btn" id="menu-btn" title="Menu" style="background:#e5e7eb;border-radius:8px;padding:3px;"><img src="./icons/logo-horse-portal.png?v=7" style="width:28px;height:28px;object-fit:contain;"></button>
+    <button class="input-btn" id="leave-btn" title="Leave project" style="display:none;background:#fef2f2;border-radius:8px;padding:3px;color:#ef4444;"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg></button>
     <button class="input-btn" id="voice-toggle" title="Voice/Keyboard"><svg id="vt-mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg><svg id="vt-kb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display:none"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="6" y1="8" x2="6" y2="8.01"/><line x1="10" y1="8" x2="10" y2="8.01"/><line x1="14" y1="8" x2="14" y2="8.01"/><line x1="18" y1="8" x2="18" y2="8.01"/><line x1="6" y1="12" x2="6" y2="12.01"/><line x1="10" y1="12" x2="10" y2="12.01"/><line x1="14" y1="12" x2="14" y2="12.01"/><line x1="18" y1="12" x2="18" y2="12.01"/><line x1="8" y1="16" x2="16" y2="16"/></svg></button>
     <button class="input-btn" id="cancel-btn" title="Stop"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>
     <button id="hold-speak">Hold to speak</button>
@@ -2434,7 +2605,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
 <div id="invite-modal">
   <div class="invite-box">
     <h3>&#x1F91D; <span data-i18n="easy.invite.title">Invite to Collaborate</span></h3>
-    <div class="invite-desc" data-i18n="easy.invite.desc">Share this link — anyone who opens it can join this session in real time, chat together, and work on the same project with Claude.</div>
+    <div class="invite-desc" data-i18n="easy.invite.desc">Share this link — anyone who opens it can join this session in real time, chat together, and work on the same project.</div>
     <div id="invite-qr" style="text-align:center;margin-bottom:16px;"></div>
     <div class="invite-link-wrap">
       <div class="invite-link-label" data-i18n="easy.invite.link_label">Invite link</div>
@@ -2643,6 +2814,25 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   var _proModeBtn = document.getElementById('menu-pro-mode');
   // Hide Pro Mode button for non-owners (shared sessions — can't access other user's directory)
   if (!_isOwner && _proModeBtn) _proModeBtn.style.display = 'none';
+  // Show leave button for non-owners in shared sessions
+  function updateLeaveBtnUI() {
+    var leaveBtn = document.getElementById('leave-btn');
+    if (leaveBtn) {
+      if (!_isOwner) {
+        leaveBtn.style.display = '';
+        if (!leaveBtn._hasClickHandler) {
+          leaveBtn._hasClickHandler = true;
+          leaveBtn.addEventListener('click', function() {
+            if (!confirm('确定离开此项目？')) return;
+            ws.send(JSON.stringify({ type: 'leave_session' }));
+          });
+        }
+      } else {
+        leaveBtn.style.display = 'none';
+      }
+    }
+  }
+  updateLeaveBtnUI();
   _proModeBtn.addEventListener('click', function() {
     menuHide();
     addSystemMsg(_t('easy.switch.to_pro'));
@@ -3695,22 +3885,27 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     cancelBtn.classList.toggle('show', isBusy);
     voiceToggle.style.display = isBusy ? 'none' : 'flex';
 
-    // Manage stuck timer
+    // Manage stuck timer — reset it when activity is detected
     clearTimeout(stuckTimer);
     if (newState === 'thinking' || newState === 'tool_running') {
+      var baseTimeout = 180000; // 3 min base
       stuckTimer = setTimeout(function() {
         if (state === 'thinking' || state === 'tool_running') {
           addRetryMsg(_t('easy.msg.stuck'));
         }
-      }, 180000);
+      }, baseTimeout);
     }
 
     // Show thinking animation for thinking & tool_running (not queued — that's just waiting)
+    // Note: Don't call hideThinking when leaving tool_running - the bubble will be replaced
+    // by the next thinking bubble or by real content. Calling hideThinking causes the bubble
+    // to disappear if the next state is 'ready'.
     if (newState === 'thinking' || newState === 'tool_running') {
       showThinking();
-    } else if (prev === 'thinking' || prev === 'tool_running') {
-      hideThinking();
     }
+    // else if (prev === 'thinking' || prev === 'tool_running') {
+    //   hideThinking();
+    // }
 
     // Clear tool indicator when leaving tool_running
     if (prev === 'tool_running' && newState !== 'tool_running') {
@@ -3722,8 +3917,26 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       clearToolIndicator();
       currentAssistantMsg = null;
       _lastDetectedUrl = '';
+      // Reset tool tracking for next conversation turn
+      _currentToolName = null;
+      _currentToolStartTime = null;
+      _currentToolStepCount = 0;
       // Refresh files panel if visible
       refreshFilesDebounced();
+    }
+  }
+
+  // Reset stuck timer on any activity (tool execution, streaming text, etc.)
+  function resetStuckTimer() {
+    if (state === 'thinking' || state === 'tool_running') {
+      clearTimeout(stuckTimer);
+      // Dynamic timeout: longer for tool_running (AI building things takes time)
+      var timeout = state === 'tool_running' ? 600000 : 180000; // 10 min vs 3 min
+      stuckTimer = setTimeout(function() {
+        if (state === 'thinking' || state === 'tool_running') {
+          addRetryMsg(_t('easy.msg.stuck'));
+        }
+      }, timeout);
     }
   }
 
@@ -3759,6 +3972,15 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
       // If user already has a saved preview, don't let reconnect hints override it
       _initialPreviewSync = currentPreviewUrl ? true : false;
       setTimeout(function() { _initialPreviewSync = false; }, 2000);
+      // Reset tool step counter on fresh connection (page refresh)
+      _currentToolStepCount = 0;
+      _currentToolName = null;
+      _currentToolStartTime = null;
+      _seenToolIds.clear();
+      if (_currentToolTimerInterval) {
+        clearInterval(_currentToolTimerInterval);
+        _currentToolTimerInterval = null;
+      }
       dbg('ws connected');
     };
     ws.onmessage = function(e) {
@@ -3786,7 +4008,10 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         autoScroll();
       } else if (d.type === 'message_delta') {
         // Streaming delta — append text to current bubble
-        if (currentAssistantMsg && currentAssistantMsg._isThinkingPlaceholder) {
+        // Skip empty deltas that would wipe out tool activity text
+        if (!d.delta || !d.delta.trim()) {
+          // Empty delta — ignore
+        } else if (currentAssistantMsg && currentAssistantMsg._isThinkingPlaceholder) {
           // First real content — replace spinner with text
           currentAssistantMsg._isThinkingPlaceholder = false;
           currentAssistantMsg.className = 'msg assistant';
@@ -3798,17 +4023,21 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
           currentAssistantMsg._rawText = (currentAssistantMsg._rawText || '') + d.delta;
           currentAssistantMsg.innerHTML = linkify(currentAssistantMsg._rawText);
         } else {
-          // No placeholder, no matching bubble — create new
-          appendAssistantText(d.delta, false);
-          if (currentAssistantMsg && d.id != null) currentAssistantMsg._msgId = d.id;
+          // No placeholder, no matching bubble — create new (but not empty)
+          if (d.delta && d.delta.trim()) {
+            appendAssistantText(d.delta, false);
+            if (currentAssistantMsg && d.id != null) currentAssistantMsg._msgId = d.id;
+          }
         }
         autoScroll();
+        resetStuckTimer(); // AI is producing output — extend timeout
       } else if (d.type === 'tool') {
         if (d.status === 'done') {
           clearToolIndicator();
           refreshFilesDebounced();
         } else {
-          showToolActivity(d.name, d.detail);
+          showToolActivity(d.name, d.detail, d.tool_step);
+          resetStuckTimer(); // Tool still running — keep waiting
         }
       } else if (d.type === 'preview_hint') {
         // Server detected new/modified HTML — auto-load preview
@@ -3922,6 +4151,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         _isOwner = d.isOwner;
         _hasFileAccess = d.hasFileAccess;
         updateFileAccessUI();
+        updateLeaveBtnUI();
         // Set page title to session name
         var titleName = d.sessionName || '';
         if (!titleName && d.projectDir) {
@@ -3939,6 +4169,9 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         // User was granted file access
         _hasFileAccess = true;
         updateFileAccessUI();
+      } else if (d.type === 'session_left') {
+        // Confirmed leave — redirect to home
+        window.location.href = '/terminal';
       } else if (d.type === 'task_result') {
         // Render task result as a special assistant bubble
         var wrap = document.createElement('div');
@@ -4167,48 +4400,114 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   var toolIcons = { Read: '\ud83d\udcc4', Write: '\u270f\ufe0f', Edit: '\u270f\ufe0f', Bash: '\u25b6', Glob: '\ud83d\udd0d', Grep: '\ud83d\udd0d', Agent: '\ud83e\udd16', WebFetch: '\ud83c\udf10', WebSearch: '\ud83c\udf10', NotebookEdit: '\ud83d\udcd3' };
   var toolStepCount = 0;
 
-  function showToolActivity(name, detail) {
+  // Global tool tracking variables (persist across bubble updates)
+  var _currentToolName = null;
+  var _currentToolStartTime = null;
+  var _currentToolStepCount = 0;
+  var _currentToolTimerInterval = null;
+  // Track which tool IDs we've already counted (to avoid double-counting)
+  var _seenToolIds = new Set();
+
+  function showToolActivity(name, detail, toolStep) {
+    console.log('[DEBUG] showToolActivity:', name, detail, 'toolStep:', toolStep, 'current:', _currentToolName, 'step:', _currentToolStepCount);
     var label = _t('tool.' + name) || name || _t('tool.working');
     var icon = toolIcons[name] || '\u2699\ufe0f';
 
-    // Detail-only update for current tool
-    if (detail && toolIndicatorEl && !toolIndicatorEl.classList.contains('done') && toolIndicatorEl._toolName === name) {
-      var detailEl = toolIndicatorEl.querySelector('.tool-detail');
-      if (detailEl) detailEl.textContent = detail;
-      return;
+    // Format MCP tool names for display (e.g., mcp__search__web_search -> web_search)
+    if (name && name.startsWith('mcp__')) {
+      var parts = name.split('__');
+      if (parts.length >= 3) {
+        var mcpToolName = parts[parts.length - 1];
+        var mcpServerName = parts[1];
+        var mcpToolLabels = {
+          'web_search': '搜索网页',
+          'news_search': '搜索新闻',
+          'browser_search': '浏览器搜索',
+          'browser_open': '打开网页',
+          'browser_screenshot': '截图',
+          'browser_click': '点击',
+          'browser_type': '输入',
+          'browser_navigate': '导航',
+          'wechat_send': '发送微信',
+          'wechat_read': '读取微信',
+          'schedule_task': '创建任务',
+          'list_tasks': '列出任务'
+        };
+        label = mcpToolLabels[mcpToolName] || mcpToolName;
+      }
     }
 
-    // Reuse existing bubble: update content in place
-    if (toolIndicatorEl && !toolIndicatorEl.classList.contains('done')) {
-      // Stop old timer
-      if (toolIndicatorEl._timerInterval) clearInterval(toolIndicatorEl._timerInterval);
-      // Increment step count, update content
-      toolStepCount++;
-      toolIndicatorEl._toolName = name;
-      toolIndicatorEl._startTime = Date.now();
-      toolIndicatorEl.innerHTML = '<span class="tool-icon">' + icon + '</span> <span class="tool-label">' + escHtml(label) + '</span>' + (detail ? ' <span class="tool-detail">' + escHtml(detail) + '</span>' : '') + ' <span class="tool-step">\u00b7 ' + _t('easy.tool.step', {n: toolStepCount}) + '</span> <span class="tool-timer"></span>';
-      var timerEl = toolIndicatorEl.querySelector('.tool-timer');
-      toolIndicatorEl._timerInterval = setInterval(function() {
-        timerEl.textContent = Math.floor((Date.now() - toolIndicatorEl._startTime) / 1000) + 's';
-      }, 1000);
-      autoScroll();
-      return;
+    // Track tool step count - use server-provided tool_step if available
+    if (toolStep != null) {
+      _currentToolStepCount = toolStep;
+    } else {
+      // Fallback: increment locally
+      _currentToolStepCount++;
     }
-
-    // First tool — create bubble
-    toolStepCount = 1;
-    var el = document.createElement('div');
-    el.className = 'msg tool-activity';
-    el._toolName = name;
-    el._startTime = Date.now();
-    el.innerHTML = '<span class="tool-icon">' + icon + '</span> <span class="tool-label">' + escHtml(label) + '</span>' + (detail ? ' <span class="tool-detail">' + escHtml(detail) + '</span>' : '') + ' <span class="tool-timer"></span>';
-    chatArea.appendChild(el);
-    var timerEl2 = el.querySelector('.tool-timer');
-    el._timerInterval = setInterval(function() {
-      timerEl2.textContent = Math.floor((Date.now() - el._startTime) / 1000) + 's';
+    _currentToolStartTime = Date.now();
+    _currentToolName = name;
+    
+    // Ensure we have a thinking bubble to display in
+    ensureThinkingBubble();
+    
+    if (!currentAssistantMsg) return;
+    
+    // Stop any existing timer on the bubble
+    if (currentAssistantMsg._toolTimerInterval) {
+      clearInterval(currentAssistantMsg._toolTimerInterval);
+    }
+    // Also clear the global timer interval
+    if (_currentToolTimerInterval) {
+      clearInterval(_currentToolTimerInterval);
+    }
+    
+    var stepCount = _currentToolStepCount || 1;
+    var startTime = _currentToolStartTime || Date.now();
+    
+    // Build display text: icon + label + detail + step + timer
+    var displayHtml = '<span class="tool-icon">' + icon + '</span> <span class="tool-label">' + escHtml(label) + '</span>';
+    if (detail) {
+      displayHtml += ' <span class="tool-detail">' + escHtml(detail) + '</span>';
+    }
+    displayHtml += ' <span class="tool-step">\u00b7 ' + _t('easy.tool.step', {n: stepCount}) + '</span>';
+    displayHtml += ' <span class="tool-timer">' + Math.floor((Date.now() - startTime) / 1000) + 's</span>';
+    
+    // Update thinking bubble content
+    currentAssistantMsg.innerHTML = displayHtml;
+    currentAssistantMsg._isThinkingPlaceholder = true;
+    currentAssistantMsg.className = 'msg assistant thinking-placeholder tool-activity-bubble';
+    
+    // Start timer - update every second
+    _currentToolTimerInterval = setInterval(function() {
+      var timerEl = currentAssistantMsg && currentAssistantMsg.querySelector('.tool-timer');
+      if (timerEl) {
+        timerEl.textContent = Math.floor((Date.now() - startTime) / 1000) + 's';
+      }
     }, 1000);
-    toolIndicatorEl = el;
+    currentAssistantMsg._toolTimerInterval = _currentToolTimerInterval;
+    
     autoScroll();
+  }
+
+  // Ensure there's a thinking bubble available for tool display
+  function ensureThinkingBubble() {
+    if (!currentAssistantMsg || !currentAssistantMsg._isThinkingPlaceholder) {
+      // Create new thinking bubble
+      var wrap = document.createElement('div');
+      wrap.className = 'msg-wrap assistant-wrap';
+      var nameTag = document.createElement('div');
+      nameTag.className = 'msg-sender';
+      nameTag.textContent = _t('easy.assistant_name');
+      wrap.appendChild(nameTag);
+      var div = document.createElement('div');
+      div.className = 'msg assistant thinking-placeholder';
+      div._isThinkingPlaceholder = true;
+      div._toolStepCount = 0;
+      div._toolName = null;
+      wrap.appendChild(div);
+      chatArea.appendChild(wrap);
+      currentAssistantMsg = div;
+    }
   }
 
   // ---- Permission prompt UX (not needed with --dangerously-skip-permissions, kept as stub) ----
@@ -4254,30 +4553,20 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     quickActions.classList.remove('show');
   }
 
-  // ---- Tool activity indicator (single reusable element) ----
-  var toolIndicatorEl = null;
-
-  var _clearToolTimer = null;
+  // ---- Tool activity indicator (merged with thinking bubble) ----
   function clearToolIndicator() {
-    // Delay clearing so consecutive tools reuse the same bubble
-    if (_clearToolTimer) clearTimeout(_clearToolTimer);
-    _clearToolTimer = setTimeout(function() {
-      _clearToolTimer = null;
-      if (toolIndicatorEl && !toolIndicatorEl.classList.contains('done')) {
-        if (toolIndicatorEl._timerInterval) clearInterval(toolIndicatorEl._timerInterval);
-        if (toolStepCount > 1) {
-          toolIndicatorEl.innerHTML = '\u2699\ufe0f ' + _t('easy.tool.done', {n: toolStepCount});
-        } else {
-          var timerEl = toolIndicatorEl.querySelector('.tool-timer');
-          if (timerEl && toolIndicatorEl._startTime) {
-            timerEl.textContent = Math.floor((Date.now() - toolIndicatorEl._startTime) / 1000) + 's';
-          }
-        }
-        toolIndicatorEl.classList.add('done');
-        toolIndicatorEl = null;
-        toolStepCount = 0;
-      }
-    }, 300);
+    // Stop the global timer
+    if (_currentToolTimerInterval) {
+      clearInterval(_currentToolTimerInterval);
+      _currentToolTimerInterval = null;
+    }
+    // Stop timer on current thinking bubble if it has one
+    if (currentAssistantMsg && currentAssistantMsg._toolTimerInterval) {
+      clearInterval(currentAssistantMsg._toolTimerInterval);
+      currentAssistantMsg._toolTimerInterval = null;
+    }
+    // Note: We don't reset _currentToolStepCount, _currentToolName, _currentToolStartTime here
+    // They will be reset when a new tool sequence starts (in showToolActivity when name changes)
   }
 
   // ---- Chat history persistence ----
@@ -4591,14 +4880,21 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   function appendAssistantText(text, isThinking) {
     // Reuse thinking placeholder bubble if it exists (smooth transition, no flicker)
     if (currentAssistantMsg && currentAssistantMsg._isThinkingPlaceholder) {
-      if (!text) {
-        // Empty initial message — keep spinner, just assign msgId via caller
+      if (!text || !text.trim()) {
+        // Empty text — keep the thinking placeholder (don't destroy existing tool activity text)
         return;
       }
       currentAssistantMsg._isThinkingPlaceholder = false;
       currentAssistantMsg.className = 'msg assistant' + (isThinking ? ' thinking-msg' : '');
       currentAssistantMsg._rawText = text;
       currentAssistantMsg.innerHTML = linkify(text);
+      // Clear tool activity state when replacing with real content
+      if (currentAssistantMsg._toolTimerInterval) {
+        clearInterval(currentAssistantMsg._toolTimerInterval);
+        currentAssistantMsg._toolTimerInterval = null;
+      }
+      currentAssistantMsg._toolStepCount = 0;
+      currentAssistantMsg._toolName = null;
     } else {
       // Wrap in msg-wrap with "小码" sender label
       var wrap = document.createElement('div');
@@ -4747,10 +5043,22 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     setState('ready');
   }
 
-  function showThinking() {
+  function showThinking(text) {
+    
+    // If no text provided and a thinking bubble already exists, preserve it
+    if ((text === undefined || text === null || text === '') && currentAssistantMsg && currentAssistantMsg._isThinkingPlaceholder) {
+      
+      return; // Don't overwrite existing thinking bubble with empty one
+    }
     // Create a placeholder assistant bubble with spinner inside
     // When the first message arrives, it replaces the spinner content in-place
-    if (currentAssistantMsg && currentAssistantMsg._isThinkingPlaceholder) return;
+    if (currentAssistantMsg && currentAssistantMsg._isThinkingPlaceholder) {
+      // Update existing placeholder
+      if (text) {
+        currentAssistantMsg.innerHTML = '<span class="dot-spinner"><span></span><span></span><span></span></span> <span class="thinking-text" style="margin-left:8px;color:#636366;font-size:14px;">' + escHtml(text) + '</span>';
+      }
+      return;
+    }
     var wrap = document.createElement('div');
     wrap.className = 'msg-wrap assistant-wrap';
     var nameTag = document.createElement('div');
@@ -4759,7 +5067,11 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     wrap.appendChild(nameTag);
     var div = document.createElement('div');
     div.className = 'msg assistant thinking-placeholder';
-    div.innerHTML = '<span class="dot-spinner"><span></span><span></span><span></span></span>';
+    if (text) {
+      div.innerHTML = '<span class="dot-spinner"><span></span><span></span><span></span></span> <span class="thinking-text" style="margin-left:8px;color:#636366;font-size:14px;">' + escHtml(text) + '</span>';
+    } else {
+      div.innerHTML = '<span class="dot-spinner"><span></span><span></span><span></span></span>';
+    }
     div._isThinkingPlaceholder = true;
     wrap.appendChild(div);
     chatArea.appendChild(wrap);
@@ -4873,6 +5185,15 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     var mentionMatches = text.match(/@([\w\u4e00-\u9fff]+)/g);
     var mentions = mentionMatches ? mentionMatches.map(function(m) { return m.substring(1); }) : [];
     currentAssistantMsg = null;
+    // Reset tool step counter for new conversation turn
+    _currentToolStepCount = 0;
+    _currentToolName = null;
+    _currentToolStartTime = null;
+    _seenToolIds.clear();
+    if (_currentToolTimerInterval) {
+      clearInterval(_currentToolTimerInterval);
+      _currentToolTimerInterval = null;
+    }
     var msg = { type: 'send', text: text };
     if (mentions.length > 0) msg.mentions = mentions;
     wsSend(msg);
@@ -5485,7 +5806,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   window._loadFiles = loadFiles;
   if (isDesktop()) { desktopFilesLoaded = true; loadFiles(''); }
 
-  var _previewExts = ['html','htm','svg','csv','md','png','jpg','jpeg','gif','webp','pdf'];
+  var _previewExts = ['html','htm','svg','csv','md','png','jpg','jpeg','gif','webp','pdf','mp4','mov','avi','mkv','webm'];
   function canPreview(name) {
     var ext = (name.split('.').pop() || '').toLowerCase();
     return _previewExts.indexOf(ext) >= 0;
@@ -5578,7 +5899,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
   var _inputUploadInput = document.createElement('input');
   _inputUploadInput.type = 'file';
   _inputUploadInput.multiple = true;
-  _inputUploadInput.accept = 'image/*,application/pdf,.txt,.csv,.json,.js,.ts,.html,.css,.py,.md';
+  _inputUploadInput.accept = 'image/*,video/*,application/pdf,.txt,.csv,.json,.js,.ts,.html,.css,.py,.md,.mp4,.mov,.avi,.mkv,.webm';
   _inputUploadInput.style.display = 'none';
   document.body.appendChild(_inputUploadInput);
 
@@ -5608,6 +5929,16 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
           reader.readAsDataURL(f);
         })(img, file);
         thumb.appendChild(img);
+      } else if ((file.type && file.type.startsWith('video/')) || /\.(mp4|mov|avi|mkv|webm)$/i.test(file.name)) {
+        // Video: show native video controls for preview
+        var video = document.createElement('video');
+        video.style.cssText = 'width:100%;height:100%;object-fit:contain;background:#000;';
+        video.controls = true;
+        (function(vidEl, f) {
+          var url = URL.createObjectURL(f);
+          vidEl.src = url;
+        })(video, file);
+        thumb.appendChild(video);
       } else {
         var nameEl = document.createElement('div');
         nameEl.className = 'pf-name';
@@ -5633,7 +5964,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     + '<div id="easy-paste-file-preview" style="display:none;text-align:center;"><img id="easy-paste-file-thumb" style="max-width:100%;max-height:120px;border-radius:6px;border:1px solid #d2d2d7;"><div id="easy-paste-file-icon" style="display:none;font-size:40px;padding:10px;">&#x1F4CE;</div><div id="easy-paste-file-name" style="font-size:12px;color:#86868b;margin-top:4px;"></div></div>'
     + '<div style="display:flex;gap:8px;justify-content:flex-end;align-items:center;">'
     + '<button id="easy-paste-file-btn" style="padding:8px 12px;background:#f0f0f2;color:#1d1d1f;border:1px solid #d2d2d7;border-radius:6px;font-size:13px;cursor:pointer;margin-right:auto;">' + _t('pro.paste.btn_file') + '</button>'
-    + '<input type="file" id="easy-paste-file-input" style="display:none;" accept="image/*,application/pdf,.txt,.csv,.json,.js,.ts,.html,.css,.py,.md">'
+    + '<input type="file" id="easy-paste-file-input" style="display:none;" accept="image/*,video/*,application/pdf,.txt,.csv,.json,.js,.ts,.html,.css,.py,.md,.mp4,.mov,.avi,.mkv,.webm">'
     + '<button id="easy-paste-cancel" style="padding:8px 16px;background:#e5e5ea;color:#1d1d1f;border:none;border-radius:6px;font-size:14px;cursor:pointer;">' + _t('cancel') + '</button>'
     + '<button id="easy-paste-send" style="padding:8px 16px;background:#007aff;color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer;">' + _t('send') + '</button>'
     + '</div></div>';
@@ -9887,6 +10218,7 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
   <div class="tabs">
     <button class="tab active" data-tab="users">用户管理</button>
     <button class="tab" data-tab="config">系统配置</button>
+    <button class="tab" data-tab="locked">登录锁定</button>
   </div>
 
   <div class="tab-content active" id="tab-users">
@@ -9915,6 +10247,16 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
       </div>
     </div>
   </div>
+
+  <div class="tab-content" id="tab-locked">
+    <div class="create-form">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <h2>登录锁定管理</h2>
+        <button class="create-btn" id="refresh-locked-btn" style="padding:7px 14px;font-size:13px">刷新</button>
+      </div>
+      <div id="locked-list" style="color:#64748b;font-size:13px">加载中...</div>
+    </div>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -9931,8 +10273,47 @@ ${getI18nScript()}
       this.classList.add('active');
       document.getElementById('tab-' + target).classList.add('active');
       if (target === 'config') loadConfig();
+      if (target === 'locked') loadLocked();
     });
   });
+
+  // Locked IPs management
+  function loadLocked() {
+    var list = document.getElementById('locked-list');
+    list.innerHTML = '<div style="color:#64748b;font-size:13px">加载中...</div>';
+    fetch('/terminal/api/admin/locked', { credentials: 'include' })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (!data.length) {
+          list.innerHTML = '<div style="color:#22c55e;font-size:13px;padding:12px 0">暂无锁定记录</div>';
+          return;
+        }
+        var html = '<div style="display:flex;flex-direction:column;gap:8px">';
+        data.forEach(function(item) {
+          var mins = Math.ceil(item.expiresIn / 60000);
+          html += '<div style="display:flex;align-items:center;justify-content:space-between;background:#0f172a;padding:10px 12px;border-radius:8px">' +
+            '<div><div style="font-size:14px;font-family:monospace;color:#e2e8f0">' + escHtml(item.ip) + '</div>' +
+            '<div style="font-size:12px;color:#64748b;margin-top:2px">失败 ' + item.count + ' 次 | 剩余约 ' + mins + ' 分钟</div></div>' +
+            '<button onclick="unlockIp(\\\'' + escAttr(item.ip) + '\\\')" style="padding:6px 14px;border-radius:6px;border:1px solid #ef4444;background:transparent;color:#ef4444;font-size:13px;cursor:pointer">解锁</button></div>';
+        });
+        html += '</div>';
+        list.innerHTML = html;
+      })
+      .catch(function() { list.innerHTML = '<div style="color:#ef4444;font-size:13px">加载失败</div>'; });
+  }
+
+  window.unlockIp = function(ip) {
+    if (!confirm('确定解锁 ' + ip + '？')) return;
+    fetch('/terminal/api/admin/locked/' + encodeURIComponent(ip), { method: 'DELETE', credentials: 'include' })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.success) { showToast('已解锁 ' + ip); loadLocked(); }
+        else { showToast('解锁失败', true); }
+      })
+      .catch(function() { showToast('解锁失败', true); });
+  };
+
+  document.getElementById('refresh-locked-btn').addEventListener('click', loadLocked);
 
   // Config management
   var CONFIG_GROUPS = [
@@ -10096,6 +10477,7 @@ ${getI18nScript()}
               toggleBtnHtml = '<button class="toggle-btn" data-user="' + u.username + '">' + _t('admin.disable') + '</button>';
             }
           }
+          var passwordBtnHtml = '<button class="toggle-btn change-pass-btn" data-user="' + u.username + '" style="border-color:#f59e0b;color:#f59e0b">' + _t('admin.change_password') + '</button>';
           var curProvider = u.claudeProvider || '';
           var providerRow = '<div class="provider-row">' +
             '<select class="provider-select" data-user="' + u.username + '">' +
@@ -10119,7 +10501,7 @@ ${getI18nScript()}
           card.innerHTML = '<div class="user-avatar" style="background:' + avatarColor(u.username) + '">' + initial + '</div>' +
             '<div class="user-info"><div class="user-name">' + u.username + ' ' + badges + '</div>' +
             '<div class="user-detail">' + u.linuxUser + ' · ' + (u.claudeProvider ? PROVIDER_LABELS[u.claudeProvider] : '默认') + (u.claudeApiKey ? ' ✓' : '') + '</div></div>' +
-            toggleBtnHtml + providerRow + portRow;
+            toggleBtnHtml + passwordBtnHtml + providerRow + portRow;
           list.appendChild(card);
 
           var toggleBtn = card.querySelector('.toggle-btn');
@@ -10170,6 +10552,23 @@ ${getI18nScript()}
                 if (d.success) { showToast(name + ' 端口已更新'); loadUsers(); }
                 else { showToast(d.error || 'Error', true); }
               });
+            });
+          }
+
+          var changePassBtn = card.querySelector('.change-pass-btn');
+          if (changePassBtn) {
+            changePassBtn.addEventListener('click', function() {
+              var name = this.getAttribute('data-user');
+              var newPass = prompt('输入新密码 for ' + name + ':');
+              if (!newPass || !newPass.trim()) return;
+              fetch('/terminal/api/admin/users/' + encodeURIComponent(name) + '/password', {
+                method: 'PUT', credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: newPass })
+              }).then(function(r) { return r.json(); }).then(function(d) {
+                if (d.success) { showToast(name + ' 密码已更新'); }
+                else { showToast(d.error || 'Error', true); }
+              }).catch(function() { showToast('Error', true); });
             });
           }
         });
@@ -10516,8 +10915,22 @@ function loadEasyRegistry(): void {
   try {
     const data = JSON.parse(fs.readFileSync(EASY_REGISTRY_FILE, 'utf-8'));
     if (!Array.isArray(data)) return;
+    let skipped = 0;
     for (const entry of data as EasyRegistryEntry[]) {
       if (easySessions.has(entry.id)) continue;
+      // Check if session has actual activity (history file exists and has content)
+      const stateFile = path.join(entry.projectDir, '.easy-state.json');
+      try {
+        const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+        const hasActivity = Array.isArray(state.history) && state.history.length > 0;
+        if (!hasActivity) {
+          skipped++;
+          continue; // Skip empty/unused sessions
+        }
+      } catch {
+        skipped++;
+        continue; // No state file or can't read = skip
+      }
       // Create a ClaudeProcess — it will load history from .easy-state.json
       const noop = () => {};
       const cp = new ClaudeProcess(entry.id, entry.projectDir, noop);
@@ -10540,7 +10953,7 @@ function loadEasyRegistry(): void {
       easySessions.set(entry.id, info);
     }
     if (data.length > 0) {
-      console.log(`[easy] Restored ${data.length} session(s) from registry`);
+      console.log(`[easy] Restored ${easySessions.size} session(s) from registry${skipped > 0 ? ` (skipped ${skipped} empty)` : ''}`);
     }
   } catch {}
 
@@ -10574,6 +10987,9 @@ function scanOrphanEasySessions(): void {
         try {
           const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
           if (!state.claudeSessionId) continue;
+          // Only recover sessions with actual activity (message history)
+          const hasActivity = Array.isArray(state.history) && state.history.length > 0;
+          if (!hasActivity) continue; // Skip empty/unused sessions
           // Generate a session ID for this orphan
           const id = 'easy_' + randomBytes(12).toString('hex');
           const owner = home === (process.env.HOME || '/root') ? 'root' : path.basename(home);
@@ -10635,9 +11051,11 @@ function initTaskSchedulerForUser(owner: string): void {
   }
 
   const taskCallback = (result: TaskRunResult) => {
-    // Push to all of this owner's sessions' UI
+    // Push to this owner's sessions' UI — skip multi-user sessions (shared sessions)
     for (const [sid, info] of easySessions) {
       if (info.owner !== owner) continue;
+      // Skip sessions with multiple connected users (shared sessions)
+      if (info.connectedUsers.size > 1) continue;
       info.cp.injectTaskResult(result.taskName, result.text, result.isDraft);
       broadcastTaskCount(sid, info, taskScheduler.getActiveCount(owner));
     }
@@ -10657,6 +11075,8 @@ function initTaskSchedulerForUser(owner: string): void {
   const countCallback = (count: number) => {
     for (const [sid, info] of easySessions) {
       if (info.owner !== owner) continue;
+      // Skip sessions with multiple connected users (shared sessions)
+      if (info.connectedUsers.size > 1) continue;
       broadcastTaskCount(sid, info, count);
     }
   };
@@ -11297,6 +11717,66 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // POST /terminal/api/easy/create — explicitly create a new Easy Mode session
+  // Session creation is now explicit (not automatic on URL visit)
+  if ((req.url || '').match(/^(?:\/terminal)?\/api\/easy\/create$/) && req.method === 'POST') {
+    if (!isAuthenticated(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      req.resume();
+      return;
+    }
+    const auth = getAuthInfo(req);
+    if (!(await checkSessionLimit(auth.username))) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `You can have up to ${MAX_SESSIONS_PER_USER} sessions. Please close an existing session first.` }));
+      req.resume();
+      return;
+    }
+
+    let body = '';
+    req.on('data', (c: Buffer) => { body += c.toString(); });
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        const rawProjectName = data.projectName || '';
+        const sanitized = rawProjectName.replace(/[^\u4e00-\u9fff\w\-]/g, '').slice(0, 30);
+
+        const id = 'easy_' + randomBytes(12).toString('hex');
+        const now = new Date();
+        const dateSuffix = String(now.getMonth() + 1).padStart(2, '0') + String(now.getDate()).padStart(2, '0')
+          + '-' + String(now.getHours()).padStart(2, '0') + String(now.getMinutes()).padStart(2, '0');
+        const projectName = sanitized || ('project-' + dateSuffix + randomBytes(1).toString('hex').charAt(0));
+        const easyHomeDir = (!auth.linuxUser || auth.linuxUser === 'root') ? (process.env.HOME || '/root') : `/home/${auth.linuxUser}`;
+        const easyProjectDir = `${easyHomeDir}/coding/${projectName}`;
+
+        try {
+          setupProjectTemplate(easyProjectDir, auth.linuxUser || auth.username, projectName, id);
+          console.log(`[easy] Project template created: ${easyProjectDir}/CLAUDE.md`);
+        } catch (e) {
+          console.error('[easy] Failed to setup project template:', e);
+        }
+
+        // Register in easy-sessions.json
+        try {
+          const regPath = path.join(easyHomeDir, '.hopcode', 'easy-sessions.json');
+          let reg: any[] = [];
+          try { reg = JSON.parse(fs.readFileSync(regPath, 'utf-8')); } catch {}
+          reg.push({ id, owner: auth.username, project: projectName, name: projectName, createdAt: Date.now(), lastActivity: Date.now(), projectDir: easyProjectDir });
+          fs.writeFileSync(regPath, JSON.stringify(reg));
+        } catch {}
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id, project: projectName, name: projectName }));
+        console.log(`[easy] Created session ${id} for ${auth.username} via explicit API`);
+      } catch (e: any) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message || 'Bad request' }));
+      }
+    });
+    return;
+  }
+
   // Handle session rename POST — proxy to PTY service
   if ((req.url === '/rename' || req.url === '/terminal/rename') && req.method === 'POST') {
     if (!isAuthenticated(req)) {
@@ -11779,6 +12259,48 @@ esac
     return;
   }
 
+  // PUT /api/admin/users/:username/password — change user password
+  const passwordMatch = (req.url || '').match(/^(?:\/terminal)?\/api\/admin\/users\/([^/]+)\/password$/);
+  if (passwordMatch && req.method === 'PUT') {
+    if (!isAuthenticated(req)) { res.writeHead(401); res.end('Unauthorized'); return; }
+    const auth = getAuthInfo(req);
+    if (!isAdminUser(auth.username)) { res.writeHead(403); res.end('Forbidden'); return; }
+    const targetUser = decodeURIComponent(passwordMatch[1]!);
+    if (!usersConfig[targetUser]) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'User not found' }));
+      return;
+    }
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', async () => {
+      try {
+        const parsed = JSON.parse(Buffer.concat(chunks).toString());
+        const newPass: string = (parsed.password || '').replace(/[\uff01-\uff5e]/g, (c: string) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
+        if (!newPass) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Password required' }));
+          return;
+        }
+        usersConfig[targetUser]!.password = newPass;
+        saveUsersConfig();
+        // Update Linux password
+        const { execSync } = await import('child_process');
+        try {
+          execSync(`echo '${targetUser}:${newPass.replace(/'/g, "'\\''")}' | sudo chpasswd`);
+        } catch (e) {
+          console.error('Failed to update Linux password for', targetUser, e);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: (e as Error).message }));
+      }
+    });
+    return;
+  }
+
   // GET /api/admin/config — read .env config
   if ((req.url || '').match(/^(?:\/terminal)?\/api\/admin\/config$/) && req.method === 'GET') {
     if (!isAuthenticated(req)) { res.writeHead(401); res.end('Unauthorized'); return; }
@@ -11840,6 +12362,42 @@ esac
         res.end(JSON.stringify({ error: (e as Error).message }));
       }
     });
+    return;
+  }
+
+  // GET /api/admin/locked — list locked IPs
+  if ((req.url || '').match(/^(?:\/terminal)?\/api\/admin\/locked$/) && req.method === 'GET') {
+    if (!isAuthenticated(req)) { res.writeHead(401); res.end('Unauthorized'); return; }
+    const auth = getAuthInfo(req);
+    if (!isAdminUser(auth.username)) { res.writeHead(403); res.end('Forbidden'); return; }
+    const now = Date.now();
+    const locked: Array<{ ip: string; count: number; attempts: number; firstAttempt: number; expiresIn: number }> = [];
+    for (const [ip, record] of loginAttempts) {
+      if (record.count >= LOGIN_MAX_ATTEMPTS) {
+        locked.push({
+          ip,
+          count: record.count,
+          attempts: record.count,
+          firstAttempt: record.firstAttempt,
+          expiresIn: Math.max(0, LOGIN_WINDOW_MS - (now - record.firstAttempt)),
+        });
+      }
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(locked));
+    return;
+  }
+
+  // DELETE /api/admin/locked/:ip — unlock an IP
+  const unlockMatch = (req.url || '').match(/^(?:\/terminal)?\/api\/admin\/locked\/([^/]+)$/);
+  if (unlockMatch && req.method === 'DELETE') {
+    if (!isAuthenticated(req)) { res.writeHead(401); res.end('Unauthorized'); return; }
+    const auth = getAuthInfo(req);
+    if (!isAdminUser(auth.username)) { res.writeHead(403); res.end('Forbidden'); return; }
+    const ip = decodeURIComponent(unlockMatch[1]!);
+    const deleted = loginAttempts.delete(ip);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: deleted, ip }));
     return;
   }
 
@@ -12356,6 +12914,42 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
             res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-cache' });
             fs.createReadStream(filePath).pipe(res);
           }
+        } else if (isPreviewableVideo(filePath)) {
+          // Only wrap in HTML when preview=1 is explicitly requested
+          // Don't check Accept header for videos (video element sends */* which includes text/html)
+          if (parsedUrl.searchParams.get('preview') === '1') {
+            const videoHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>*{margin:0;padding:0}body{display:flex;align-items:center;justify-content:center;min-height:100vh;background:#000}video{max-width:100%;max-height:100vh}</style></head><body><video controls autoplay><source src="${pathname}" type="${getMimeType(filePath)}"></video></body></html>`;
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+            res.end(videoHtml);
+          } else {
+            const mime = getMimeType(filePath);
+            const stat = await fs.promises.stat(filePath);
+            const headers: Record<string, string | number> = {
+              'Content-Type': mime,
+              'Cache-Control': 'no-cache',
+              'Accept-Ranges': 'bytes',
+              'Content-Length': stat.size,
+            };
+            // Handle Range requests (Safari video player sends these)
+            const rangeHeader = req.headers['range'];
+            if (rangeHeader) {
+              const parts = rangeHeader.replace(/bytes=/, '').split('-');
+              const start = parseInt(parts[0] || '0', 10);
+              const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+              const chunkSize = end - start + 1;
+              res.writeHead(206, {
+                'Content-Type': mime,
+                'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+                'Content-Length': chunkSize,
+                'Accept-Ranges': 'bytes',
+                'Cache-Control': 'no-cache',
+              });
+              fs.createReadStream(filePath, { start, end }).pipe(res);
+            } else {
+              res.writeHead(200, headers);
+              fs.createReadStream(filePath).pipe(res);
+            }
+          }
         } else {
           const mime = getMimeType(filePath);
           const headers: Record<string, string> = {
@@ -12474,25 +13068,40 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
 
   if ((pathname === '/terminal/file-upload' || pathname === '/file-upload') && req.method === 'POST') {
     try {
+      // Check Easy Mode session file access FIRST — shared sessions bypass sandbox
+      const uploadSid = parsedUrl.searchParams.get('session') || '';
+      const uploadEasyInfo = uploadSid ? easySessions.get(uploadSid) : null;
+      const uploadEasyAccess = uploadEasyInfo && (
+        uploadEasyInfo.owner === auth.username ||
+        isAdminUser(auth.username) ||
+        uploadEasyInfo._fileAccessUsers.has(auth.username || '')
+      );
+
+      // For shared sessions, use session owner's home for path resolution
+      // For regular uploads, use the uploading user's home
+      const pathResolveUser = uploadEasyAccess ? uploadEasyInfo!.owner : auth.username;
+      const pathResolveLinuxUser = pathResolveUser ? (usersConfig[pathResolveUser]?.linuxUser || pathResolveUser) : '';
+
       let requestedPath = parsedUrl.searchParams.get('path') || '';
       let targetDir: string;
       if (!requestedPath) {
         // Resolve to PTY session CWD
-        const sid = parsedUrl.searchParams.get('session') || 'default';
+        const sid = uploadSid || 'default';
         try {
           const cwdResp = await ptyFetch(`/sessions/${encodeURIComponent(sid)}/cwd`);
           if (cwdResp.ok) {
             const cwdData = await cwdResp.json() as { cwd: string };
-            targetDir = resolveSafePath(cwdData.cwd, auth.linuxUser);
+            targetDir = resolveSafePath(cwdData.cwd, pathResolveLinuxUser);
           } else {
-            targetDir = resolveSafePath('/', auth.linuxUser);
+            targetDir = resolveSafePath('/', pathResolveLinuxUser);
           }
         } catch {
-          targetDir = resolveSafePath('/', auth.linuxUser);
+          targetDir = resolveSafePath('/', pathResolveLinuxUser);
         }
       } else {
-        targetDir = resolveSafePath(requestedPath, auth.linuxUser);
+        targetDir = resolveSafePath(requestedPath, pathResolveLinuxUser);
       }
+      console.log(`[file-upload] pathResolveUser=${pathResolveUser}, pathResolveLinuxUser=${pathResolveLinuxUser}, requestedPath=${requestedPath}, targetDir=${targetDir}`);
       const rawFilename = req.headers['x-filename'] as string;
       let filename: string;
       try { filename = decodeURIComponent(rawFilename); } catch { filename = rawFilename; }
@@ -12501,15 +13110,6 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
         res.end(JSON.stringify({ error: 'Invalid or missing X-Filename header' }));
         return;
       }
-
-      // Check Easy Mode session file access — skip posix check if authorized
-      const uploadSid = parsedUrl.searchParams.get('session') || '';
-      const uploadEasyInfo = uploadSid ? easySessions.get(uploadSid) : null;
-      const uploadEasyAccess = uploadEasyInfo && (
-        uploadEasyInfo.owner === auth.username ||
-        isAdminUser(auth.username) ||
-        uploadEasyInfo._fileAccessUsers.has(auth.username || '')
-      );
 
       // Verify target directory exists and is a directory
       const dirStat = await fs.promises.stat(targetDir);
@@ -12549,28 +13149,48 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
       const filePath = path.join(targetDir, actualName);
 
       // Multi-user: chown file to appropriate uid/gid
-      // For Easy Mode uploads, use the session owner's uid/gid so files are owned correctly
-      const chownUser = uploadEasyAccess && uploadEasyInfo
+      // For Easy Mode shared session uploads, use the session owner's uid/gid so files are owned correctly
+      const chownUser = (uploadEasyAccess && uploadEasyInfo)
         ? getUserPosixInfo(uploadEasyInfo.owner)
         : posixUser;
 
-      try {
-        await fs.promises.writeFile(filePath, body);
-        if (chownUser) {
-          try { fs.chownSync(filePath, chownUser.uid, chownUser.gid); } catch {}
-        }
-      } catch {
-        // hopcode can't write to user dirs — use sudo tee as the target linux user
-        const writeUser = (uploadEasyAccess && uploadEasyInfo ? uploadEasyInfo.owner : null)
-          || auth.linuxUser;
-        if (writeUser && writeUser !== 'root') {
+      // Use hopcode tee for all shared session uploads (hopcode has ACL write access to all user dirs)
+      // For own-session uploads, try writeFile first, fall back to tee
+      if (uploadEasyAccess) {
+        try {
+          await fs.promises.writeFile(filePath, body);
+          if (chownUser) {
+            try { fs.chownSync(filePath, chownUser.uid, chownUser.gid); } catch {}
+          }
+        } catch (writeErr: any) {
+          console.log(`[file-upload] writeFile failed: ${writeErr.message}, trying hopcode tee`);
           await new Promise<void>((resolve, reject) => {
-            const proc = spawn('sudo', ['-u', writeUser, 'tee', filePath], { stdio: ['pipe', 'ignore', 'ignore'] });
+            const proc = spawn('sudo', ['-u', 'hopcode', 'tee', filePath], { stdio: ['pipe', 'ignore', 'ignore'] });
             proc.stdin.end(body);
             proc.on('close', (code) => code === 0 ? resolve() : reject(new Error(`tee failed: ${code}`)));
           });
-        } else {
-          throw new Error('Permission denied writing file');
+          if (chownUser) {
+            try { fs.chownSync(filePath, chownUser.uid, chownUser.gid); } catch {}
+          }
+        }
+      } else {
+        try {
+          await fs.promises.writeFile(filePath, body);
+          if (chownUser) {
+            try { fs.chownSync(filePath, chownUser.uid, chownUser.gid); } catch {}
+          }
+        } catch (err: any) {
+          console.log(`[file-upload] writeFile failed for non-shared: ${err.message}, writeUser=${auth.linuxUser}`);
+          const writeUser = auth.linuxUser;
+          if (writeUser && writeUser !== 'root') {
+            await new Promise<void>((resolve, reject) => {
+              const proc = spawn('sudo', ['-u', writeUser, 'tee', filePath], { stdio: ['pipe', 'ignore', 'ignore'] });
+              proc.stdin.end(body);
+              proc.on('close', (code) => code === 0 ? resolve() : reject(new Error(`tee failed: ${code}`)));
+            });
+          } else {
+            throw new Error('Permission denied writing file');
+          }
         }
       }
 
@@ -12944,43 +13564,11 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
     (easySessionCheck && easySessionCheck.startsWith('easy_') && pathname !== '/terminal'));
   if (isEasyRoute) {
     if (!easySessionCheck) {
-      // Check session limit before auto-creating
-      if (!(await checkSessionLimit(auth.username))) {
-        const limitHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Session Limit</title><style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f5f5f7;color:#1d1d1f}.card{background:#fff;border-radius:16px;padding:40px;max-width:400px;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.08)}h2{margin:0 0 12px;font-size:20px}p{margin:0 0 24px;color:#86868b;font-size:15px;line-height:1.5}a{display:inline-block;padding:10px 24px;background:#007aff;color:#fff;border-radius:8px;text-decoration:none;font-size:15px}a:hover{background:#0066d6}</style></head><body><div class="card"><h2>Session Limit Reached</h2><p>You can have up to ${MAX_SESSIONS_PER_USER} sessions at the same time. Please close an existing session before creating a new one.</p><a href="/terminal">Back to Sessions</a></div></body></html>`;
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(limitHtml);
-        return;
-      }
-      // Auto-create easy session — no PTY needed, just project folder + ClaudeProcess
-      const id = 'easy_' + randomBytes(12).toString('hex');
-      const now = new Date();
-      const dateSuffix = String(now.getMonth() + 1).padStart(2, '0') + String(now.getDate()).padStart(2, '0')
-        + '-' + String(now.getHours()).padStart(2, '0') + String(now.getMinutes()).padStart(2, '0');
-      const rawProjectName = easyUrlCheck.searchParams.get('projectname') || '';
-      const sanitized = rawProjectName.replace(/[^\u4e00-\u9fff\w\-]/g, '').slice(0, 30);
-      const projectName = sanitized || ('project-' + dateSuffix + randomBytes(1).toString('hex').charAt(0));
-      const easyHomeDir = (!auth.linuxUser || auth.linuxUser === 'root') ? (process.env.HOME || '/root') : `/home/${auth.linuxUser}`;
-      const easyProjectDir = `${easyHomeDir}/coding/${projectName}`;
-      try {
-        try {
-          setupProjectTemplate(easyProjectDir, auth.linuxUser || auth.username, projectName, id);
-          console.log(`[easy] Project template created: ${easyProjectDir}/CLAUDE.md`);
-        } catch (e) {
-          console.error('[easy] Failed to setup project template:', e);
-        }
-        // Pre-register in easy-sessions.json so switch-mode can find it before WS connects
-        try {
-          const regPath = path.join(easyHomeDir, '.hopcode', 'easy-sessions.json');
-          let reg: any[] = [];
-          try { reg = JSON.parse(fs.readFileSync(regPath, 'utf-8')); } catch {}
-          reg.push({ id, owner: auth.username, project: projectName, name: projectName, createdAt: Date.now(), lastActivity: Date.now(), projectDir: easyProjectDir });
-          fs.writeFileSync(regPath, JSON.stringify(reg));
-        } catch {}
-      } catch (e) {
-        console.error('Failed to create easy session:', e);
-      }
-      res.writeHead(302, { 'Location': '/terminal/easy?session=' + encodeURIComponent(id) + '&project=' + encodeURIComponent(projectName) });
-      res.end();
+      // Show portal page instead of auto-creating
+      // Session creation is now explicit via POST /api/easy/create
+      const portalHtml = getEasyModePortalHtml(auth);
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(portalHtml);
       return;
     }
     const cacheKey = auth.username || '_default';
@@ -13356,6 +13944,20 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
         cp!.cancel();
       } else if (msg.type === 'retry') {
         cp!.retry();
+      } else if (msg.type === 'leave_session') {
+        // Non-owner explicitly leaves the shared session
+        if (info && connUser !== info.owner) {
+          const wsSet = info.connectedUsers.get(connUser);
+          if (wsSet) {
+            wsSet.delete(clientWs);
+            if (wsSet.size === 0) {
+              info.connectedUsers.delete(connUser);
+            }
+          }
+          broadcastParticipants();
+          clientWs.send(JSON.stringify({ type: 'session_left' }));
+          clientWs.close();
+        }
       } else if (msg.type === 'request_file_access') {
         // Non-owner requests file access — notify all owner connections
         if (info && connUser !== info.owner) {
