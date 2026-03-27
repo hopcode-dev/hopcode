@@ -36,6 +36,9 @@ export class ClaudeProcess {
   private disposed = false;
   private _lastStreamToolName = '';
   private _toolJsonBuf = '';
+  private _currentToolIndex: number | null = null;
+  private _toolStepCounter = 0; // Sequential counter for tools per turn
+  private _blockIndexToStep = new Map<number, number>(); // Map Anthropic block index to our step number
   private _knownPreviewFiles = new Map<string, number>(); // name -> mtime
   private _knownAllFiles = new Set<string>(); // track all files to detect new ones
   private static PREVIEW_EXTS = new Set(['.html', '.htm', '.svg', '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf']);
@@ -316,6 +319,9 @@ export class ClaudeProcess {
       '--include-partial-messages',
       '--mcp-config', mcpConfigPath,
       '--allowedTools',
+      // Native tools - required for file operations and bash
+      'Read', 'Write', 'Edit', 'Grep', 'Glob', 'Bash', 'WebFetch', 'WebSearch',
+      // MCP tools
       'mcp__hopcode-tasks__schedule_task', 'mcp__hopcode-tasks__list_tasks', 'mcp__hopcode-tasks__delete_task', 'mcp__hopcode-tasks__activate_task',
       'mcp__browser-proxy__browser_open', 'mcp__browser-proxy__browser_screenshot', 'mcp__browser-proxy__browser_click', 'mcp__browser-proxy__browser_type', 'mcp__browser-proxy__browser_key', 'mcp__browser-proxy__browser_scroll', 'mcp__browser-proxy__browser_navigate', 'mcp__browser-proxy__browser_evaluate', 'mcp__browser-proxy__browser_cookies', 'mcp__browser-proxy__browser_status', 'mcp__browser-proxy__browser_close', 'mcp__browser-proxy__browser_list',
       'mcp__wechat__wechat_login', 'mcp__wechat__wechat_status', 'mcp__wechat__wechat_send', 'mcp__wechat__wechat_read', 'mcp__wechat__wechat_contacts', 'mcp__wechat__wechat_search',
@@ -323,6 +329,7 @@ export class ClaudeProcess {
       ...(['jack', 'root'].includes(this.owner) ? ['mcp__tesla__check_battery', 'mcp__tesla__wake_vehicle'] : []),
       'mcp__search__web_search',
       'mcp__search__news_search',
+      'mcp__search__browser_search',
       '--append-system-prompt',
       `You are 小码 (Xiaoma), a friendly action-oriented AI assistant in Hopcode Easy Mode. When users confirm or agree (好的/试试/做吧/go ahead/ok), START DOING THE WORK immediately — write code, create files. Never just say "ok let me know". Be concise — this is a mobile chat UI. Reply in the same language as the user.
 
@@ -638,7 +645,14 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
             setToolName(toolName);
             this._lastStreamToolName = toolName;
             this._toolJsonBuf = '';
-            this.broadcast({ type: 'tool', name: toolName, detail: '', status: 'running' });
+            // Increment and use sequential tool step counter
+            this._toolStepCounter++;
+            this._currentToolIndex = this._toolStepCounter;
+            // Map Anthropic's block index to our step number
+            if (ev.index != null) {
+              this._blockIndexToStep.set(ev.index, this._toolStepCounter);
+            }
+            this.broadcast({ type: 'tool', name: toolName, detail: '', status: 'running', tool_step: this._currentToolIndex });
             this.broadcast({ type: 'state', state: 'tool_running' });
           } else if (ev.content_block?.type === 'text') {
             // Start of text block — allocate message ID
@@ -698,7 +712,7 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
             }
             if (detail) {
               const lastTool = this._lastStreamToolName || 'tool';
-              this.broadcast({ type: 'tool', name: lastTool, detail, status: 'running' });
+              this.broadcast({ type: 'tool', name: lastTool, detail, status: 'running', tool_step: this._currentToolIndex });
             }
           }
         } else if (ev.type === 'content_block_stop') {
@@ -737,8 +751,10 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
               else if (inp.command) detail = String(inp.command).substring(0, 60);
               else if (inp.pattern) detail = String(inp.pattern).substring(0, 60);
             }
+            // Look up the step number from our mapping
+            const toolStep = block.index != null ? this._blockIndexToStep.get(block.index) : undefined;
             // Update tool with detail (streaming only had the name)
-            this.broadcast({ type: 'tool', name: toolName, detail, status: 'running' });
+            this.broadcast({ type: 'tool', name: toolName, detail, status: 'running', tool_step: toolStep });
           }
         }
 
@@ -778,6 +794,9 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
       }
 
       case 'user': {
+        // Reset tool counters for new user turn
+        this._toolStepCounter = 0;
+        this._blockIndexToStep.clear();
         const userContent = event.message?.content;
         if (Array.isArray(userContent)) {
           for (const block of userContent) {

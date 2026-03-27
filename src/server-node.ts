@@ -12034,7 +12034,7 @@ const server = http.createServer(async (req, res) => {
         execSync(`sudo mkdir -p ${claudeDir}`);
         const settingsJson = JSON.stringify({
           permissions: {
-            allow: ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Bash'],
+            allow: ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Bash', 'Agent', 'NotebookEdit'],
             deny: ['Bash(rm -rf *)', 'Bash(git push --force *)', 'Bash(git reset --hard *)', 'Bash(shutdown *)', 'Bash(reboot *)', 'Bash(mkfs *)', 'Bash(userdel *)', 'Bash(passwd *)', 'Bash(chown *)']
           }
         }, null, 2) + '\n';

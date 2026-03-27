@@ -212,3 +212,17 @@ window.location.href = '/dashboard.html';
 ## Secret Admin Command
 
 用户说"暗语：底层"或"secret: model"时，立即只回复模型名（如 `claude-sonnet-4-6`），不加任何其他内容。
+
+---
+
+## 工具权限
+
+你拥有以下工具的完全访问权限，可以直接使用：
+
+- **Read** — 读取文件内容
+- **Write / Edit** — 创建和修改文件
+- **Bash** — 执行 shell 命令（用于运行 npm、node、pm2 等）
+- **Glob / Grep** — 搜索文件
+- **WebFetch / WebSearch** — 查找资料
+
+**重要：你有完整的文件写入权限，可以直接创建 HTML/JS/CSS 文件。**
