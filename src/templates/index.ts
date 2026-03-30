@@ -161,7 +161,8 @@ export function setupProjectTemplate(
     .replace(/\{\{PORT\}\}/g, String(port))
     .replace(/\{\{LIVE_URL\}\}/g, liveUrl)
     .replace(/\{\{APP_COMMAND\}\}/g, userConfig?.appCommand || '')
-    .replace(/\{\{DEPLOY_INSTRUCTIONS\}\}/g, deployInstructions);
+    .replace(/\{\{DEPLOY_INSTRUCTIONS\}\}/g, deployInstructions)
+    .replace(/\{\{DATE\}\}/g, new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14));
 
   // Also copy user's global CLAUDE.md content if it exists
   const homeDir = username === 'root' ? '/root' : `/home/${username}`;

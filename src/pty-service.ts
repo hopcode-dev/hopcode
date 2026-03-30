@@ -1,7 +1,6 @@
 /**
- * PTY Service — main process that manages worker processes
- * Each session runs in an isolated worker process
- * Worker exit = automatic memory cleanup
+ * PTY Service — manages worker processes
+ * Session state lives in shared/pty-session.ts (can be hot-reloaded)
  */
 
 process.on('SIGPIPE', () => {});
@@ -28,41 +27,105 @@ import {
   getPtyInternalToken,
   type SessionInfo,
 } from './shared/protocol.js';
+import {
+  sessions,
+  persistedSessions,
+  SESSION_REGISTRY_FILE,
+  getSession,
+  saveSessionRegistry,
+  loadSessionRegistry,
+} from './shared/pty-session.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const INTERNAL_TOKEN = getPtyInternalToken();
 
-// --- Session (Worker) Management ---
+// --- Worker Management (stays in pty-service, not hot-reloaded) ---
 
-interface Session {
-  worker: ChildProcess;
-  clients: Set<WebSocket>;
-  name: string;
-  owner: string;
-  linuxUser: string;
-  projectDir: string;
-  createdAt: number;
-  lastActivity: number;
-  ready: boolean;
-  pendingScrollback: ((data: string) => void)[];
+interface WorkerHandle {
+  pid: number;
+  process: ChildProcess;
 }
 
-const sessions = new Map<string, Session>();
-let sessionCounter = 0;
+const workers = new Map<string, WorkerHandle>();
 
-function createSession(id: string, owner: string = 'admin', linuxUser?: string, customName?: string, cwd?: string, projectDir?: string): Session {
-  sessionCounter++;
-  const name = customName || `Session ${sessionCounter}`;
-
-  // Fork worker process
-  const worker = fork(path.join(__dirname, 'pty-worker.ts'), [], {
+function forkWorker(sessionId: string): ChildProcess {
+  return fork(path.join(__dirname, 'pty-worker.ts'), [], {
     execArgv: ['--import', 'tsx'],
     stdio: ['pipe', 'inherit', 'inherit', 'ipc'],
   });
+}
 
-  const session: Session = {
-    worker,
-    clients: new Set(),
+function setupWorker(sessionId: string, worker: ChildProcess, owner: string, linuxUser?: string, name?: string, cwd?: string) {
+  worker.on('message', (msg: any) => {
+    const session = getSession(sessionId);
+    if (!session) return;
+
+    switch (msg.type) {
+      case 'ready':
+        session.ready = true;
+        if (msg.name) session.name = msg.name;
+        console.log(`[pty-service] Worker ready: ${sessionId} - ${session.name}`);
+        break;
+
+      case 'output': {
+        const outMsg = JSON.stringify({ type: 'output', data: msg.data });
+        for (const client of session.clients) {
+          if (client.readyState === WebSocket.OPEN) client.send(outMsg);
+        }
+        break;
+      }
+
+      case 'scrollback':
+        for (const cb of session.pendingScrollback) cb(msg.data);
+        session.pendingScrollback = [];
+        break;
+
+      case 'exit':
+        console.log(`[pty-service] Worker exited: ${sessionId} (code ${msg.code})`);
+        for (const client of session.clients) {
+          try { client.send(JSON.stringify({ type: 'session_exit' })); client.close(); } catch {}
+        }
+        sessions.delete(sessionId);
+        persistedSessions.delete(sessionId);
+        workers.delete(sessionId);
+        saveSessionRegistry();
+        break;
+    }
+  });
+
+  worker.on('error', (err) => {
+    console.error(`[pty-service] Worker error: ${sessionId}`, err.message);
+  });
+
+  worker.on('exit', (code) => {
+    console.log(`[pty-service] Worker process exited: ${sessionId} (code ${code})`);
+    const session = getSession(sessionId);
+    if (session) {
+      for (const client of session.clients) {
+        try { client.send(JSON.stringify({ type: 'session_exit' })); client.close(); } catch {}
+      }
+      sessions.delete(sessionId);
+      persistedSessions.delete(sessionId);
+      workers.delete(sessionId);
+      saveSessionRegistry();
+    }
+  });
+
+  worker.send({ type: 'init', sessionId, owner, linuxUser, name, cwd });
+}
+
+// --- Create / Delete Session ---
+
+function createSession(id: string, owner: string = 'admin', linuxUser?: string, customName?: string, cwd?: string, projectDir?: string) {
+  const name = customName || `Session ${id.slice(-6)}`;
+  const worker = forkWorker(id);
+  const pid = worker.pid!;
+
+  workers.set(id, { pid, process: worker });
+
+  const session = {
+    workerPid: pid,
+    clients: new Set<WebSocket>(),
     name,
     owner,
     linuxUser: linuxUser || '',
@@ -70,90 +133,31 @@ function createSession(id: string, owner: string = 'admin', linuxUser?: string, 
     createdAt: Date.now(),
     lastActivity: Date.now(),
     ready: false,
-    pendingScrollback: [],
+    pendingScrollback: [] as ((data: string) => void)[],
   };
 
-  // Handle messages from worker
-  worker.on('message', (msg: any) => {
-    switch (msg.type) {
-      case 'ready':
-        session.ready = true;
-        session.name = msg.name || session.name;
-        console.log(`[pty-service] Worker ready: ${id} - ${session.name}`);
-        break;
-
-      case 'output':
-        // Broadcast to all connected clients
-        const outputMsg = JSON.stringify({ type: 'output', data: msg.data });
-        for (const client of session.clients) {
-          if (client.readyState === WebSocket.OPEN) {
-            client.send(outputMsg);
-          }
-        }
-        break;
-
-      case 'scrollback':
-        // Send to pending scrollback requests
-        for (const cb of session.pendingScrollback) {
-          cb(msg.data);
-        }
-        session.pendingScrollback = [];
-        break;
-
-      case 'exit':
-        console.log(`[pty-service] Worker exited: ${id} (code ${msg.code})`);
-        // Notify all clients
-        const exitMsg = JSON.stringify({ type: 'session_exit' });
-        for (const client of session.clients) {
-          if (client.readyState === WebSocket.OPEN) {
-            client.send(exitMsg);
-          }
-          client.close();
-        }
-        sessions.delete(id);
-        break;
-    }
-  });
-
-  worker.on('error', (err) => {
-    console.error(`[pty-service] Worker error: ${id}`, err.message);
-  });
-
-  worker.on('exit', (code) => {
-    console.log(`[pty-service] Worker process exited: ${id} (code ${code})`);
-    // Clean up if not already done
-    if (sessions.has(id)) {
-      for (const client of session.clients) {
-        try {
-          client.send(JSON.stringify({ type: 'session_exit' }));
-          client.close();
-        } catch {}
-      }
-      sessions.delete(id);
-    }
-  });
-
-  // Send init message to worker
-  worker.send({
-    type: 'init',
-    sessionId: id,
-    owner,
-    linuxUser,
-    name,
-    cwd,
-  });
-
+  setupWorker(id, worker, owner, linuxUser, name, cwd);
   sessions.set(id, session);
-  console.log(`[pty-service] Created session: ${id} - ${name} (worker PID: ${worker.pid})`);
-
+  console.log(`[pty-service] Created session: ${id} - ${name} (worker PID: ${pid})`);
+  saveSessionRegistry();
   return session;
 }
 
-function getSession(id: string): Session | undefined {
-  return sessions.get(id);
+function killSession(sid: string) {
+  const wh = workers.get(sid);
+  if (wh) {
+    wh.process.send!({ type: 'shutdown' } as any);
+    setTimeout(() => {
+      try { wh.process.kill('SIGKILL'); } catch {}
+    }, 1000);
+    workers.delete(sid);
+  }
+  sessions.delete(sid);
+  persistedSessions.delete(sid);
+  saveSessionRegistry();
 }
 
-// --- Internal token auth check ---
+// --- Internal token auth ---
 
 function checkToken(req: http.IncomingMessage): boolean {
   return req.headers[PTY_INTERNAL_TOKEN_HEADER] === INTERNAL_TOKEN;
@@ -164,14 +168,12 @@ function checkToken(req: http.IncomingMessage): boolean {
 const server = http.createServer(async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
 
-  // Health check (no auth needed)
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok', sessions: sessions.size }));
     return;
   }
 
-  // All other routes require internal token
   if (!checkToken(req)) {
     res.writeHead(401, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Unauthorized' }));
@@ -181,47 +183,63 @@ const server = http.createServer(async (req, res) => {
   const parsedUrl = new URL(req.url || '/', `http://${req.headers.host}`);
   const pathname = parsedUrl.pathname;
 
-  // GET /sessions — list sessions
+  // GET /sessions
   if (pathname === '/sessions' && req.method === 'GET') {
     const ownerFilter = parsedUrl.searchParams.get('owner');
-    let entries = Array.from(sessions.entries());
-    if (ownerFilter) {
-      entries = entries.filter(([, s]) => s.owner === ownerFilter);
+    const ownerSet = ownerFilter ? new Set([ownerFilter]) : null;
+    const list: SessionInfo[] = [];
+
+    for (const [id, s] of sessions.entries()) {
+      if (ownerSet && !ownerSet.has(s.owner)) continue;
+      list.push({
+        id,
+        name: s.name,
+        owner: s.owner,
+        projectDir: s.projectDir || undefined,
+        createdAt: s.createdAt,
+        lastActivity: s.lastActivity,
+        clientCount: s.clients.size,
+        active: true,
+      });
     }
-    const list: SessionInfo[] = entries.map(([id, s]) => ({
-      id,
-      name: s.name,
-      owner: s.owner,
-      projectDir: s.projectDir || undefined,
-      createdAt: s.createdAt,
-      lastActivity: s.lastActivity,
-      clientCount: s.clients.size,
-    }));
+
+    for (const [id, ps] of persistedSessions.entries()) {
+      if (sessions.has(id)) continue;
+      if (ownerSet && !ownerSet.has(ps.owner)) continue;
+      list.push({
+        id: ps.id,
+        name: ps.name,
+        owner: ps.owner,
+        projectDir: ps.projectDir || undefined,
+        createdAt: ps.createdAt,
+        lastActivity: ps.lastActivity,
+        clientCount: 0,
+        active: false,
+      });
+    }
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(list));
     return;
   }
 
-  // POST /sessions — create new session
+  // POST /sessions
   if (pathname === '/sessions' && req.method === 'POST') {
     const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => {
       try {
-        const body = chunks.length > 0 ? JSON.parse(Buffer.concat(chunks).toString()) : {};
-        const id = body.id;
-        if (!id) {
+        const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
+        if (!body.id) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'id required' }));
           return;
         }
-        const owner = body.owner || 'admin';
-        const linuxUser = body.linuxUser || undefined;
-        const session = createSession(id, owner, linuxUser, body.name, body.cwd, body.projectDir);
+        createSession(body.id, body.owner || 'admin', body.linuxUser, body.name, body.cwd, body.projectDir);
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ id }));
-      } catch (err: any) {
-        console.error(`[pty-service] POST /sessions error:`, err.message || err);
+        res.end(JSON.stringify({ id: body.id }));
+      } catch (e: any) {
+        console.error('[pty-service] POST /sessions error:', e.message);
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Bad request' }));
       }
@@ -234,24 +252,18 @@ const server = http.createServer(async (req, res) => {
   const renameMatch = pathname.match(/^\/sessions\/([^/]+)\/rename$/);
   if (renameMatch && req.method === 'POST') {
     const sid = decodeURIComponent(renameMatch[1]!);
-    const session = sessions.get(sid);
+    const session = getSession(sid);
     if (!session) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Session not found' }));
       return;
     }
     const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => {
       try {
         const { name } = JSON.parse(Buffer.concat(chunks).toString());
-        const trimmed = (name || '').trim().substring(0, 100);
-        if (!trimmed) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Name cannot be empty' }));
-          return;
-        }
-        session.name = trimmed;
+        session.name = (name || '').trim().slice(0, 100) || session.name;
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true }));
       } catch {
@@ -263,28 +275,23 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // GET /sessions/:id/cwd — get current working directory
+  // GET /sessions/:id/cwd
   const cwdMatch = pathname.match(/^\/sessions\/([^/]+)\/cwd$/);
   if (cwdMatch && req.method === 'GET') {
     const sid = decodeURIComponent(cwdMatch[1]!);
-    const session = sessions.get(sid);
+    const session = getSession(sid);
     if (!session) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Session not found' }));
       return;
     }
-    // CWD lookup is now done by reading /proc - we need worker PID
+    const wh = workers.get(sid);
     try {
-      const pid = session.worker.pid;
-      if (pid) {
-        const { promises: fs } = await import('fs');
-        const cwd = await fs.readlink(`/proc/${pid}/cwd`).catch(() => process.env.HOME || '/');
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ cwd }));
-      } else {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ cwd: process.env.HOME || '/' }));
-      }
+      const cwd = wh?.pid
+        ? await fs.promises.readlink(`/proc/${wh.pid}/cwd`).catch(() => process.env.HOME || '/')
+        : process.env.HOME || '/';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ cwd }));
     } catch {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ cwd: process.env.HOME || '/' }));
@@ -292,35 +299,22 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // DELETE /sessions/:id — kill session
+  // DELETE /sessions/:id
   const deleteMatch = pathname.match(/^\/sessions\/([^/]+)$/);
   if (deleteMatch && req.method === 'DELETE') {
     const sid = decodeURIComponent(deleteMatch[1]!);
-    const session = sessions.get(sid);
-    if (!session) {
+    if (!sessions.has(sid)) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Session not found' }));
       return;
     }
-    // Send shutdown to worker
-    session.worker.send({ type: 'shutdown' });
-    // Force kill after timeout
-    setTimeout(() => {
-      if (sessions.has(sid)) {
-        session.worker.kill('SIGKILL');
-        for (const client of session.clients) {
-          try { client.close(); } catch {}
-        }
-        sessions.delete(sid);
-      }
-    }, 1000);
+    killSession(sid);
     console.log(`[pty-service] Session deleted: ${sid}`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ success: true }));
     return;
   }
 
-  // 404
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ error: 'Not found' }));
 });
@@ -331,66 +325,48 @@ const wss = new WebSocketServer({ noServer: true });
 
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url!, `http://${req.headers.host}`);
-  const pathParts = url.pathname.split('/');
-  const sessionId = decodeURIComponent(pathParts[2] || 'default');
-
+  const sessionId = decodeURIComponent(url.pathname.split('/')[2] || 'default');
   const session = getSession(sessionId);
+
   if (!session) {
-    console.log(`[pty-service] Rejected WS: session ${sessionId} not found`);
     ws.close(4004, 'Session not found');
     return;
   }
 
-  // Verify owner if provided
   const ownerParam = url.searchParams.get('owner');
   if (ownerParam && session.owner !== ownerParam) {
-    console.log(`[pty-service] Rejected WS: owner mismatch for ${sessionId}`);
     ws.close(4003, 'Forbidden');
     return;
   }
 
   session.clients.add(ws);
   console.log(`[pty-service] Client connected: ${sessionId} (${session.clients.size} clients)`);
-
-  // Send session info
   ws.send(JSON.stringify({ type: 'session_info', name: session.name }));
 
-  // Request scrollback from worker (with timeout to prevent callback accumulation)
-  const scrollbackCallback = (data: string) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'scrollback', data }));
-    }
+  const scrollbackCb = (data: string) => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'scrollback', data }));
   };
-  session.pendingScrollback.push(scrollbackCallback);
-  session.worker.send({ type: 'getScrollback' });
-
-  // Timeout: remove callback if worker doesn't respond in 5s
+  session.pendingScrollback.push(scrollbackCb);
+  const wh = workers.get(sessionId);
+  if (wh) wh.process.send!({ type: 'getScrollback' } as any);
   setTimeout(() => {
-    const idx = session.pendingScrollback.indexOf(scrollbackCallback);
-    if (idx !== -1) {
-      session.pendingScrollback.splice(idx, 1);
-    }
+    const idx = session.pendingScrollback.indexOf(scrollbackCb);
+    if (idx !== -1) session.pendingScrollback.splice(idx, 1);
   }, 5000);
 
   ws.on('message', (message) => {
-    // Check session still exists (may have been deleted if worker crashed)
-    if (!sessions.has(sessionId)) {
-      ws.close(4004, 'Session no longer exists');
-      return;
-    }
+    if (!sessions.has(sessionId)) { ws.close(4004); return; }
     try {
       const msg = JSON.parse(message.toString());
       session.lastActivity = Date.now();
-
+      const wh = workers.get(sessionId);
+      if (!wh) { ws.close(4004); return; }
       if (msg.type === 'input') {
-        session.worker.send({ type: 'input', data: msg.data });
+        wh.process.send!({ type: 'input', data: msg.data } as any);
       } else if (msg.type === 'resize') {
-        if (msg.cols > 0 && msg.rows > 0) {
-          session.worker.send({ type: 'resize', cols: msg.cols, rows: msg.rows });
-        }
+        if (msg.cols > 0 && msg.rows > 0) wh.process.send!({ type: 'resize', cols: msg.cols, rows: msg.rows } as any);
       } else if (msg.type === 'asr') {
-        console.log(`[pty-service] ASR input: "${msg.text}"`);
-        session.worker.send({ type: 'input', data: msg.text + '\r' });
+        wh.process.send!({ type: 'input', data: msg.text + '\r' } as any);
       }
     } catch (e) {
       console.error('[pty-service] Parse error:', e);
@@ -398,7 +374,6 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
-    // Check session still exists before cleanup
     if (sessions.has(sessionId)) {
       session.clients.delete(ws);
       console.log(`[pty-service] Client disconnected: ${sessionId} (${session.clients.size} clients)`);
@@ -406,19 +381,11 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-// Handle WebSocket upgrade
 server.on('upgrade', (request, socket, head) => {
-  if (!checkToken(request)) {
-    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-    socket.destroy();
-    return;
-  }
-
+  if (!checkToken(request)) { socket.write('HTTP/1.1 401\r\n\r\n'); socket.destroy(); return; }
   const url = new URL(request.url!, `http://${request.headers.host}`);
   if (url.pathname.startsWith('/ws/')) {
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit('connection', ws, request);
-    });
+    wss.handleUpgrade(request, socket, head, (ws) => wss.emit('connection', ws, request));
   } else {
     socket.destroy();
   }
@@ -440,27 +407,18 @@ async function cleanOldRecordings() {
       const filePath = path.join(RECORDINGS_DIR, file);
       try {
         const stat = await fs.promises.stat(filePath);
-        if (now - stat.mtimeMs > maxAge) {
-          await fs.promises.unlink(filePath);
-          deleted++;
-        }
+        if (now - stat.mtimeMs > maxAge) { await fs.promises.unlink(filePath); deleted++; }
       } catch {}
     }
-    if (deleted > 0) {
-      console.log(`[pty-service] Cleaned ${deleted} old recording(s)`);
-    }
+    if (deleted > 0) console.log(`[pty-service] Cleaned ${deleted} old recording(s)`);
   } catch {}
 }
 
-// Run cleanup every 6 hours
 setInterval(cleanOldRecordings, 6 * 60 * 60 * 1000);
-// Run once at startup
 cleanOldRecordings();
-
-// --- Start ---
+loadSessionRegistry();
 
 server.listen(PTY_SERVICE_PORT, '127.0.0.1', () => {
   console.log(`[pty-service] Listening on 127.0.0.1:${PTY_SERVICE_PORT}`);
-  console.log(`[pty-service] Worker isolation mode: each session runs in isolated process`);
   console.log(`[pty-service] Ready`);
 });

@@ -12,7 +12,7 @@ import { WebSocket } from 'ws';
 import type { Channel, IncomingMessage, MessageHandler } from './types.js';
 
 const WSS_URL = 'wss://openws.work.weixin.qq.com';
-const PING_INTERVAL = 25_000;
+const PING_INTERVAL = 30_000; // Official spec: 30 seconds
 // No active pong timeout — rely on TCP/WebSocket onclose for dead connection detection
 // Ping is sent every 25s to keep the connection alive on the server side
 const ACK_TIMEOUT = 5_000;
@@ -37,6 +37,8 @@ export class WeComBot implements Channel {
   private disconnected = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempts = 0;
+  /** Guard against reconnect storms when receiving multiple disconnected_event in quick succession */
+  private reconnectCooldown = false;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private subscribeReqId = '';
   private lastPingReqId = '';
@@ -133,6 +135,11 @@ export class WeComBot implements Channel {
         this.stopPing();
         this.clearPendingReplies('connection closed');
         if (!resolved) { resolved = true; reject(new Error(`WebSocket closed: ${code}`)); }
+        // Skip if disconnected_event is already handling reconnect (avoids double-reconnect)
+        if (this.reconnectCooldown) {
+          this.log('WebSocket closed during reconnect cooldown, skipping duplicate reconnect');
+          return;
+        }
         this.scheduleReconnect();
       });
 
@@ -343,6 +350,26 @@ export class WeComBot implements Channel {
     // Log unknown userId messages for debugging (WeCom API may have changed)
     if (cmd === CMD_EVENT_CALLBACK && !body.msgtype && !userId) {
       this.log(`[DEBUG] Unknown userId message: cmd=${cmd} keys=${Object.keys(body).join(',')} body=${JSON.stringify(body).slice(0, 300)}`);
+      return;
+    }
+
+    // Handle server-side disconnected_event - need full reconnect to establish new session
+    // Guard against reconnect storms (multiple events in quick succession)
+    if (cmd === CMD_EVENT_CALLBACK && body.event?.eventtype === 'disconnected_event') {
+      if (this.reconnectCooldown) {
+        this.log('Received disconnected_event during cooldown, ignoring...');
+        return;
+      }
+      this.log('Received disconnected_event from WeCom server, forcing full reconnect...');
+      this.isConnected = false;
+      this.stopPing();
+      this.reconnectCooldown = true;
+      if (this.ws) {
+        this.ws.close();
+      }
+      this.scheduleReconnect();
+      // Clear cooldown after reconnect delay to allow reconnection
+      setTimeout(() => { this.reconnectCooldown = false; }, 30000);
       return;
     }
     const chatId = body.chatid || body.from?.chatid || '';
@@ -579,6 +606,7 @@ export class WeComBot implements Channel {
 
   private scheduleReconnect(): void {
     if (this.disconnected) return;
+    if (this.reconnectTimer) return; // already scheduled
     // Never give up — always reconnect with exponential backoff capped at 60s
     this.reconnectAttempts++;
     const delay = Math.min(5000 * Math.pow(1.5, Math.min(this.reconnectAttempts - 1, 8)), 60000);

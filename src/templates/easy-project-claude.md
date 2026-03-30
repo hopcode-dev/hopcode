@@ -90,6 +90,7 @@
 - 不需要启动服务器，文件自动可访问
 - 不依赖外部 CDN（用户网络可能不稳定）
 - 数据存 localStorage：`localStorage.setItem('key', JSON.stringify(data))`
+- **缓存最佳实践**：部署后，自动在 HTML 文件里给所有外部资源（`<link href="*.css">`、`<script src="*.js">`、图片 src）加上 `?v=当前时间戳` 参数，例如 `<link href="style.css?v=20260329141832">`（精确到秒，同一天多次部署也能区分）。这样用户刷新就能看到最新版本，不会因为浏览器缓存看到旧页面。小码自动执行，不需要用户提醒
 
 ---
 

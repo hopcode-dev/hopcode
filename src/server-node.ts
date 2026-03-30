@@ -39,6 +39,7 @@ import { TaskScheduler } from './easymode/task-scheduler.js';
 import type { TaskRunResult } from './easymode/task-scheduler.js';
 import { setupProjectTemplate } from './templates/index.js';
 import { WeComBridge } from './channels/wecom-bridge.js';
+import { validateVoiceChatToken } from './channels/voice-chat-tokens.js';
 import { getI18nScript, t } from './i18n.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -597,7 +598,8 @@ function cancelAsrSession(session: AsrSession): void {
   }
 }
 
-function connectVolcano(asrSession: AsrSession, clientWs: WebSocket): void {
+function connectVolcano(asrSession: AsrSession, clientWs: WebSocket, onFinalText?: (text: string) => void): void {
+  console.log(`[connectVolcano] called, cancelled=${asrSession.cancelled}`);
   if (asrSession.cancelled) return;
 
   asrSession.ready = false;
@@ -678,6 +680,7 @@ function connectVolcano(asrSession: AsrSession, clientWs: WebSocket): void {
     if (asrSession.cancelled || asrSession.volcanoWs !== volcanoWs) return;
     try {
       const parsed = parseAsrResponse(Buffer.from(data));
+      console.log(`[ASR:${id}] VOLCANO_MSG msgType=${parsed.msgType} hasResult=${!!parsed.result?.result}`);
       if (parsed.msgType === 15) {
         console.error('ASR server error:', parsed.result || parsed.error);
         retryIfNeeded();
@@ -690,13 +693,19 @@ function connectVolcano(asrSession: AsrSession, clientWs: WebSocket): void {
           const utterances = res.utterances || [];
           const definite = utterances.length > 0 && utterances[0].definite;
           if (definite) {
+            console.log(`[ASR:${id}] DEFINITE text="${text}"`);
             latestFinalText = text;
             // Send as partial so UI updates immediately
             clientWs.send(JSON.stringify({ type: 'asr_partial', text }));
             if (finalDebounce) clearTimeout(finalDebounce);
             finalDebounce = setTimeout(() => {
               asrSession.gotResult = true;
-              clientWs.send(JSON.stringify({ type: 'asr', text: latestFinalText }));
+              if (onFinalText) {
+                // Voice-chat: send transcript to AI via callback
+                onFinalText(latestFinalText);
+              } else {
+                clientWs.send(JSON.stringify({ type: 'asr', text: latestFinalText }));
+              }
               console.log(`ASR final: "${latestFinalText}"`);
               // Only close Volcano WS if user already stopped recording
               if (asrSession.ended) {
@@ -975,13 +984,299 @@ function pcmToWav(pcm: Buffer): Buffer {
   return wav;
 }
 
-function startAsrSession(clientWs: WebSocket): AsrSession {
+// --- Voice Chat Page (for WeCom voice message users) ---
+function voiceChatPageHtml(token: string): string {
+  const tokenEscaped = token.replace(/'/g, "\\'");
+  return `<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <title>语音对话 — 小码</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0d1117;color:#e6edf3;height:100dvh;display:flex;flex-direction:column;overflow:hidden}
+    header{padding:14px 16px;background:#161b22;border-bottom:1px solid #30363d;display:flex;align-items:center;gap:10px;flex-shrink:0}
+    header h1{font-size:17px;font-weight:600}
+    header .sub{font-size:12px;color:#8b949e;margin-top:2px}
+    #chat{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px}
+    .msg{max-width:82%;padding:10px 14px;border-radius:18px;line-height:1.5;font-size:15px;word-break:break-word;white-space:pre-wrap}
+    .user{background:#1f6feb;align-self:flex-end;border-bottom-right-radius:4px}
+    .assistant{background:#21262d;border:1px solid #30363d;align-self:flex-start;border-bottom-left-radius:4px}
+    .system{color:#8b949e;font-size:12px;align-self:center;text-align:center}
+    .thinking-dots::after{content:'';animation:dots 1.2s steps(3,end) infinite}
+    @keyframes dots{0%{content:'.'}33%{content:'..'}66%{content:'...'}100%{content:'.'}}
+    #status{padding:8px 16px;text-align:center;font-size:13px;color:#8b949e;min-height:30px;flex-shrink:0}
+    #footer{padding:20px 16px 28px;background:#161b22;border-top:1px solid #30363d;display:flex;flex-direction:column;align-items:center;gap:10px;flex-shrink:0}
+    #ptt{width:72px;height:72px;border-radius:50%;background:#238636;border:none;cursor:pointer;font-size:26px;color:#fff;transition:transform .15s,background .15s,box-shadow .15s;user-select:none;touch-action:none;-webkit-tap-highlight-color:transparent}
+    #ptt.recording{background:#da3633;transform:scale(1.12);box-shadow:0 0 0 8px rgba(218,54,51,.25)}
+    #ptt:disabled{background:#30363d;cursor:default;transform:none;box-shadow:none}
+    #hint{font-size:12px;color:#8b949e}
+  </style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>🤖 小码语音对话</h1>
+    <div class="sub">按住按钮说话，松开发送</div>
+  </div>
+</header>
+<div id="chat">
+  <div class="msg system">语音对话已连接，可以开始说话</div>
+</div>
+<div id="status"></div>
+<div id="footer">
+  <button id="ptt">🎤</button>
+  <div id="hint">按住说话</div>
+</div>
+<script>
+(function(){
+  var TOKEN = '${tokenEscaped}';
+  var chat = document.getElementById('chat');
+  var status = document.getElementById('status');
+  var ptt = document.getElementById('ptt');
+  var hint = document.getElementById('hint');
+
+  function addMsg(role, text) {
+    var d = document.createElement('div');
+    d.className = 'msg ' + role;
+    d.textContent = text;
+    chat.appendChild(d);
+    chat.scrollTop = chat.scrollHeight;
+    return d;
+  }
+  function setStatus(s) { status.textContent = s; }
+
+  // Chat WebSocket
+  var chatWs = null;
+  var chatReady = false;
+  var pendingAssistant = null;
+  var pendingChat = null; // Queue for chat messages while chatWs is connecting
+
+  function connectChat() {
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var wsUrl = proto + '//' + location.host + '/terminal/ws-voice-chat?t=' + TOKEN;
+    setStatus('正在连接... ' + (new Date().toLocaleTimeString()));
+    chatWs = new WebSocket(wsUrl);
+    chatWs.onopen = function() {
+      chatReady = true;
+      setStatus('');
+      // Flush any pending chat messages
+      if (pendingChat) {
+        chatWs.send(JSON.stringify({type:'chat', text: pendingChat}));
+        pendingChat = null;
+      }
+    };
+    chatWs.onerror = function(e) {
+      console.error('[chatWs error]', e);
+      setStatus('连接错误，请检查网络');
+    };
+    chatWs.onclose = function(e) {
+      chatReady = false;
+      var reason = e.reason || (e.code ? 'code=' + e.code : 'closed');
+      setStatus('连接断开(' + reason + ')，3秒后重连...');
+      setTimeout(connectChat, 3000);
+    };
+    chatWs.onmessage = function(e) {
+      var d = JSON.parse(e.data);
+      if (d.type === 'delta') {
+        if (!pendingAssistant) {
+          pendingAssistant = addMsg('assistant', '');
+          pendingAssistant.classList.add('thinking-dots');
+        }
+        pendingAssistant.classList.remove('thinking-dots');
+        pendingAssistant.textContent += d.text;
+        chat.scrollTop = chat.scrollHeight;
+      } else if (d.type === 'tts') {
+        if (d.audio) queueTts(d.audio);
+      } else if (d.type === 'complete') {
+        if (pendingAssistant) {
+          pendingAssistant.classList.remove('thinking-dots');
+          pendingAssistant.textContent = d.text;
+          pendingAssistant = null;
+        } else {
+          addMsg('assistant', d.text);
+        }
+        chat.scrollTop = chat.scrollHeight;
+      } else if (d.type === 'ready') {
+        setStatus('');
+        ptt.disabled = false;
+        hint.textContent = '按住说话';
+      } else if (d.type === 'error') {
+        setStatus('⚠️ ' + d.message);
+        ptt.disabled = false;
+        hint.textContent = '按住说话';
+      }
+    };
+  }
+  connectChat();
+
+  // TTS playback queue
+  var audioQueue = [];
+  var isPlaying = false;
+
+  function playNextAudio() {
+    if (isPlaying || audioQueue.length === 0) return;
+    isPlaying = true;
+    var base64Audio = audioQueue.shift();
+    try {
+      var binary = atob(base64Audio);
+      var bytes = new Uint8Array(binary.length);
+      for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      var blob = new Blob([bytes], { type: 'audio/wav' });
+      var url = URL.createObjectURL(blob);
+      var audio = new Audio(url);
+      audio.onended = function() { URL.revokeObjectURL(url); isPlaying = false; playNextAudio(); };
+      audio.onerror = function() { URL.revokeObjectURL(url); isPlaying = false; playNextAudio(); };
+      audio.play().catch(function() { isPlaying = false; playNextAudio(); });
+    } catch (e) { isPlaying = false; playNextAudio(); }
+  }
+
+  function queueTts(base64Audio) {
+    if (!base64Audio || base64Audio.length < 10) return;
+    audioQueue.push(base64Audio);
+    playNextAudio();
+  }
+
+  // PTT recording
+  var audioCtx = null;
+  var micStream = null;
+  var sourceNode = null;
+  var processorNode = null;
+  var voiceWs = null;
+  var isRecording = false;
+
+  async function startRec() {
+    if (isRecording) return; // Guard against re-entrant recording
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus('浏览器不支持语音');
+      return;
+    }
+    try {
+      // Close any existing voiceWs before creating new one
+      if (voiceWs) {
+        voiceWs.close();
+        voiceWs = null;
+      }
+      isRecording = true;
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      sourceNode = audioCtx.createMediaStreamSource(micStream);
+      processorNode = audioCtx.createScriptProcessor(4096, 1, 1);
+      sourceNode.connect(processorNode);
+      processorNode.connect(audioCtx.destination);
+
+      var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      var wsUrl = proto + '//' + location.host + '/terminal/ws-voice?t=' + TOKEN;
+      setStatus('正在连接语音...');
+      voiceWs = new WebSocket(wsUrl);
+      console.log('[voice] connecting to', wsUrl);
+
+      voiceWs.onopen = function() {
+        console.log('[voice] connected');
+        setStatus('正在识别...');
+        var asrMsg = JSON.stringify({type:'asr_start'});
+        console.log('[voice] sending asr_start:', asrMsg);
+        voiceWs.send(asrMsg);
+      };
+
+      voiceWs.onerror = function(e) {
+        console.error('[voice] error', e);
+        setStatus('语音连接失败');
+      };
+
+      voiceWs.onmessage = function(e) {
+        var d = JSON.parse(e.data);
+        if (d.type === 'asr' && d.text) {
+          addMsg('user', d.text);
+          setStatus('小码思考中...');
+          // Send to AI via chatWs
+          if (chatWs && chatWs.readyState === WebSocket.OPEN) {
+            chatWs.send(JSON.stringify({type:'chat', text: d.text}));
+          } else {
+            pendingChat = d.text; // Queue if chatWs not ready
+          }
+        } else if (d.type === 'asr_partial' && d.text) {
+          // Partial transcript - could show interim text if desired
+        }
+      };
+
+      processorNode.onaudioprocess = function(ev) {
+        if (voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+          var inputData = ev.inputBuffer.getChannelData(0);
+          var int16 = new Int16Array(inputData.length);
+          for (var i = 0; i < inputData.length; i++) int16[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32767));
+          voiceWs.send(int16.buffer);
+        }
+      };
+
+      voiceWs.onerror = function() { setStatus('语音连接失败'); };
+      voiceWs.onclose = function() {
+        if (sourceNode) sourceNode.disconnect();
+        if (processorNode) processorNode.disconnect();
+        if (micStream) micStream.getTracks().forEach(function(t) { t.stop(); });
+        isRecording = false;
+        ptt.classList.remove('recording');
+        hint.textContent = '按住说话';
+      };
+
+      ptt.classList.add('recording');
+      hint.textContent = '松开发送';
+    } catch(e) {
+      setStatus('无法访问麦克风');
+    }
+  }
+
+  function stopRec() {
+    if (voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+      voiceWs.send(JSON.stringify({type:'asr_end'}));
+      // Don't close - wait for final transcript to arrive
+    }
+    setStatus('小码思考中...');
+  }
+
+  // Touch events for PTT
+  ptt.addEventListener('touchstart', function(e) {
+    e.preventDefault();
+    if (ptt.disabled) return;
+    startRec();
+  });
+  ptt.addEventListener('touchend', function(e) {
+    e.preventDefault();
+    if (isRecording) stopRec();
+  });
+
+  // Mouse events for desktop
+  ptt.addEventListener('mousedown', function(e) {
+    if (e.button !== 0) return;
+    if (ptt.disabled) return;
+    startRec();
+  });
+  ptt.addEventListener('mouseup', function(e) {
+    if (e.button !== 0) return;
+    if (isRecording) stopRec();
+  });
+  ptt.addEventListener('mouseleave', function() {
+    if (isRecording) stopRec();
+  });
+
+  // Disable PTT initially
+  ptt.disabled = true;
+  setStatus('连接中...');
+})();
+</script>
+</body>
+</html>`;
+}
+
+function startAsrSession(clientWs: WebSocket, onFinalText?: (text: string) => void): AsrSession {
+  console.log(`[ASR] startAsrSession called, hasCallback=${!!onFinalText}, clientWsState=${clientWs.readyState}`);
   const asrSession: AsrSession = {
     volcanoWs: null, ready: false, pendingChunks: [],
     allChunks: [], ended: false, retryCount: 0, gotResult: false,
     cancelled: false,
   };
-  connectVolcano(asrSession, clientWs);
+  connectVolcano(asrSession, clientWs, onFinalText);
   return asrSession;
 }
 
@@ -10870,6 +11165,7 @@ interface EasySessionInfo {
   sharedWith: Set<string>;  // usernames who have ever joined (excluding owner)
   _fileAccessUsers: Set<string>;  // non-owner users granted file access
   _leaveTimers: Map<string, ReturnType<typeof setTimeout>>;  // debounce leave broadcasts
+  _voiceChatWs?: WebSocket;  // voice-chat WebSocket for this session (for forwarding ASR results)
 }
 const easySessions = new Map<string, EasySessionInfo>();
 
@@ -11051,11 +11347,13 @@ function initTaskSchedulerForUser(owner: string): void {
   }
 
   const taskCallback = (result: TaskRunResult) => {
-    // Push to this owner's sessions' UI — skip multi-user sessions (shared sessions)
+    // Push to this owner's sessions' UI — skip shared sessions
     for (const [sid, info] of easySessions) {
       if (info.owner !== owner) continue;
-      // Skip sessions with multiple connected users (shared sessions)
-      if (info.connectedUsers.size > 1) continue;
+      // Skip if currently multiple users connected (多人同时在看)
+      if ((info.connectedUsers?.size ?? 0) > 1) continue;
+      // Skip if session was ever shared (被共享过的session不发定时任务)
+      if ((info.sharedWith?.size ?? 0) > 0) continue;
       info.cp.injectTaskResult(result.taskName, result.text, result.isDraft);
       broadcastTaskCount(sid, info, taskScheduler.getActiveCount(owner));
     }
@@ -11075,8 +11373,10 @@ function initTaskSchedulerForUser(owner: string): void {
   const countCallback = (count: number) => {
     for (const [sid, info] of easySessions) {
       if (info.owner !== owner) continue;
-      // Skip sessions with multiple connected users (shared sessions)
-      if (info.connectedUsers.size > 1) continue;
+      // Skip if currently multiple users connected
+      if ((info.connectedUsers?.size ?? 0) > 1) continue;
+      // Skip if session was ever shared
+      if ((info.sharedWith?.size ?? 0) > 0) continue;
       broadcastTaskCount(sid, info, count);
     }
   };
@@ -12681,6 +12981,21 @@ esac
     // Invalid token — fall through to normal auth check
   }
 
+  // --- Voice Chat page (public, token-protected) ---
+  if ((pathname === '/terminal/voice-chat' || pathname === '/voice-chat' || pathname === '/ai/voice-chat') && req.method === 'GET') {
+    const vcUrl = new URL(req.url!, `http://${req.headers.host}`);
+    const vcToken = vcUrl.searchParams.get('t') || '';
+    const tokenData = validateVoiceChatToken(vcToken);
+    if (!tokenData) {
+      res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<!DOCTYPE html><html><body style="font-family:sans-serif;padding:40px;color:#c00">链接已过期，请重新从企业微信发送语音消息获取新链接。</body></html>');
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+    res.end(voiceChatPageHtml(vcToken));
+    return;
+  }
+
   // --- PDF viewer (public, wraps PDF in PDF.js for mobile browser support) ---
   if ((pathname === '/terminal/pdf-viewer' || pathname === '/pdf-viewer') && req.method === 'GET') {
     const pdfUrl = parsedUrl.searchParams.get('url') || '';
@@ -14129,25 +14444,104 @@ easyWss.on('connection', (clientWs: WebSocket, req: http.IncomingMessage) => {
 
 // Voice WebSocket server - streaming ASR
 const voiceWss = new WebSocketServer({ noServer: true });
-voiceWss.on('connection', (ws) => {
+voiceWss.on('connection', (ws, request) => {
   const id = Math.random().toString(36).substring(7);
   voiceClients.set(id, ws);
-  console.log(`Voice client connected: ${id}`);
 
+  // Get session info from upgrade handler (token already validated there)
+  const voiceChatInfo: { sessionId: string; hopcodeUser: string } | null = (request as any)._voiceChatInfo || null;
+
+  console.log(`Voice client connected: ${id}${voiceChatInfo ? ` voice-chat session=${voiceChatInfo.sessionId}` : ''}`);
   let asrSession: AsrSession | null = null;
 
   ws.on('message', (message) => {
+    const isBuf = message instanceof Buffer;
+    console.log(`[voice:${id}] MSG_RECV type=${isBuf ? 'Buffer('+message.length+')' : 'string'}, hex=${isBuf ? message.slice(0,8).toString('hex') : message.substring(0,30)}`);
     try {
       // Detect JSON control messages: must be a string type, or a short Buffer starting with '{'
       const isJson = typeof message === 'string' ||
         (message instanceof Buffer && message.length < 512 && message[0] === 0x7b);
+      console.log(`[voice:${id}] isJson=${isJson}`);
       if (isJson) {
         const msg = JSON.parse(message.toString());
+        console.log(`[voice:${id}] JSON_MSG type=${msg.type}`);
         if (msg.type === 'asr_start') {
+          console.log(`[voice:${id}] asr_start received, voiceChatInfo=${!!voiceChatInfo}`, JSON.stringify(voiceChatInfo));
           // Start a new streaming ASR session; cancel any previous one
           if (asrSession) cancelAsrSession(asrSession);
-          asrSession = startAsrSession(ws);
-          console.log(`ASR streaming started for ${id}`);
+
+          // If voice-chat, pass callback to forward transcript to AI
+          if (voiceChatInfo) {
+            asrSession = startAsrSession(ws, (transcript) => {
+              const info = easySessions.get(voiceChatInfo!.sessionId);
+              const chatWs = info?._voiceChatWs;
+              if (!info || !chatWs) {
+                console.log(`[voice:${id}] voice-chat: no session or chatWs`);
+                return;
+              }
+              const now = new Date();
+              const dateStr = now.toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
+              const timeStr = now.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+              const hint = `\n[Today is ${dateStr} ${timeStr}. Voice chat — reply concisely in plain text. No markdown, no URLs. Max 100 words.]`;
+              info.cp.sendMessage(transcript.trim() + hint, voiceChatInfo.hopcodeUser, undefined, 1);
+              info.lastActivity = Date.now();
+
+              // TTS state for this voice-chat session
+              let ttsBuffer = '';
+              let ttsQueue: Promise<void> = Promise.resolve();
+              function findSentenceEnd(text: string): number {
+                const match = /[。！？.!?]+/.exec(text);
+                return match ? match.index + match[0].length : -1;
+              }
+              function synthesizeSentence(text: string): Promise<void> {
+                if (!text || text.trim().length < 2) return Promise.resolve();
+                return synthesizeTts(text.trim()).then(pcm => {
+                  const wav = pcmToWav(pcm);
+                  const base64 = wav.toString('base64');
+                  if (chatWs.readyState === WebSocket.OPEN) {
+                    chatWs.send(JSON.stringify({ type: 'tts', audio: base64 }));
+                  }
+                }).catch((e: any) => {
+                  console.error('[voice-chat-tts] error:', e.message);
+                });
+              }
+
+              // Listen for AI response and forward to chatWs
+              let responseComplete = false;
+              const aiListener = (responseMsg: EasyServerMessage) => {
+                if (chatWs.readyState !== WebSocket.OPEN) return;
+                if (responseMsg.type === 'message_delta' && 'delta' in responseMsg) {
+                  const delta = responseMsg.delta;
+                  ttsBuffer += delta;
+                  let sentenceEnd = findSentenceEnd(ttsBuffer);
+                  while (sentenceEnd > 0) {
+                    const sentence = ttsBuffer.slice(0, sentenceEnd);
+                    ttsBuffer = ttsBuffer.slice(sentenceEnd);
+                    ttsQueue = ttsQueue.then(() => synthesizeSentence(sentence));
+                    sentenceEnd = findSentenceEnd(ttsBuffer);
+                  }
+                  chatWs.send(JSON.stringify({ type: 'delta', text: delta }));
+                } else if (responseMsg.type === 'message' && responseMsg.role === 'assistant' && responseMsg.text) {
+                  if (ttsBuffer.trim().length >= 2) {
+                    ttsQueue = ttsQueue.then(() => synthesizeSentence(ttsBuffer));
+                  }
+                  ttsBuffer = '';
+                  chatWs.send(JSON.stringify({ type: 'complete', text: responseMsg.text }));
+                  responseComplete = true;
+                  // Remove listener after response is complete
+                  info.cp.removeListener(aiListener);
+                } else if (responseMsg.type === 'error') {
+                  chatWs.send(JSON.stringify({ type: 'error', message: responseMsg.message }));
+                  info.cp.removeListener(aiListener);
+                }
+              };
+              info.cp.addListener(aiListener);
+            });
+            console.log(`[voice:${id}] voice-chat ASR started`);
+          } else {
+            asrSession = startAsrSession(ws);
+            console.log(`ASR streaming started for ${id}`);
+          }
         } else if (msg.type === 'asr_end') {
           // Send final marker to Volcano
           if (asrSession) {
@@ -14181,10 +14575,109 @@ voiceWss.on('connection', (ws) => {
     }
   });
 
-  ws.on('close', () => {
+  ws.on('close', (code, reason) => {
     if (asrSession) cancelAsrSession(asrSession);
     voiceClients.delete(id);
-    console.log(`Voice client disconnected: ${id}`);
+    console.log(`Voice client disconnected: ${id} code=${code} reason=${reason.toString()}`);
+  });
+});
+
+// Voice Chat WebSocket — separate from ASR voice
+const voiceChatWss = new WebSocketServer({ noServer: true });
+voiceChatWss.on('connection', (ws, request) => {
+  ws.on('error', (e: Error) => console.error('[voiceChatWs error]', e.message));
+  ws.on('close', (code: number, reason: Buffer) => console.log(`[voiceChatWs close] code=${code} reason=${reason.toString()}`));
+  // Token was validated in upgrade handler before handleUpgrade
+  const tokenData = (request as any)._voiceChatTokenData;
+  if (!tokenData) {
+    ws.close(4001, 'Invalid token');
+    return;
+  }
+
+  const { sessionId, hopcodeUser } = tokenData;
+  const info = easySessions.get(sessionId);
+  if (!info) {
+    ws.close(4002, 'Session not found');
+    return;
+  }
+
+  console.log(`[voice-chat] connected: user=${hopcodeUser} session=${sessionId}`);
+
+  // Store chat WebSocket reference for voice-chat so ASR results can be forwarded
+  info._voiceChatWs = ws;
+
+  // Send ready confirmation immediately so client knows connection succeeded
+  ws.send(JSON.stringify({ type: 'ready' }));
+
+  // TTS state
+  let ttsBuffer = '';
+  let ttsQueue: Promise<void> = Promise.resolve();
+
+  function findSentenceEnd(text: string): number {
+    const match = /[。！？.!?]+/.exec(text);
+    return match ? match.index + match[0].length : -1;
+  }
+
+  function synthesizeSentence(text: string): Promise<void> {
+    if (!text || text.trim().length < 2) return Promise.resolve();
+    return synthesizeTts(text.trim()).then(pcm => {
+      const wav = pcmToWav(pcm);
+      const base64 = wav.toString('base64');
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'tts', audio: base64 }));
+      }
+    }).catch((e: any) => {
+      console.error('[voice-chat-tts] error:', e.message);
+    });
+  }
+
+  const listener = (msg: EasyServerMessage) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    if (msg.type === 'message_delta' && 'delta' in msg) {
+      const delta = msg.delta;
+      ttsBuffer += delta;
+      let sentenceEnd = findSentenceEnd(ttsBuffer);
+      while (sentenceEnd > 0) {
+        const sentence = ttsBuffer.slice(0, sentenceEnd);
+        ttsBuffer = ttsBuffer.slice(sentenceEnd);
+        ttsQueue = ttsQueue.then(() => synthesizeSentence(sentence));
+        sentenceEnd = findSentenceEnd(ttsBuffer);
+      }
+      ws.send(JSON.stringify({ type: 'delta', text: delta }));
+    } else if (msg.type === 'tool' && msg.status === 'running') {
+      ws.send(JSON.stringify({ type: 'thinking' }));
+    } else if (msg.type === 'message' && msg.role === 'assistant' && msg.text) {
+      if (ttsBuffer.trim().length >= 2) {
+        ttsQueue = ttsQueue.then(() => synthesizeSentence(ttsBuffer));
+      }
+      ttsBuffer = '';
+      ws.send(JSON.stringify({ type: 'complete', text: msg.text }));
+    } else if (msg.type === 'state' && msg.state === 'ready') {
+      ws.send(JSON.stringify({ type: 'ready' }));
+    } else if (msg.type === 'error') {
+      ws.send(JSON.stringify({ type: 'error', message: msg.message }));
+    }
+  };
+
+  info.cp.addListener(listener);
+
+  ws.on('message', (data) => {
+    try {
+      const msg = JSON.parse(data.toString());
+      if (msg.type === 'chat' && typeof msg.text === 'string' && msg.text.trim()) {
+        const now = new Date();
+        const dateStr = now.toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
+        const timeStr = now.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const hint = `\n[Today is ${dateStr} ${timeStr}. Voice chat — reply concisely in plain text. No markdown, no URLs. Max 100 words.]`;
+        info.cp.sendMessage(msg.text.trim() + hint, hopcodeUser, undefined, 1);
+        info.lastActivity = Date.now();
+      }
+    } catch {}
+  });
+
+  ws.on('close', () => {
+    info.cp.removeListener(listener);
+    console.log(`[voice-chat] disconnected: user=${hopcodeUser}`);
   });
 });
 
@@ -14192,6 +14685,46 @@ voiceWss.on('connection', (ws) => {
 server.on('upgrade', (request, socket, head) => {
   const url = new URL(request.url!, `http://${request.headers.host}`);
   const p = url.pathname;
+
+  // Voice chat WebSocket — token-protected, validate BEFORE upgrade
+  if (p === '/ws-voice-chat' || p === '/terminal/ws-voice-chat' || p === '/ai/ws-voice-chat') {
+    const chatToken = url.searchParams.get('t') || '';
+    const tokenData = chatToken ? validateVoiceChatToken(chatToken) : null;
+    if (!tokenData) {
+      console.log(`[ws-upgrade] voice-chat INVALID TOKEN="${chatToken}" — rejecting`);
+      socket.write('HTTP/1.1 401 Invalid Token\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    (request as any)._voiceChatTokenData = tokenData;
+    console.log(`[ws-upgrade] voice-chat token valid session=${tokenData.sessionId}`);
+    voiceChatWss.handleUpgrade(request, socket, head, (ws) => {
+      voiceChatWss.emit('connection', ws, request);
+    });
+    return;
+  }
+
+  // Voice ASR WebSocket — for real-time speech recognition (used by voice-chat page)
+  if (p === '/ws-voice' || p === '/terminal/ws-voice' || p === '/ai/ws-voice') {
+    const voiceToken = url.searchParams.get('t') || '';
+    // Validate token BEFORE handleUpgrade (if token provided)
+    if (voiceToken) {
+      const tokenData = validateVoiceChatToken(voiceToken);
+      if (!tokenData) {
+        console.log(`[ws-upgrade] voice INVALID TOKEN="${voiceToken}" — rejecting`);
+        socket.write('HTTP/1.1 401 Invalid Token\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      // Store sessionId in request for connection handler to use
+      (request as any)._voiceChatInfo = { sessionId: tokenData.sessionId, hopcodeUser: tokenData.hopcodeUser };
+      console.log(`[ws-upgrade] voice token valid session=${tokenData.sessionId}`);
+    }
+    voiceWss.handleUpgrade(request, socket, head, (ws) => {
+      voiceWss.emit('connection', ws, request);
+    });
+    return;
+  }
 
   // Allow guest token auth for /ws-easy
   if (p === '/ws-easy' || p === '/terminal/ws-easy') {
@@ -14222,8 +14755,6 @@ server.on('upgrade', (request, socket, head) => {
     return;
   }
 
-  // Accept both direct paths and proxy-rewritten paths:
-  // Direct: /terminal/ws, /terminal/ws-voice
   // Via proxy (strips /terminal): /ws, /ws-voice
   // Legacy: /ws/terminal, /ws/voice
   if (p === '/ws' || p === '/terminal/ws' || p === '/ws/terminal') {

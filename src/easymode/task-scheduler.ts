@@ -67,6 +67,8 @@ interface OwnerState {
   countCallbacks: Set<CountCallback>;
   /** Directory containing .mcp-config.json for task execution */
   mcpConfigDir?: string;
+  /** Track tasks currently being executed to prevent duplicate runs */
+  executingTasks: Set<string>;
 }
 
 export class TaskScheduler {
@@ -99,6 +101,7 @@ export class TaskScheduler {
       callbacks: new Set([callback]),
       countCallbacks: onCountChange ? new Set([onCountChange]) : new Set(),
       mcpConfigDir,
+      executingTasks: new Set(),
     };
     this.owners.set(owner, state);
 
@@ -165,8 +168,8 @@ export class TaskScheduler {
     for (const task of tasks) {
       const existing = jobs.get(task.id);
 
-      // New draft → auto test run
-      if (task.status === 'draft' && task.enabled && !existing) {
+      // New draft → auto test run (only if not yet tested — lastRunAt means it ran at least once)
+      if (task.status === 'draft' && task.enabled && !existing && !task.lastRunAt) {
         console.log(`[task-scheduler] ${owner} new draft task "${task.name}" — running test`);
         jobs.set(task.id, { task });
         this.executeTask(owner, task, true);
@@ -189,10 +192,12 @@ export class TaskScheduler {
         const scheduleChanged = JSON.stringify(existing.task.schedule) !== JSON.stringify(task.schedule);
         existing.task = task;
         if (scheduleChanged) {
+          console.log(`[task-scheduler] ${owner} task "${task.name}" schedule changed, restarting job`);
           this.stopJob(existing);
           this.startJob(owner, existing);
         }
       } else {
+        console.log(`[task-scheduler] ${owner} task "${task.name}" no existing job, starting new job`);
         const job: ActiveJob = { task };
         jobs.set(task.id, job);
         this.startJob(owner, job);
@@ -287,6 +292,14 @@ export class TaskScheduler {
     const state = this.owners.get(owner);
     if (!state) return;
 
+    // Prevent duplicate execution - check if task is already running
+    const execKey = `${task.id}:${isDraft ? 'draft' : 'scheduled'}`;
+    if (state.executingTasks.has(execKey)) {
+      console.log(`[task-scheduler] ${owner} task "${task.name}" already executing, skipping duplicate`);
+      return;
+    }
+    state.executingTasks.add(execKey);
+
     const taggedPrompt = isDraft
       ? `[Scheduled task test run "${task.name}"]: ${task.prompt}\n\nThis is a TEST RUN. Execute the task and show the result. The user will review before activating the schedule.`
       : `[Scheduled task "${task.name}"]: ${task.prompt}`;
@@ -296,12 +309,11 @@ export class TaskScheduler {
     try {
       const result = await this.spawnClaudeForTask(state.userHome, taggedPrompt, owner, state.mcpConfigDir);
 
-      if (!isDraft) {
-        task.lastRunAt = Date.now();
-        task.lastStatus = 'ok';
-        task.lastError = null;
-        task.consecutiveErrors = 0;
-      }
+      // Always record last run time (for both test runs and scheduled runs)
+      task.lastRunAt = Date.now();
+      task.lastStatus = 'ok';
+      task.lastError = null;
+      task.consecutiveErrors = 0;
 
       const runResult: TaskRunResult = {
         taskId: task.id,
@@ -356,6 +368,9 @@ export class TaskScheduler {
       for (const cb of state.callbacks) {
         try { cb(runResult); } catch {}
       }
+    } finally {
+      // Always clean up executing state
+      state.executingTasks.delete(execKey);
     }
   }
 

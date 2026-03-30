@@ -94,6 +94,16 @@ function handleScheduleTask(input: any): string {
   }
 
   const { name, type, prompt } = input;
+
+  // Check for duplicate task name
+  const existing = tasks.find(t => t.name === name);
+  if (existing) {
+    if (existing.status === 'active') {
+      return `Error: Task "${name}" already exists and is active. Delete it first if you want to create a new version, or edit the existing task's schedule/prompt.`;
+    } else {
+      return `Error: Task "${name}" already exists as a draft (pending test). Activate or delete it first: ID ${existing.id.slice(-8)}`;
+    }
+  }
   if (!name || !type || !prompt) return 'Error: name, type, and prompt are required.';
   if (prompt.length < 30) return `Error: prompt too short (${prompt.length} chars). Must be ≥30 chars and self-contained.`;
 

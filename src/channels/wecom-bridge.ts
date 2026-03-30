@@ -19,6 +19,7 @@ import type { Channel, IncomingMessage } from './types.js';
 import type { ClaudeProcess } from '../easymode/claude-process.js';
 import type { EasyServerMessage } from '../easymode/protocol.js';
 import { sendVoiceReply, isVoiceReplyAvailable } from './wecom-voice.js';
+import { createVoiceChatToken } from './voice-chat-tokens.js';
 
 /** Mirrors EasySessionInfo from server-node.ts (subset needed by bridge) */
 export interface BridgeSessionInfo {
@@ -330,7 +331,10 @@ export class WeComBridge {
     }
 
     const groupBaseUrl = process.env.PUBLIC_URL || 'https://gotong.gizwitsapi.com';
-    const groupWecomHint = `\n[This user is on WeChat Work — reply in text/markdown only. NO inline images. Share images as full clickable URLs using domain: ${groupBaseUrl}]`;
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
+    const timeStr = now.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const groupWecomHint = `\n[Today is ${dateStr} ${timeStr}. This user is on WeChat Work — reply in text/markdown only. NO inline images. Share images as full clickable URLs using domain: ${groupBaseUrl}]`;
     info.cp.sendMessage(cleanContent + groupWecomHint, senderName, mentions, participantCount);
     info.lastActivity = Date.now();
     this.saveRegistry();
@@ -400,10 +404,12 @@ export class WeComBridge {
         : this.findActiveSession(hopcodeUser);
       const lines = sessions.map((s, i) => {
         const marker = s.id === activeId ? ' ← 当前' : '';
-        return `${i + 1}. ${s.name || s.project || s.id}${marker}`;
+        const multiUserMarker = s.isMultiUser ? ' [多人参与]' : '';
+        return `${i + 1}. ${s.name || s.project || s.id}${multiUserMarker}${marker}`;
       });
+      const multiUserHint = sessions.some(s => s.isMultiUser) ? '\n\n注：[多人参与] 项目不可在WeCom中使用。' : '';
       await this.sendReply(channel, userId, chatId,
-        `你的项目：\n${lines.join('\n')}\n\n回复序号切换项目。`);
+        `你的项目：\n${lines.join('\n')}${multiUserHint}\n\n回复序号切换项目。`);
       this.awaitingSelection.set(userId, Date.now());
       return true;
     }
@@ -424,6 +430,11 @@ export class WeComBridge {
 
         if (num >= 1 && num <= sessions.length) {
           const s = sessions[num - 1]!;
+          // Prevent switching to multi-user sessions
+          if (s.isMultiUser) {
+            await this.sendReply(channel, userId, chatId, `项目「${s.name || s.project || s.id}」有多人参与，不可在WeCom中使用。`);
+            return true;
+          }
           found = { id: s.id, name: s.name || s.project || s.id };
         }
 
@@ -433,7 +444,14 @@ export class WeComBridge {
             (s.name && s.name.includes(target)) ||
             (s.project && s.project.includes(target))
           );
-          if (s) found = { id: s.id, name: s.name || s.project || s.id };
+          if (s) {
+            // Prevent switching to multi-user sessions
+            if (s.isMultiUser) {
+              await this.sendReply(channel, userId, chatId, `项目「${s.name || s.project || s.id}」有多人参与，不可在WeCom中使用。`);
+              return true;
+            }
+            found = { id: s.id, name: s.name || s.project || s.id };
+          }
         }
 
         if (found) {
@@ -727,19 +745,30 @@ export class WeComBridge {
       this.voiceRequests.add(listenerKey);
     }
 
+    // Generate voice chat link for voice messages
+    let voiceChatLink: string | undefined;
+    if (isVoice) {
+      const token = createVoiceChatToken(sessionId, hopcodeUser, userId);
+      const publicUrl = process.env.PUBLIC_URL || 'https://gotong.gizwitsapi.com';
+      voiceChatLink = `${publicUrl}/terminal/voice-chat?t=${token}`;
+    }
+
     // Only set up reply listener if Claude is not busy
     // If busy, the message will be queued and the existing listener will catch all replies
     if (!info.cp.isActive()) {
       if (this.botChannels.has(channel as WeComBot) && msg.reqId) {
-        this.setupStreamingReply(sessionId, userId, channel, msg.reqId, chatId);
+        this.setupStreamingReply(sessionId, userId, channel, msg.reqId, chatId, voiceChatLink);
       } else {
-        this.setupNonStreamingReply(sessionId, userId, channel, chatId);
+        this.setupNonStreamingReply(sessionId, userId, channel, chatId, voiceChatLink);
       }
     }
 
     // Send to Claude (add WeChat format hint — no inline images)
     const baseUrl = process.env.PUBLIC_URL || 'https://gotong.gizwitsapi.com';
-    const wecomHint = `\n[This user is on WeChat Work — reply in text/markdown only. NO inline images. Share images as full clickable URLs using domain: ${baseUrl}]`;
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
+    const timeStr = now.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const wecomHint = `\n[Today is ${dateStr} ${timeStr}. This user is on WeChat Work — reply in text/markdown only. NO inline images. Share images as full clickable URLs using domain: ${baseUrl}]`;
     info.cp.sendMessage(messageContent + wecomHint, hopcodeUser, undefined, 1);
     info.lastActivity = Date.now();
     this.saveRegistry();
@@ -750,7 +779,7 @@ export class WeComBridge {
   /** Set up streaming reply for WeComBot (stream chunks as they arrive) */
   private setupStreamingReply(
     sessionId: string, wecomUserId: string, channel: Channel,
-    reqId: string, chatId?: string,
+    reqId: string, chatId?: string, voiceChatLink?: string,
   ): void {
     const listenerKey = `${sessionId}:${wecomUserId}`;
     this.cleanupListener(listenerKey, sessionId);
@@ -763,9 +792,10 @@ export class WeComBridge {
     const MIN_FIRST_CHARS = 10; // wait for enough text before first visible update
     let chunkTimer: ReturnType<typeof setTimeout> | null = null;
 
-    // Immediately show typing indicator (official WeChat Work spinner bubble)
+    // Immediately trigger WeCom spinner bubble with "thinking" placeholder.
     const bot = channel as WeComBot;
-    bot.sendStreamChunk(wecomUserId, streamId, '', false).catch(() => {});
+    this.log(`[streaming] setup for session=${sessionId} user=${wecomUserId} reqId=${reqId}`);
+    bot.sendStreamChunk(wecomUserId, streamId, '思考中...', false).catch((e) => this.log(`[streaming] initial send failed: ${e}`));
 
     const sendChunk = (finish: boolean) => {
       if (accumulated.length > lastSentLength || finish) {
@@ -775,6 +805,10 @@ export class WeComBridge {
     };
 
     const listener = (msg: EasyServerMessage) => {
+      // Log state transitions only (not every message_delta)
+      if (msg.type === 'tool' || msg.type === 'state' || msg.type === 'message' || msg.type === 'error') {
+        this.log(`[streaming] event type=${msg.type} state=${(msg as any).state || ''} text_len=${(msg as any).text?.length || (msg as any).delta?.length || 0}`);
+      }
       if (msg.type === 'message_delta' && 'delta' in msg) {
         accumulated += msg.delta;
         streamedAny = true;
@@ -797,6 +831,11 @@ export class WeComBridge {
       } else if (msg.type === 'message' && msg.role === 'assistant' && msg.text) {
         // Complete message — finalize this stream and start a new one for queued messages
         accumulated = msg.text;
+        // Append voice chat link once on first reply (only for voice-originated messages)
+        if (voiceChatLink) {
+          accumulated += `\n\n🎙️ [语音对话](${voiceChatLink})`;
+          voiceChatLink = undefined; // only once
+        }
         streamedAny = true;
         if (chunkTimer) { clearTimeout(chunkTimer); chunkTimer = null; }
         sendChunk(true);
@@ -840,22 +879,29 @@ export class WeComBridge {
   /** Set up non-streaming reply for WeComApp (accumulate full text, send at end) */
   private setupNonStreamingReply(
     sessionId: string, wecomUserId: string, channel: Channel,
-    chatId?: string,
+    chatId?: string, voiceChatLink?: string,
   ): void {
     const listenerKey = `${sessionId}:${wecomUserId}`;
     this.cleanupListener(listenerKey, sessionId);
 
     let fullText = '';
+    let linkAppended = false;
 
     const listener = (msg: EasyServerMessage) => {
       if (msg.type === 'message' && msg.role === 'assistant' && msg.text) {
+        // Append voice chat link once on first reply
+        let replyText = msg.text;
+        if (voiceChatLink && !linkAppended) {
+          replyText += `\n\n🎙️ 语音对话: ${voiceChatLink}`;
+          linkAppended = true;
+        }
         // Send each complete message immediately (handles queued messages)
-        this.sendReply(channel, wecomUserId, chatId, msg.text).catch(() => {});
+        this.sendReply(channel, wecomUserId, chatId, replyText).catch(() => {});
         if (this.voiceRequests.has(listenerKey)) {
           this.voiceRequests.delete(listenerKey);
           sendVoiceReply(wecomUserId, msg.text).catch(() => {});
         }
-        fullText = msg.text;
+        fullText = replyText;
       } else if (msg.type === 'state' && msg.state === 'ready') {
         this.cleanupListener(listenerKey, sessionId);
       } else if (msg.type === 'error') {
@@ -928,11 +974,15 @@ export class WeComBridge {
     return zhMap[s] || 0;
   }
 
-  private getUserSessions(username: string): Array<{ id: string; name: string; project: string; lastActivity: number }> {
-    const result: Array<{ id: string; name: string; project: string; lastActivity: number }> = [];
+  private getUserSessions(username: string): Array<{ id: string; name: string; project: string; lastActivity: number; isMultiUser: boolean }> {
+    const result: Array<{ id: string; name: string; project: string; lastActivity: number; isMultiUser: boolean }> = [];
     for (const [id, info] of this.easySessions) {
       if (info.owner === username) {
-        result.push({ id, name: info.name, project: info.project, lastActivity: info.lastActivity });
+        // Multi-user if: currently connected users > 1, or has been shared with others
+        const sharedSize = info.sharedWith?.size ?? 0;
+        const connectedSize = info.connectedUsers?.size ?? 0;
+        const isMultiUser = connectedSize > 1 || sharedSize > 0;
+        result.push({ id, name: info.name, project: info.project, lastActivity: info.lastActivity, isMultiUser });
       }
     }
     // Sort by lastActivity descending
@@ -942,7 +992,9 @@ export class WeComBridge {
 
   private findActiveSession(username: string): string | undefined {
     const sessions = this.getUserSessions(username);
-    return sessions.length > 0 ? sessions[0]!.id : undefined;
+    // Skip multi-user sessions - WeCom only routes to single-user projects
+    const singleUserSessions = sessions.filter(s => !s.isMultiUser);
+    return singleUserSessions.length > 0 ? singleUserSessions[0]!.id : undefined;
   }
 
   /** Send reply, splitting long text into multiple messages */

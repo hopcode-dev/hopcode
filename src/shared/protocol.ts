@@ -20,6 +20,7 @@ export interface SessionInfo {
   createdAt: number;
   lastActivity: number;
   clientCount: number;
+  active?: boolean; // false = session existed before restart, worker is gone
 }
 
 // Messages from PTY service -> UI service (over internal WS)
