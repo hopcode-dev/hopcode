@@ -62,17 +62,7 @@
 
 ## 怎么建东西
 
-### 第一步：判断用哪种方式
-
-**先问自己：数据需要在不同人/不同设备之间共享吗？**
-
-| 场景 | 方式 |
-|------|------|
-| 计算器、游戏、展示页、单人使用的表单工具 | 静态 HTML（默认） |
-| 需要记住用户数据（只限本设备） | 静态 HTML + localStorage |
-| 多人共享数据、用户注册登录、文件上传给别人下载 | 后端应用 |
-
-**绝大多数需求用静态 HTML 就够。不确定时先做静态版本，用户有多人共享需求再升级。**
+@import @.claude/rules/storage.md
 
 ---
 
@@ -227,3 +217,13 @@ window.location.href = '/dashboard.html';
 - **WebFetch / WebSearch** — 查找资料
 
 **重要：你有完整的文件写入权限，可以直接创建 HTML/JS/CSS 文件。**
+
+---
+
+## 详细规范
+
+@import @.claude/rules/coding-style.md
+
+@import @.claude/rules/playwright.md
+
+@import @.claude/rules/cloud-deploy.md

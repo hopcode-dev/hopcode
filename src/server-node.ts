@@ -1398,7 +1398,7 @@ async function buildSessionsHtml(username?: string): Promise<string> {
   }
 
   function esc(s: string): string {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return s.replace(/&/g, '&amp;').replace(/\x3c/g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
   function renderCard(s: typeof sessionList[0]): string {
@@ -2009,7 +2009,7 @@ function getGuestErrorHtml(message: string): string {
 }
 
 function getGuestLandingHtml(lang: string, sessionName: string, ownerName: string, guestUrl: string, loginReturnUrl: string): string {
-  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/\x3c/g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Hopcode - ${esc(t(lang, 'guest.landing_title'))}</title>
 <script>${getI18nScript()}</script>
@@ -13178,7 +13178,7 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
           for (let i = 0; i < rows.length; i++) {
             const cells = rows[i].split(',').map(c => c.replace(/^"|"$/g, '').trim());
             const tag = i === 0 ? 'th' : 'td';
-            table += '<tr>' + cells.map(c => `<${tag}>${c.replace(/</g,'&lt;')}</${tag}>`).join('') + '</tr>';
+            table += '<tr>' + cells.map(c => `<${tag}>${c.replace(/\x3c/g,'&lt;')}</${tag}>`).join('') + '</tr>';
           }
           table += '</table>';
           const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font-family:system-ui;margin:16px;color:#1d1d1f}table{border-collapse:collapse;width:100%}th,td{border:1px solid #d2d2d7;padding:8px 12px;text-align:left;font-size:14px}th{background:#f5f5f7;font-weight:600}tr:nth-child(even){background:#fafafa}</style></head><body>${table}</body></html>`;
@@ -13186,7 +13186,7 @@ load().catch(function(e){container.innerHTML='<p style="color:#fff;text-align:ce
           res.end(html);
         } else if (wantRender && ext === '.md') {
           const raw = await fs.promises.readFile(filePath, 'utf-8');
-          const escHtml = (s: string) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+          const escHtml = (s: string) => s.replace(/&/g,'&amp;').replace(/\x3c/g,'&lt;').replace(/>/g,'&gt;');
           const lines = raw.split('\n');
           let html = '';
           let pageTitle = '';

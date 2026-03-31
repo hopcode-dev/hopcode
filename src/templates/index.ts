@@ -178,15 +178,32 @@ export function setupProjectTemplate(
     : content;
 
   const claudeMdPath = path.join(projectDir, 'CLAUDE.md');
+  const rulesDir = path.join(projectDir, '.claude', 'rules');
   try {
     try {
       fs.mkdirSync(projectDir, { recursive: true });
       fs.mkdirSync(path.join(projectDir, 'workspace'), { recursive: true });
+      fs.mkdirSync(rulesDir, { recursive: true });
     } catch {
       // hopcode service user can't write to user home dirs — create as the linux user
       if (username && username !== 'root') {
         execFileSync('sudo', ['-u', username, 'mkdir', '-p', path.join(projectDir, 'workspace')], { timeout: 3000 });
+        execFileSync('sudo', ['-u', username, 'mkdir', '-p', rulesDir], { timeout: 3000 });
       }
+    }
+    // Copy rule files to project
+    const templateRulesDir = path.join(__dirname, '.claude', 'rules');
+    try {
+      const ruleFiles = ['storage.md', 'coding-style.md', 'playwright.md', 'cloud-deploy.md'];
+      for (const file of ruleFiles) {
+        const src = path.join(templateRulesDir, file);
+        const dst = path.join(rulesDir, file);
+        if (fs.existsSync(src)) {
+          fs.copyFileSync(src, dst);
+        }
+      }
+    } catch (e) {
+      console.error('[template] Failed to copy rule files:', e);
     }
     fs.writeFileSync(claudeMdPath, finalContent, 'utf-8');
     // chown project dir to the linux user (so claude -p running as that user can read/write)

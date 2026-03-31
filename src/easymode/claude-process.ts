@@ -15,6 +15,7 @@ const WECHAT_MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 
 const YUYI_SALES_MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'yuyi-sales-mcp-server.ts');
 const TESLA_MCP_SERVER_SCRIPT = '/home/chief/chief-workspace/tesla/mcp-server.mjs';
 const SEARCH_MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'search-mcp-server.ts');
+const PLAYWRIGHT_MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'playwright-mcp-server.ts');
 import type { EasyServerMessage } from './protocol.js';
 import { VersionTracker } from './version-tracker.js';
 
@@ -290,6 +291,10 @@ export class ClaudeProcess {
             SEARXNG_URL: 'http://localhost:8888',
           },
         },
+        'playwright': {
+          command: tsxPath,
+          args: [PLAYWRIGHT_MCP_SERVER_SCRIPT],
+        },
         // Tesla MCP - only for jack and root
         ...((['jack', 'root'].includes(this.owner)) ? {
           'tesla': {
@@ -324,6 +329,7 @@ export class ClaudeProcess {
       // MCP tools
       'mcp__hopcode-tasks__schedule_task', 'mcp__hopcode-tasks__list_tasks', 'mcp__hopcode-tasks__delete_task', 'mcp__hopcode-tasks__activate_task',
       'mcp__browser-proxy__browser_open', 'mcp__browser-proxy__browser_screenshot', 'mcp__browser-proxy__browser_click', 'mcp__browser-proxy__browser_type', 'mcp__browser-proxy__browser_key', 'mcp__browser-proxy__browser_scroll', 'mcp__browser-proxy__browser_navigate', 'mcp__browser-proxy__browser_evaluate', 'mcp__browser-proxy__browser_cookies', 'mcp__browser-proxy__browser_status', 'mcp__browser-proxy__browser_close', 'mcp__browser-proxy__browser_list',
+      'mcp__playwright__playwright_navigate', 'mcp__playwright__playwright_click', 'mcp__playwright__playwright_fill', 'mcp__playwright__playwright_extract_text', 'mcp__playwright__playwright_screenshot', 'mcp__playwright__playwright_console_logs', 'mcp__playwright__playwright_network_errors', 'mcp__playwright__playwright_close', 'mcp__playwright__playwright_evaluate',
       'mcp__wechat__wechat_login', 'mcp__wechat__wechat_status', 'mcp__wechat__wechat_send', 'mcp__wechat__wechat_read', 'mcp__wechat__wechat_contacts', 'mcp__wechat__wechat_search',
       ...(['jack', 'root', 'alex'].includes(this.owner) ? ['mcp__yuyi-sales__sales_attendance', 'mcp__yuyi-sales__sales_bd_activity', 'mcp__yuyi-sales__sales_shipment_stats', 'mcp__yuyi-sales__sales_activation_stats', 'mcp__yuyi-sales__sales_order_stats', 'mcp__yuyi-sales__sales_team_overview', 'mcp__yuyi-sales__sales_dealer_ranking', 'mcp__yuyi-sales__sales_daily_report'] : []),
       ...(['jack', 'root'].includes(this.owner) ? ['mcp__tesla__check_battery', 'mcp__tesla__wake_vehicle'] : []),
@@ -667,6 +673,10 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
                 thinking: stream.getIsThinking(),
               });
             }
+          } else if (ev.content_block?.type === 'thinking') {
+            // Thinking blocks — silent, do NOT create a message bubble
+            // The thinking text includes model/signature info that should not be shown
+            stream.setIsThinking(true);
           }
         } else if (ev.type === 'content_block_delta') {
           const delta = ev.delta;
@@ -731,6 +741,8 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
         for (const block of content) {
           if (block.type === 'text' && block.text) {
             textParts.push(block.text);
+          } else if (block.type === 'thinking') {
+            // Thinking blocks — silently ignore, do not include in textParts
           } else if (block.type === 'tool_use') {
             hasToolUse = true;
             const toolName = block.name || 'tool';
