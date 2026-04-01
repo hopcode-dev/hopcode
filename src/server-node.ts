@@ -8206,6 +8206,9 @@ const indexHtml = `<!DOCTYPE html>
     var containerEl = document.getElementById('container');
     var _vhRafPending = false;
     function resetPageScroll() {
+      // Don't reset scroll if chat input is focused — on mobile, resetting scroll
+      // blurs the focused input which prevents the keyboard from staying open.
+      if (chatInput && document.activeElement === chatInput) return;
       if (window.scrollY || document.documentElement.scrollTop || document.body.scrollTop) {
         window.scrollTo(0, 0);
         document.documentElement.scrollTop = 0;
