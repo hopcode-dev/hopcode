@@ -598,7 +598,7 @@ function cancelAsrSession(session: AsrSession): void {
   }
 }
 
-function connectVolcano(asrSession: AsrSession, clientWs: WebSocket, onFinalText?: (text: string) => void): void {
+function connectVolcano(id: string, asrSession: AsrSession, clientWs: WebSocket, onFinalText?: (text: string) => void): void {
   console.log(`[connectVolcano] called, cancelled=${asrSession.cancelled}`);
   if (asrSession.cancelled) return;
 
@@ -635,7 +635,7 @@ function connectVolcano(asrSession: AsrSession, clientWs: WebSocket, onFinalText
     }
     asrSession.retryCount++;
     console.log(`ASR: retrying (attempt ${asrSession.retryCount}/${ASR_MAX_RETRIES}), replaying ${asrSession.allChunks.length} chunks`);
-    setTimeout(() => connectVolcano(asrSession, clientWs), 1000);
+    setTimeout(() => connectVolcano(id, asrSession, clientWs, onFinalText), 1000);
   }
 
   volcanoWs.on('open', () => {
@@ -1269,14 +1269,14 @@ function voiceChatPageHtml(token: string): string {
 </html>`;
 }
 
-function startAsrSession(clientWs: WebSocket, onFinalText?: (text: string) => void): AsrSession {
+function startAsrSession(id: string, clientWs: WebSocket, onFinalText?: (text: string) => void): AsrSession {
   console.log(`[ASR] startAsrSession called, hasCallback=${!!onFinalText}, clientWsState=${clientWs.readyState}`);
   const asrSession: AsrSession = {
     volcanoWs: null, ready: false, pendingChunks: [],
     allChunks: [], ended: false, retryCount: 0, gotResult: false,
     cancelled: false,
   };
-  connectVolcano(asrSession, clientWs, onFinalText);
+  connectVolcano(id, asrSession, clientWs, onFinalText);
   return asrSession;
 }
 
@@ -14473,7 +14473,7 @@ voiceWss.on('connection', (ws, request) => {
 
           // If voice-chat, pass callback to forward transcript to AI
           if (voiceChatInfo) {
-            asrSession = startAsrSession(ws, (transcript) => {
+            asrSession = startAsrSession(id, ws, (transcript) => {
               console.log(`[voice:${id}] onFinalText callback FIRED: "${transcript}"`);
               const info = easySessions.get(voiceChatInfo!.sessionId);
               const chatWs = info?._voiceChatWs;
@@ -14541,7 +14541,7 @@ voiceWss.on('connection', (ws, request) => {
             });
             console.log(`[voice:${id}] voice-chat ASR started`);
           } else {
-            asrSession = startAsrSession(ws);
+            asrSession = startAsrSession(id, ws);
             console.log(`ASR streaming started for ${id}`);
           }
         } else if (msg.type === 'asr_end') {
