@@ -669,7 +669,7 @@ function connectVolcano(asrSession: AsrSession, clientWs: WebSocket, onFinalText
       volcanoWs.send(buildAudioRequest(Buffer.alloc(0), true));
     }
 
-    console.log(`ASR Volcano ready (sent ${asrSession.allChunks.length} chunks, retry=${asrSession.retryCount})`);
+    console.log(`ASR Volcano ready: all=${asrSession.allChunks.length} retry=${asrSession.retryCount} [${new Date().toISOString()}]`);
   });
 
   // Debounce definite results (batch replay can produce many rapid definites)
@@ -14466,13 +14466,15 @@ voiceWss.on('connection', (ws, request) => {
         const msg = JSON.parse(message.toString());
         console.log(`[voice:${id}] JSON_MSG type=${msg.type}`);
         if (msg.type === 'asr_start') {
-          console.log(`[voice:${id}] asr_start received, voiceChatInfo=${!!voiceChatInfo}`, JSON.stringify(voiceChatInfo));
+          console.log(`[voice:${id}] asr_start voiceChatInfo=${!!voiceChatInfo} [${new Date().toISOString()}]`);
+          if (asrSession) console.log(`[voice:${id}] asr_start: cancelling prev all=${asrSession.allChunks.length} pend=${asrSession.pendingChunks.length}`);
           // Start a new streaming ASR session; cancel any previous one
           if (asrSession) cancelAsrSession(asrSession);
 
           // If voice-chat, pass callback to forward transcript to AI
           if (voiceChatInfo) {
             asrSession = startAsrSession(ws, (transcript) => {
+              console.log(`[voice:${id}] onFinalText callback FIRED: "${transcript}"`);
               const info = easySessions.get(voiceChatInfo!.sessionId);
               const chatWs = info?._voiceChatWs;
               if (!info || !chatWs) {
@@ -14546,6 +14548,7 @@ voiceWss.on('connection', (ws, request) => {
           // Send final marker to Volcano
           if (asrSession) {
             asrSession.ended = true;
+            console.log(`[voice:${id}] asr_end: ready=${asrSession.ready} volState=${asrSession.volcanoWs?.readyState} all=${asrSession.allChunks.length} pend=${asrSession.pendingChunks.length} retry=${asrSession.retryCount} [${new Date().toISOString()}]`);
             if (asrSession.ready && asrSession.volcanoWs?.readyState === WebSocket.OPEN) {
               asrSession.volcanoWs.send(buildAudioRequest(Buffer.alloc(0), true));
               console.log(`ASR streaming ended for ${id} (${asrSession.allChunks.length} chunks)`);
@@ -14566,7 +14569,10 @@ voiceWss.on('connection', (ws, request) => {
           } else {
             // Buffer while Volcano is connecting
             asrSession.pendingChunks.push(chunk);
+            console.log(`[voice:${id}] BINARY buffered: all=${asrSession.allChunks.length} pend=${asrSession.pendingChunks.length} ready=${asrSession.ready}`);
           }
+        } else {
+          console.log(`[voice:${id}] BINARY dropped: no asrSession [${new Date().toISOString()}]`);
         }
       }
     } catch (e) {

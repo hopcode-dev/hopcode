@@ -792,10 +792,10 @@ export class WeComBridge {
     const MIN_FIRST_CHARS = 10; // wait for enough text before first visible update
     let chunkTimer: ReturnType<typeof setTimeout> | null = null;
 
-    // Immediately trigger WeCom spinner bubble with "thinking" placeholder.
+    // Immediately trigger WeCom spinner bubble (empty content with finish=false).
     const bot = channel as WeComBot;
     this.log(`[streaming] setup for session=${sessionId} user=${wecomUserId} reqId=${reqId}`);
-    bot.sendStreamChunk(wecomUserId, streamId, '思考中...', false).catch((e) => this.log(`[streaming] initial send failed: ${e}`));
+    bot.sendStreamChunk(wecomUserId, streamId, '', false).catch((e) => this.log(`[streaming] initial send failed: ${e}`));
 
     const sendChunk = (finish: boolean) => {
       if (accumulated.length > lastSentLength || finish) {
