@@ -62,6 +62,8 @@ export class WeComBridge {
   private voiceRequests = new Set<string>(); // listenerKey for pending voice replies
   // Track users awaiting project selection (bare number → switch)
   private awaitingSelection = new Map<string, number>(); // wecomUserId → timestamp
+  // Track unbound users who have already seen the welcome (short reminder on return)
+  private seenWelcome = new Set<string>();
 
   private log: (msg: string) => void;
 
@@ -171,11 +173,10 @@ export class WeComBridge {
       // Direct message handling
       const hopcodeUser = this.bindings.get(userId);
 
-      // Not bound — check for bind command or show instructions
+      // Not bound — check for bind command or show welcome
       if (!hopcodeUser) {
         if (this.tryBindCommand(userId, content, channel)) return;
-        await this.sendReply(channel, userId, chatId,
-          '你好！请先绑定立码账号：\n\n发送：绑定 用户名:密码\n\n例如：绑定 xiaoming:abc123');
+        await this.sendWelcomeMessage(userId, channel);
         return;
       }
 
@@ -340,6 +341,44 @@ export class WeComBridge {
     this.saveRegistry();
   }
 
+  // ── Onboarding ──
+
+  private async sendWelcomeMessage(userId: string, channel: Channel): Promise<void> {
+    const isReturning = this.seenWelcome.has(userId);
+    this.seenWelcome.add(userId);
+
+    if (isReturning) {
+      // Short reminder for returning unbound users
+      await this.sendReply(channel, userId, undefined,
+        '你还没绑定账号哦。请联系管理员开通账号，然后发送：\n\n绑定 用户名:密码\n\n例如：绑定 xiaoming:abc123\n\n小码擅长：产品文档编写、生成小工具/脚本、自动化定时任务、数据整理等。');
+      return;
+    }
+
+    // First time — rich welcome
+    await this.sendReply(channel, userId, undefined,
+      `👋 你好！欢迎使用小码！
+
+小码的定位是：你的智能工作助手，不做项目开发。
+
+🌟 小码擅长：
+• 📄 产品管理 — 编写产品文档、需求整理、方案输出
+• 📁 文件生成 — 生成报告、表格、配置、脚本等各类文件
+• 🛠️ 小应用开发 — 开发轻量工具、自动化脚本、数据处理程序
+• ⏰ 定时任务 — 设置自动执行任务，定时完成任务
+
+💡 不适合：大型项目开发、复制已有项目、长期维护复杂代码库
+
+📌 使用前需要：
+1. 联系管理员开通账号（用户名和密码）
+2. 绑定账号后即可开始对话
+
+💡 绑定方法（管理员会告诉你用户名和密码）：
+发送：绑定 用户名:密码
+例如：绑定 xiaoming:abc123
+
+语音消息也支持！`);
+  }
+
   // ── Commands ──
 
   private tryBindCommand(userId: string, content: string, channel: Channel): boolean {
@@ -361,8 +400,17 @@ export class WeComBridge {
     this.bindings.set(userId, username!);
     this.saveBindings();
     this.log(`Bound wecom:${userId} → hopcode:${username}`);
-    this.sendReply(channel, userId, undefined,
-      `绑定成功！你已关联到立码用户「${username}」🎉\n\n直接给小码发消息就能对话了，和网页版 Easy Mode 一样。发「项目列表」查看你的项目，回复序号可以切换。如果还没有项目，发「新建项目」即可创建。在群聊中 @小码 就能让它参与讨论。\n\n常用命令：\n• 项目列表 — 查看项目\n• 版本 — 查看文件历史\n• 回滚 序号 — 还原到之前的版本\n• 解绑 — 解除账号关联\n\n语音消息也支持，小码会自动识别并回复。`);
+
+    // Check if user has any projects
+    const sessions = this.getUserSessions(username!);
+    if (sessions.length === 0) {
+      // First time user — guide to create first project
+      this.sendReply(channel, userId, undefined,
+        `🎉 绑定成功！你已关联到立码用户「${username}」\n\n欢迎使用小码！你还没有项目空间，发送「新建项目」即可创建一个。\n\n小码擅长：\n• 📄 产品文档 — 需求文档、方案、汇报材料\n• 📁 文件生成 — 表格、配置、报告、脚本\n• 🛠️ 小工具 — 数据处理、自动化脚本、接口测试\n• ⏰ 定时任务 — 设置自动执行，省心省力\n\n在群聊中 @小码 也能让它参与讨论哦！`);
+    } else {
+      this.sendReply(channel, userId, undefined,
+        `🎉 绑定成功！你已关联到立码用户「${username}」\n\n直接和小码对话即可，发「项目列表」可以切换项目。\n\n常用命令：\n• 项目列表 — 查看你的项目\n• 新建项目 — 创建新项目\n• 版本 — 查看文件历史\n• 解绑 — 解除账号关联`);
+    }
     return true;
   }
 
@@ -547,7 +595,7 @@ export class WeComBridge {
       this.activeSession.set(userId, [...this.easySessions.entries()]
         .find(([, v]) => v === info)?.[0] || '');
       await this.sendReply(channel, userId, chatId,
-        `已创建新项目「${info.name || info.project}」并切换到该项目。`);
+        `✅ 已创建新项目「${info.name || info.project}」并切换到该项目。直接和我对话即可！`);
       return true;
     }
 
@@ -700,7 +748,7 @@ export class WeComBridge {
       }
       this.activeSession.set(userId, sessionId);
       await this.sendReply(channel, userId, chatId,
-        `已自动创建项目「${info.name || info.project}」。`);
+        `已为你创建项目「${info.name || info.project}」，可以直接发消息给我了！`);
     }
 
     this.activeSession.set(userId, sessionId);
