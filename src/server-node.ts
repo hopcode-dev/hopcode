@@ -3962,6 +3962,12 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
     if (!currentPreviewUrl) return null;
     if (/^https?:\\/\\//.test(currentPreviewUrl)) return currentPreviewUrl;
     var path = currentPreviewUrl;
+    // User-app paths are direct -- check BEFORE adding /terminal prefix
+    var userAppPrefixes = ['/song/', '/alex/', '/pony/', '/xu/', '/guangfu/', '/lzl/', '/qiuran/', '/st/', '/xfeng/'];
+    var isUserApp = userAppPrefixes.some(function(p) { return path.startsWith(p); });
+    if (isUserApp) {
+      return location.protocol + '//' + location.host + path;
+    }
     if (path.charAt(0) === '/' && !/^\\/terminal\\//.test(path)) path = '/terminal' + path;
     return location.protocol + '//' + location.host + path;
   }
