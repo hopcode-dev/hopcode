@@ -303,13 +303,16 @@ const server = http.createServer(async (req, res) => {
   const deleteMatch = pathname.match(/^\/sessions\/([^/]+)$/);
   if (deleteMatch && req.method === 'DELETE') {
     const sid = decodeURIComponent(deleteMatch[1]!);
-    if (!sessions.has(sid)) {
+    const isActive = sessions.has(sid);
+    const isStale = persistedSessions.has(sid);
+    if (!isActive && !isStale) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Session not found' }));
       return;
     }
-    killSession(sid);
-    console.log(`[pty-service] Session deleted: ${sid}`);
+    if (isActive) killSession(sid);
+    else { persistedSessions.delete(sid); saveSessionRegistry(); }
+    console.log(`[pty-service] Session deleted: ${sid} (stale=${!isActive})`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ success: true }));
     return;
