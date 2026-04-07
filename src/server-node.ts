@@ -10617,7 +10617,7 @@ ${getI18nScript()}
               '</div>' +
               '<div style="font-size:12px;color:#64748b">' + (bot.label ? escHtml(bot.label) : 'bot-' + bot.index) + '</div>' +
             '</div>' +
-            '<button onclick="deleteWeComBot(\'' + escAttr(bot.id).replace(/'/g, "\\'") + '\')" style="padding:6px 14px;border-radius:6px;border:1px solid #ef4444;background:transparent;color:#ef4444;font-size:13px;cursor:pointer">删除</button>' +
+            '<button class="delete-wecom-bot-btn" data-bot-id="' + escAttr(bot.id) + '" style="padding:6px 14px;border-radius:6px;border:1px solid #ef4444;background:transparent;color:#ef4444;font-size:13px;cursor:pointer">删除</button>' +
           '</div>';
         });
         html += '</div>';
@@ -10625,17 +10625,6 @@ ${getI18nScript()}
       })
       .catch(function() { list.innerHTML = '<div style="color:#ef4444;font-size:13px">加载失败</div>'; });
   }
-
-  window.deleteWeComBot = function(botId) {
-    if (!confirm('确定删除机器人 ' + botId + '？')) return;
-    fetch('/terminal/api/admin/wecom-bots/' + encodeURIComponent(botId), { method: 'DELETE', credentials: 'include' })
-      .then(function(r) { return r.json(); })
-      .then(function(d) {
-        if (d.success) { showToast('已删除'); loadWeComBots(); }
-        else { showToast(d.error || '删除失败', true); }
-      })
-      .catch(function() { showToast('删除失败', true); });
-  };
 
   document.getElementById('add-wecom-bot-btn').addEventListener('click', function() {
     var botId = prompt('输入 WeCom Bot ID (如 aib0o1yXItTA4yx1yltr-xxx):');
@@ -10654,6 +10643,22 @@ ${getI18nScript()}
         else { showToast(d.error || '添加失败', true); }
       })
       .catch(function() { showToast('添加失败', true); });
+  });
+
+  // Delegated delete bot buttons
+  document.addEventListener('click', function(e) {
+    var btn = e.target.closest('.delete-wecom-bot-btn');
+    if (!btn) return;
+    var botId = btn.getAttribute('data-bot-id');
+    if (!botId) return;
+    if (!confirm('确定删除机器人 ' + botId + '？')) return;
+    fetch('/terminal/api/admin/wecom-bots/' + encodeURIComponent(botId), { method: 'DELETE', credentials: 'include' })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.success) { showToast('已删除'); loadWeComBots(); }
+        else { showToast(d.error || '删除失败', true); }
+      })
+      .catch(function() { showToast('删除失败', true); });
   });
 
   // Locked IPs management
