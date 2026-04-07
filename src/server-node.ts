@@ -4354,7 +4354,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         addPreviewSuggest(d.filename);
       } else if (d.type === 'user_message') {
         // Strip internal WeChat hints before displaying
-        if (d.text) { var _hi = d.text.indexOf('[This user is on WeChat Work'); if (_hi >= 0) d.text = d.text.substring(0, _hi).trim(); }
+        if (d.text) { d.text = d.text.replace(/\n\[Today is [\d\/]+\.[\d:]+\. This user is on WeChat Work[^\]]*\].*$/, '').trim(); }
         // Server echo of user message — WeChat group style
         var isSelf = d.sender === username;
         var isMentioned = d.text && d.text.match(new RegExp('@' + username + '(?![\\w\\u4e00-\\u9fff])'));
@@ -12846,7 +12846,25 @@ esac
   // --- WeCom Bots CRUD ---
   const BOTS_FILE = path.join(__dirname, '..', 'bots.json');
   function loadBotsConfig(): Array<{ id: string; secret: string; label: string }> {
-    try { return JSON.parse(fs.readFileSync(BOTS_FILE, 'utf-8')); } catch { return []; }
+    let bots: Array<{ id: string; secret: string; label: string }> = [];
+    try { bots = JSON.parse(fs.readFileSync(BOTS_FILE, 'utf-8')); } catch {}
+    // Also include bots from env vars (primary + WECOM_BOT_ID_2..9)
+    const envBotIds = new Set<string>();
+    if (process.env.WECOM_BOT_ID && process.env.WECOM_BOT_SECRET) {
+      if (!bots.some(b => b.id === process.env.WECOM_BOT_ID)) {
+        bots.unshift({ id: process.env.WECOM_BOT_ID!, secret: process.env.WECOM_BOT_SECRET!, label: 'primary' });
+      }
+      envBotIds.add(process.env.WECOM_BOT_ID);
+    }
+    for (let i = 2; i <= 9; i++) {
+      const id = process.env[`WECOM_BOT_ID_${i}`];
+      const secret = process.env[`WECOM_BOT_SECRET_${i}`];
+      if (id && secret && !bots.some(b => b.id === id)) {
+        bots.push({ id, secret, label: `env-bot-${i}` });
+        envBotIds.add(id);
+      }
+    }
+    return bots;
   }
   function saveBotsConfig(bots: Array<{ id: string; secret: string; label: string }>): void {
     fs.writeFileSync(BOTS_FILE, JSON.stringify(bots, null, 2) + '\n', 'utf-8');
@@ -12858,6 +12876,12 @@ esac
     const auth = getAuthInfo(req);
     if (!isAdminUser(auth.username)) { res.writeHead(403); res.end('Forbidden'); return; }
     const bots = loadBotsConfig();
+    const envBotIds = new Set<string>();
+    if (process.env.WECOM_BOT_ID) envBotIds.add(process.env.WECOM_BOT_ID);
+    for (let i = 2; i <= 9; i++) {
+      const id = process.env[`WECOM_BOT_ID_${i}`];
+      if (id) envBotIds.add(id);
+    }
     const result = bots.map((b, i) => {
       // Check if this bot is currently connected
       let connected = false;
@@ -12868,7 +12892,7 @@ esac
           connected = !!(bot && (wecomBridge as any).botChannels.has(bot));
         }
       }
-      return { id: b.id, label: b.label, index: i + 1, connected };
+      return { id: b.id, label: b.label, index: i + 1, connected, fromEnv: envBotIds.has(b.id) };
     });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(result));
