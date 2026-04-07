@@ -4354,7 +4354,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         addPreviewSuggest(d.filename);
       } else if (d.type === 'user_message') {
         // Strip internal WeChat hints before displaying
-        if (d.text) { var _h2 = d.text.indexOf('\n[Today is '); if (_h2 >= 0) { var _h3 = d.text.indexOf(' This user is on WeChat Work'); if (_h3 > _h2) d.text = d.text.substring(0, _h2).trim(); } }
+        if (d.text) { var _hi = d.text.indexOf('[This user is on WeChat Work'); if (_hi >= 0) d.text = d.text.substring(0, _hi).trim(); }
         // Server echo of user message — WeChat group style
         var isSelf = d.sender === username;
         var isMentioned = d.text && d.text.match(new RegExp('@' + username + '(?![\\w\\u4e00-\\u9fff])'));
@@ -11451,6 +11451,15 @@ function initTaskSchedulerForUser(owner: string): void {
   const linuxUser = usersConfig[owner]?.linuxUser || '';
   const userHome = linuxUser ? getUserHome(linuxUser) : (process.env.HOME || '/root');
 
+  // Ensure ~/.hopcode exists with correct ownership before task scheduler tries to use it.
+  // The hopcode service user can't create directories in users' home dirs (755 perms),
+  // so we use sudo to create it as the target user.
+  if (linuxUser && linuxUser !== 'root') {
+    try { execFileSync('sudo', ['-u', linuxUser, 'mkdir', '-p', path.join(userHome, '.hopcode')], { timeout: 3000 }); } catch {}
+  } else {
+    try { fs.mkdirSync(path.join(userHome, '.hopcode'), { recursive: true }); } catch {}
+  }
+
   // Find any session for this owner to get mcpConfigDir
   let mcpConfigDir: string | undefined;
   for (const [, info] of easySessions) {
@@ -12846,25 +12855,7 @@ esac
   // --- WeCom Bots CRUD ---
   const BOTS_FILE = path.join(__dirname, '..', 'bots.json');
   function loadBotsConfig(): Array<{ id: string; secret: string; label: string }> {
-    let bots: Array<{ id: string; secret: string; label: string }> = [];
-    try { bots = JSON.parse(fs.readFileSync(BOTS_FILE, 'utf-8')); } catch {}
-    // Also include bots from env vars (primary + WECOM_BOT_ID_2..9)
-    const envBotIds = new Set<string>();
-    if (process.env.WECOM_BOT_ID && process.env.WECOM_BOT_SECRET) {
-      if (!bots.some(b => b.id === process.env.WECOM_BOT_ID)) {
-        bots.unshift({ id: process.env.WECOM_BOT_ID!, secret: process.env.WECOM_BOT_SECRET!, label: 'primary' });
-      }
-      envBotIds.add(process.env.WECOM_BOT_ID);
-    }
-    for (let i = 2; i <= 9; i++) {
-      const id = process.env[`WECOM_BOT_ID_${i}`];
-      const secret = process.env[`WECOM_BOT_SECRET_${i}`];
-      if (id && secret && !bots.some(b => b.id === id)) {
-        bots.push({ id, secret, label: `env-bot-${i}` });
-        envBotIds.add(id);
-      }
-    }
-    return bots;
+    try { return JSON.parse(fs.readFileSync(BOTS_FILE, 'utf-8')); } catch { return []; }
   }
   function saveBotsConfig(bots: Array<{ id: string; secret: string; label: string }>): void {
     fs.writeFileSync(BOTS_FILE, JSON.stringify(bots, null, 2) + '\n', 'utf-8');
