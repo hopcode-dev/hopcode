@@ -4354,7 +4354,7 @@ html, body { height:100%; overflow:hidden; font-family:-apple-system,BlinkMacSys
         addPreviewSuggest(d.filename);
       } else if (d.type === 'user_message') {
         // Strip internal WeChat hints before displaying
-        if (d.text) { d.text = d.text.replace(/\n\[Today is [\d\/]+\.[\d:]+\. This user is on WeChat Work[^\]]*\].*$/, '').trim(); }
+        if (d.text) { var _h2 = d.text.indexOf('\n[Today is '); if (_h2 >= 0) { var _h3 = d.text.indexOf(' This user is on WeChat Work'); if (_h3 > _h2) d.text = d.text.substring(0, _h2).trim(); } }
         // Server echo of user message — WeChat group style
         var isSelf = d.sender === username;
         var isMentioned = d.text && d.text.match(new RegExp('@' + username + '(?![\\w\\u4e00-\\u9fff])'));
