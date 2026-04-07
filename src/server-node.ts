@@ -10617,7 +10617,7 @@ ${getI18nScript()}
               '</div>' +
               '<div style="font-size:12px;color:#64748b">' + (bot.label ? escHtml(bot.label) : 'bot-' + bot.index) + '</div>' +
             '</div>' +
-            '<button onclick="deleteWeComBot(\'' + escAttr(bot.id) + '\')" style="padding:6px 14px;border-radius:6px;border:1px solid #ef4444;background:transparent;color:#ef4444;font-size:13px;cursor:pointer">删除</button>' +
+            '<button onclick="deleteWeComBot(\'' + escAttr(bot.id).replace(/'/g, "\\'") + '\')" style="padding:6px 14px;border-radius:6px;border:1px solid #ef4444;background:transparent;color:#ef4444;font-size:13px;cursor:pointer">删除</button>' +
           '</div>';
         });
         html += '</div>';
