@@ -13,7 +13,7 @@ const MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'task-m
 const BROWSER_MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'browser-mcp-server.ts');
 const WECHAT_MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'wechat-mcp-server.ts');
 const YUYI_SALES_MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'yuyi-sales-mcp-server.ts');
-const TESLA_MCP_SERVER_SCRIPT = '/home/chief/chief-workspace/tesla/mcp-server.mjs';
+const TESLA_MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'tesla-mcp-server/mcp-server.mjs');
 const SEARCH_MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'search-mcp-server.ts');
 const PLAYWRIGHT_MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirname, 'playwright-mcp-server.ts');
 import type { EasyServerMessage } from './protocol.js';
@@ -295,10 +295,10 @@ export class ClaudeProcess {
           command: tsxPath,
           args: [PLAYWRIGHT_MCP_SERVER_SCRIPT],
         },
-        // Tesla MCP - only for jack and root
-        ...((['jack', 'root'].includes(this.owner)) ? {
+        // Tesla MCP - only for jack and root and jack-user
+        ...((['jack', 'root', 'jack-user'].includes(this.owner)) ? {
           'tesla': {
-            command: 'node',
+            command: tsxPath,
             args: [TESLA_MCP_SERVER_SCRIPT],
           },
         } : {}),
@@ -332,7 +332,7 @@ export class ClaudeProcess {
       'mcp__playwright__playwright_navigate', 'mcp__playwright__playwright_click', 'mcp__playwright__playwright_fill', 'mcp__playwright__playwright_extract_text', 'mcp__playwright__playwright_screenshot', 'mcp__playwright__playwright_console_logs', 'mcp__playwright__playwright_network_errors', 'mcp__playwright__playwright_close', 'mcp__playwright__playwright_evaluate',
       'mcp__wechat__wechat_login', 'mcp__wechat__wechat_status', 'mcp__wechat__wechat_send', 'mcp__wechat__wechat_read', 'mcp__wechat__wechat_contacts', 'mcp__wechat__wechat_search',
       ...(['jack', 'root', 'alex'].includes(this.owner) ? ['mcp__yuyi-sales__sales_attendance', 'mcp__yuyi-sales__sales_bd_activity', 'mcp__yuyi-sales__sales_shipment_stats', 'mcp__yuyi-sales__sales_activation_stats', 'mcp__yuyi-sales__sales_order_stats', 'mcp__yuyi-sales__sales_team_overview', 'mcp__yuyi-sales__sales_dealer_ranking', 'mcp__yuyi-sales__sales_daily_report'] : []),
-      ...(['jack', 'root'].includes(this.owner) ? ['mcp__tesla__check_battery', 'mcp__tesla__wake_vehicle'] : []),
+      ...(['jack', 'root', 'jack-user'].includes(this.owner) ? ['mcp__tesla__check_battery', 'mcp__tesla__wake_vehicle'] : []),
       'mcp__search__web_search',
       'mcp__search__news_search',
       'mcp__search__browser_search',
@@ -361,7 +361,19 @@ IMPORTANT: You have MCP tools (schedule_task, list_tasks, delete_task, activate_
 - Recurring ("每天9点") → schedule_task(type="cron", cron_expr="0 9 * * *", ...)
 - Fixed intervals ("每30分钟") → schedule_task(type="every", interval_minutes=30, ...)
 - Tasks are per-user (not per-project) — they persist across project switches
-- Only session owner can create tasks. If a guest asks, tell them to register.`,
+- Only session owner can create tasks. If a guest asks, tell them to register.
+
+## Browser verification (Playwright)
+You have Playwright tools (navigate, screenshot, click, fill, console_logs, network_errors) for headless browser automation.
+
+**WHEN to use:**
+- User reports a problem with something you generated ("打不开/显示不对/点不了") → use Playwright to visit the URL and investigate (check console errors, network failures, screenshot what you see)
+- After writing a web automation script → run it and verify it works
+
+**WHEN NOT to use:**
+- Don't open browser for routine tasks, document generation, config, or data processing
+- Don't open browser just to "check" things unprompted
+- Don't try to debug complex user-reported bugs — ask the user for more details (what did they see? what did they expect?)`,
     ];
 
     if (this.claudeSessionId) {
