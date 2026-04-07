@@ -10522,6 +10522,7 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
   <div class="tabs">
     <button class="tab active" data-tab="users">用户管理</button>
     <button class="tab" data-tab="config">系统配置</button>
+    <button class="tab" data-tab="wecombots">WeCom Bots</button>
     <button class="tab" data-tab="locked">登录锁定</button>
   </div>
 
@@ -10552,6 +10553,16 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
     </div>
   </div>
 
+  <div class="tab-content" id="tab-wecombots">
+    <div class="create-form">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <h2>WeCom 智能机器人</h2>
+        <button class="create-btn" id="add-wecom-bot-btn" style="padding:7px 18px;font-size:13px">+ 添加机器人</button>
+      </div>
+      <div id="wecom-bot-list" style="color:#64748b;font-size:13px">加载中...</div>
+    </div>
+  </div>
+
   <div class="tab-content" id="tab-locked">
     <div class="create-form">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
@@ -10578,7 +10589,71 @@ ${getI18nScript()}
       document.getElementById('tab-' + target).classList.add('active');
       if (target === 'config') loadConfig();
       if (target === 'locked') loadLocked();
+      if (target === 'wecombots') loadWeComBots();
     });
+  });
+
+  // WeCom Bots management
+  function loadWeComBots() {
+    var list = document.getElementById('wecom-bot-list');
+    list.innerHTML = '<div style="color:#64748b;font-size:13px">加载中...</div>';
+    fetch('/terminal/api/admin/wecom-bots', { credentials: 'include' })
+      .then(function(r) { return r.json(); })
+      .then(function(bots) {
+        if (!bots.length) {
+          list.innerHTML = '<div style="color:#64748b;font-size:13px;padding:12px 0">暂无配置的机器人。点击右上角「+ 添加机器人」添加。</div>';
+          return;
+        }
+        var html = '<div style="display:flex;flex-direction:column;gap:8px">';
+        bots.forEach(function(bot) {
+          var statusIcon = bot.connected
+            ? '<span style="color:#22c55e;font-size:11px">● 在线</span>'
+            : '<span style="color:#ef4444;font-size:11px">○ 离线</span>';
+          html += '<div style="display:flex;align-items:center;justify-content:space-between;background:#0f172a;padding:12px 14px;border-radius:8px">' +
+            '<div style="flex:1;min-width:0">' +
+              '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">' +
+                '<div style="font-size:14px;font-family:monospace;color:#e2e8f0;font-weight:600">' + escHtml(bot.id) + '</div>' +
+                statusIcon +
+              '</div>' +
+              '<div style="font-size:12px;color:#64748b">' + (bot.label ? escHtml(bot.label) : 'bot-' + bot.index) + '</div>' +
+            '</div>' +
+            '<button onclick="deleteWeComBot(\'' + escAttr(bot.id) + '\')" style="padding:6px 14px;border-radius:6px;border:1px solid #ef4444;background:transparent;color:#ef4444;font-size:13px;cursor:pointer">删除</button>' +
+          '</div>';
+        });
+        html += '</div>';
+        list.innerHTML = html;
+      })
+      .catch(function() { list.innerHTML = '<div style="color:#ef4444;font-size:13px">加载失败</div>'; });
+  }
+
+  window.deleteWeComBot = function(botId) {
+    if (!confirm('确定删除机器人 ' + botId + '？')) return;
+    fetch('/terminal/api/admin/wecom-bots/' + encodeURIComponent(botId), { method: 'DELETE', credentials: 'include' })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.success) { showToast('已删除'); loadWeComBots(); }
+        else { showToast(d.error || '删除失败', true); }
+      })
+      .catch(function() { showToast('删除失败', true); });
+  };
+
+  document.getElementById('add-wecom-bot-btn').addEventListener('click', function() {
+    var botId = prompt('输入 WeCom Bot ID (如 aib0o1yXItTA4yx1yltr-xxx):');
+    if (!botId || !botId.trim()) return;
+    var botSecret = prompt('输入 WeCom Bot Secret:');
+    if (!botSecret || !botSecret.trim()) return;
+    var label = prompt('输入备注名称 (可选，直接回车跳过):') || '';
+    fetch('/terminal/api/admin/wecom-bots', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: botId.trim(), secret: botSecret.trim(), label: label.trim() })
+    }).then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.success) { showToast('已添加'); loadWeComBots(); }
+        else { showToast(d.error || '添加失败', true); }
+      })
+      .catch(function() { showToast('添加失败', true); });
   });
 
   // Locked IPs management
@@ -12760,6 +12835,100 @@ esac
     const deleted = loginAttempts.delete(ip);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ success: deleted, ip }));
+    return;
+  }
+
+  // --- WeCom Bots CRUD ---
+  const BOTS_FILE = path.join(__dirname, '..', 'bots.json');
+  function loadBotsConfig(): Array<{ id: string; secret: string; label: string }> {
+    try { return JSON.parse(fs.readFileSync(BOTS_FILE, 'utf-8')); } catch { return []; }
+  }
+  function saveBotsConfig(bots: Array<{ id: string; secret: string; label: string }>): void {
+    fs.writeFileSync(BOTS_FILE, JSON.stringify(bots, null, 2) + '\n', 'utf-8');
+  }
+
+  // GET /api/admin/wecom-bots — list all bots
+  if ((req.url || '').match(/^(?:\/terminal)?\/api\/admin\/wecom-bots$/) && req.method === 'GET') {
+    if (!isAuthenticated(req)) { res.writeHead(401); res.end('Unauthorized'); return; }
+    const auth = getAuthInfo(req);
+    if (!isAdminUser(auth.username)) { res.writeHead(403); res.end('Forbidden'); return; }
+    const bots = loadBotsConfig();
+    const result = bots.map((b, i) => {
+      // Check if this bot is currently connected
+      let connected = false;
+      if (wecomBridge) {
+        const allBots = (wecomBridge as any).botById;
+        if (allBots) {
+          const bot = allBots.get(b.id);
+          connected = !!(bot && (wecomBridge as any).botChannels.has(bot));
+        }
+      }
+      return { id: b.id, label: b.label, index: i + 1, connected };
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return;
+  }
+
+  // POST /api/admin/wecom-bots — add a new bot
+  if ((req.url || '').match(/^(?:\/terminal)?\/api\/admin\/wecom-bots$/) && req.method === 'POST') {
+    if (!isAuthenticated(req)) { res.writeHead(401); res.end('Unauthorized'); return; }
+    const auth = getAuthInfo(req);
+    if (!isAdminUser(auth.username)) { res.writeHead(403); res.end('Forbidden'); return; }
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      try {
+        const { id, secret, label } = JSON.parse(Buffer.concat(chunks).toString());
+        if (!id || !secret) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'id and secret required' }));
+          return;
+        }
+        const bots = loadBotsConfig();
+        if (bots.some(b => b.id === id)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Bot already exists' }));
+          return;
+        }
+        bots.push({ id, secret, label: label || '' });
+        saveBotsConfig(bots);
+        // Dynamically start this bot
+        if (wecomBridge) {
+          (wecomBridge as any).addBot(id, secret, label || ('bot-' + (bots.length)));
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: (e as Error).message }));
+      }
+    });
+    return;
+  }
+
+  // DELETE /api/admin/wecom-bots/:botId — remove a bot
+  const deleteBotMatch = (req.url || '').match(/^(?:\/terminal)?\/api\/admin\/wecom-bots\/([^/]+)$/);
+  if (deleteBotMatch && req.method === 'DELETE') {
+    if (!isAuthenticated(req)) { res.writeHead(401); res.end('Unauthorized'); return; }
+    const auth = getAuthInfo(req);
+    if (!isAdminUser(auth.username)) { res.writeHead(403); res.end('Forbidden'); return; }
+    const botId = decodeURIComponent(deleteBotMatch[1]!);
+    const bots = loadBotsConfig();
+    const idx = bots.findIndex(b => b.id === botId);
+    if (idx === -1) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Bot not found' }));
+      return;
+    }
+    bots.splice(idx, 1);
+    saveBotsConfig(bots);
+    // Stop and remove this bot dynamically
+    if (wecomBridge) {
+      (wecomBridge as any).removeBot(botId);
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true }));
     return;
   }
 

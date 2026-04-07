@@ -84,15 +84,32 @@ export class WeComBridge {
   async start(): Promise<void> {
     // WeComBot (WebSocket long-connection) — supports multiple bots
     const botConfigs: { id: string; secret: string; label: string }[] = [];
+
+    // Load from bots.json (persistent admin UI config)
+    const BOTS_FILE = path.join(process.cwd(), 'bots.json');
+    try {
+      const botsData = JSON.parse(fs.readFileSync(BOTS_FILE, 'utf-8'));
+      for (const b of botsData) {
+        if (b.id && b.secret) botConfigs.push({ id: b.id, secret: b.secret, label: b.label || b.id });
+      }
+      this.log(`Loaded ${botConfigs.length} bot(s) from bots.json`);
+    } catch {}
+
+    // Also support env vars for backward compat
     if (process.env.WECOM_BOT_ID && process.env.WECOM_BOT_SECRET) {
-      botConfigs.push({ id: process.env.WECOM_BOT_ID, secret: process.env.WECOM_BOT_SECRET, label: 'primary' });
+      if (!botConfigs.some(b => b.id === process.env.WECOM_BOT_ID)) {
+        botConfigs.push({ id: process.env.WECOM_BOT_ID, secret: process.env.WECOM_BOT_SECRET, label: 'primary' });
+      }
     }
     // Additional bots: WECOM_BOT_ID_2, WECOM_BOT_SECRET_2, etc.
     for (let i = 2; i <= 9; i++) {
       const id = process.env[`WECOM_BOT_ID_${i}`];
       const secret = process.env[`WECOM_BOT_SECRET_${i}`];
-      if (id && secret) botConfigs.push({ id, secret, label: `bot-${i}` });
+      if (id && secret && !botConfigs.some(b => b.id === id)) {
+        botConfigs.push({ id, secret, label: `bot-${i}` });
+      }
     }
+
     for (const cfg of botConfigs) {
       const bot = new WeComBot({
         botId: cfg.id,
@@ -151,6 +168,47 @@ export class WeComBridge {
       if (info) info.cp.removeListener(listener);
     }
     this.replyListeners.clear();
+  }
+
+  /** Dynamically add a new bot at runtime (called after adding via admin UI) */
+  async addBot(botId: string, botSecret: string, label: string): Promise<void> {
+    if (this.botById.has(botId)) {
+      this.log(`Bot ${botId} already exists, skipping`);
+      return;
+    }
+    const bot = new WeComBot({
+      botId,
+      botSecret,
+      log: (msg) => console.log(`[wecom-bot:${label}] ${msg}`),
+    });
+    bot.onMessage((msg) => this.handleMessage(msg, bot).catch(e => this.log(`handleMessage error: ${e}`)));
+    this.channels.push(bot);
+    this.botChannels.add(bot);
+    this.botById.set(botId, bot);
+    this.log(`Dynamically added bot ${botId} (${label})`);
+    try {
+      await bot.start();
+      this.log(`Bot ${botId} connected successfully`);
+    } catch (e) {
+      this.log(`Bot ${botId} start failed: ${e}`);
+    }
+  }
+
+  /** Dynamically remove a bot at runtime (called after deleting via admin UI) */
+  removeBot(botId: string): void {
+    const bot = this.botById.get(botId);
+    if (!bot) {
+      this.log(`Bot ${botId} not found, cannot remove`);
+      return;
+    }
+    bot.disconnect();
+    this.botChannels.delete(bot);
+    this.channels = this.channels.filter(ch => ch !== bot);
+    this.botById.delete(botId);
+    if (this.botChannel === bot) {
+      this.botChannel = this.botChannels.size > 0 ? Array.from(this.botChannels)[0] : null;
+    }
+    this.log(`Removed bot ${botId}`);
   }
 
   // ── Message handling ──
