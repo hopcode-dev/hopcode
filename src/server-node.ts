@@ -10802,10 +10802,15 @@ ${getI18nScript()}
             '<button class="save-provider-btn save-ports-btn" data-user="' + u.username + '">保存</button>' +
             '<span style="font-size:11px;color:#9ca3af;margin-left:4px">在用: ' + portsInUseStr + '</span>' +
             '</div>';
+          var wecomBotIdRow = '<div class="provider-row" style="margin-top:6px;align-items:center;gap:6px">' +
+            '<span style="font-size:12px;color:#6b7280;white-space:nowrap">WeCom Bot</span>' +
+            '<input class="provider-key wecom-bot-id-input" type="text" placeholder="Bot ID (留空则使用默认)" style="width:200px" data-user="' + u.username + '" value="' + (u.wecomBotId||'') + '">' +
+            '<button class="save-provider-btn save-wecom-bot-btn" data-user="' + u.username + '">保存</button>' +
+            '</div>';
           card.innerHTML = '<div class="user-avatar" style="background:' + avatarColor(u.username) + '">' + initial + '</div>' +
             '<div class="user-info"><div class="user-name">' + u.username + ' ' + badges + '</div>' +
             '<div class="user-detail">' + u.linuxUser + ' · ' + (u.claudeProvider ? PROVIDER_LABELS[u.claudeProvider] : '默认') + (u.claudeApiKey ? ' ✓' : '') + '</div></div>' +
-            toggleBtnHtml + passwordBtnHtml + providerRow + portRow;
+            toggleBtnHtml + passwordBtnHtml + providerRow + portRow + wecomBotIdRow;
           list.appendChild(card);
 
           var toggleBtn = card.querySelector('.toggle-btn');
@@ -10854,6 +10859,23 @@ ${getI18nScript()}
                 body: JSON.stringify({ portStart: startVal ? parseInt(startVal) : null, portEnd: endVal ? parseInt(endVal) : null })
               }).then(function(r) { return r.json(); }).then(function(d) {
                 if (d.success) { showToast(name + ' 端口已更新'); loadUsers(); }
+                else { showToast(d.error || 'Error', true); }
+              });
+            });
+          }
+
+          var saveWecomBotBtn = card.querySelector('.save-wecom-bot-btn');
+          if (saveWecomBotBtn) {
+            saveWecomBotBtn.addEventListener('click', function() {
+              var name = this.getAttribute('data-user');
+              var botIdInput = card.querySelector('.wecom-bot-id-input');
+              var botId = botIdInput.value.trim();
+              fetch('/terminal/api/admin/users/' + encodeURIComponent(name) + '/wecom-bot', {
+                method: 'PUT', credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ wecomBotId: botId || null })
+              }).then(function(r) { return r.json(); }).then(function(d) {
+                if (d.success) { showToast(name + ' Bot 已更新'); loadUsers(); }
                 else { showToast(d.error || 'Error', true); }
               });
             });
@@ -12295,6 +12317,7 @@ const server = http.createServer(async (req, res) => {
         portStart: cfg.portStart ?? null,
         portEnd: cfg.portEnd ?? null,
         portsInUse,
+        wecomBotId: cfg.wecomBotId || null,
       };
     });
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -12558,6 +12581,36 @@ esac
             info.cp.providerEnv = getProviderEnv(targetUser);
           }
         }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: (e as Error).message }));
+      }
+    });
+    return;
+  }
+
+  // PUT /api/admin/users/:username/wecom-bot — set wecom bot ID for user
+  const wecomBotMatch = (req.url || '').match(/^(?:\/terminal)?\/api\/admin\/users\/([^/]+)\/wecom-bot$/);
+  if (wecomBotMatch && req.method === 'PUT') {
+    if (!isAuthenticated(req)) { res.writeHead(401); res.end('Unauthorized'); return; }
+    const auth = getAuthInfo(req);
+    if (!isAdminUser(auth.username)) { res.writeHead(403); res.end('Forbidden'); return; }
+    const targetUser = decodeURIComponent(wecomBotMatch[1]!);
+    if (!usersConfig[targetUser]) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'User not found' }));
+      return;
+    }
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      try {
+        const { wecomBotId } = JSON.parse(Buffer.concat(chunks).toString());
+        if (wecomBotId) usersConfig[targetUser]!.wecomBotId = wecomBotId;
+        else delete usersConfig[targetUser]!.wecomBotId;
+        saveUsersConfig();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true }));
       } catch (e) {

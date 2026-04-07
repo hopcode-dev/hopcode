@@ -48,6 +48,8 @@ export class WeComBridge {
   private channels: Channel[] = [];
   private botChannel: WeComBot | null = null;
   private botChannels: Set<WeComBot> = new Set();
+  /** Maps botId → WeComBot instance, for per-user bot routing */
+  private botById = new Map<string, WeComBot>();
   private userLastBot: Map<string, WeComBot> = new Map(); // wecomUserId → last active bot
   private userLastActivity: Map<string, number> = new Map(); // wecomUserId → timestamp
 
@@ -71,7 +73,7 @@ export class WeComBridge {
     private easySessions: Map<string, BridgeSessionInfo>,
     private saveRegistry: () => void,
     private createSession: (owner: string) => BridgeSessionInfo,
-    private loadUsers: () => Record<string, { password: string; linuxUser?: string }>,
+    private loadUsers: () => Record<string, { password: string; linuxUser?: string; wecomBotId?: string }>,
   ) {
     this.log = (msg: string) => console.log(`[wecom-bridge] ${msg}`);
     this.loadBindings();
@@ -100,6 +102,7 @@ export class WeComBridge {
       bot.onMessage((msg) => this.handleMessage(msg, bot).catch(e => this.log(`handleMessage error: ${e}`)));
       this.channels.push(bot);
       this.botChannels.add(bot);
+      this.botById.set(bot.botId, bot); // register botId → bot mapping
       if (!this.botChannel) this.botChannel = bot; // first bot is the default for proactive messages
       try {
         await bot.start();
@@ -982,18 +985,42 @@ export class WeComBridge {
 
   /** Send a notification to a Hopcode user via WeChat Work (for task results, etc.) */
   async notifyUser(hopcodeUsername: string, text: string): Promise<boolean> {
-    // Find all wecomUserIds bound to this hopcode user, pick the most recently active one
+    const users = this.loadUsers();
+    const userEntry = users[hopcodeUsername];
+    const assignedBotId: string | undefined = userEntry?.wecomBotId;
+
+    // Find the best (userId, bot) pair for this hopcode user
     let bestUserId: string | null = null;
     let bestBot: WeComBot | null = null;
     let bestTime = 0;
 
-    for (const [wid, huser] of this.bindings) {
-      if (huser !== hopcodeUsername) continue;
-      const lastTime = this.userLastActivity.get(wid) || 0;
-      if (lastTime > bestTime || !bestUserId) {
-        bestUserId = wid;
-        bestBot = this.userLastBot.get(wid) || this.botChannel;
-        bestTime = lastTime;
+    // If user has an assigned wecomBotId, prefer bots that match
+    if (assignedBotId) {
+      const assignedBot = this.botById.get(assignedBotId);
+      for (const [wid, huser] of this.bindings) {
+        if (huser !== hopcodeUsername) continue;
+        const lastTime = this.userLastActivity.get(wid) || 0;
+        const bot = this.userLastBot.get(wid) || this.botChannel;
+        // Prefer this bot if it matches the assigned botId, or as fallback
+        const isAssigned = bot && assignedBot && bot.botId === assignedBot.botId;
+        if (isAssigned || (!assignedBot && lastTime > bestTime)) {
+          bestUserId = wid;
+          bestBot = isAssigned ? assignedBot : bot;
+          bestTime = lastTime;
+        }
+      }
+    }
+
+    // Fallback: pick most recently active wecomUserId regardless of bot
+    if (!bestUserId) {
+      for (const [wid, huser] of this.bindings) {
+        if (huser !== hopcodeUsername) continue;
+        const lastTime = this.userLastActivity.get(wid) || 0;
+        if (lastTime > bestTime || !bestUserId) {
+          bestUserId = wid;
+          bestBot = this.userLastBot.get(wid) || this.botChannel;
+          bestTime = lastTime;
+        }
       }
     }
 

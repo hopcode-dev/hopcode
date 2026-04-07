@@ -57,7 +57,7 @@ export class WeComBot implements Channel {
   /** Stream ID counter */
   private streamCounter = 0;
 
-  private botId: string;
+  public readonly botId: string;
   private botSecret: string;
   private log: (msg: string) => void;
 
