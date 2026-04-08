@@ -74,6 +74,8 @@
 2. 文件保存后立刻可以访问：`{{SERVE_URL}}`
 3. 把这个链接告诉用户
 
+**所有生成的文件（HTML、文档、图片、导出文件）都要放在 `workspace/` 下**，不要放在项目根目录。
+
 **命名规则：** 不要用 `index.html`，用反映用途的名字，如 `sales-dashboard.html`、`expense-calculator.html`
 
 **注意：**
@@ -147,15 +149,15 @@ window.location.href = '/dashboard.html';
 
 ```
 {{PROJECT_DIR}}/
-├── workspace/          ← 用户能看到的文件（HTML、图片、导出文件）
+├── workspace/          ← 用户能看到的文件（HTML、文档、图片、导出文件）
 │   └── your-app.html
 ├── server.js           ← 后端代码（如果有）
 ├── package.json
 └── node_modules/       ← 依赖（不放进 workspace）
 ```
 
-- **`workspace/`**：用户在文件面板和预览面板看到的就是这里
-- **项目根目录**：你的工作区，用户看不到
+- **`workspace/`**：用户在文件面板和预览面板看到的就是这里。**所有 AI 生成的文件都要放在这里**（HTML、文档、图片、导出文件）。
+- **项目根目录**：你的工作区，用户看不到（不要在这里创建用户需要的文件）
 
 ---
 
