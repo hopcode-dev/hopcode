@@ -19,6 +19,54 @@ const PLAYWRIGHT_MCP_SERVER_SCRIPT = path.resolve(import.meta.dirname || __dirna
 import type { EasyServerMessage } from './protocol.js';
 import { VersionTracker } from './version-tracker.js';
 
+// --- Tool catalog (shared between task scheduler and session spawn) ---
+
+export const TASK_TOOL_CATALOG: Array<{ pattern: string; owners: string[] }> = [
+  { pattern: 'mcp__hopcode-tasks__*', owners: ['*'] },
+  { pattern: 'mcp__browser-proxy__*', owners: ['*'] },
+  { pattern: 'mcp__search__*', owners: ['*'] },
+  { pattern: 'mcp__wechat__*', owners: ['*'] },
+  { pattern: 'mcp__yuyi-sales__*', owners: ['jack', 'root', 'alex'] },
+  { pattern: 'mcp__tesla__*', owners: ['jack', 'root', 'jack-user'] },
+];
+
+export function getTaskAllowedTools(owner: string, extraTools?: string[]): string[] {
+  const result = new Set<string>();
+  for (const { pattern, owners } of TASK_TOOL_CATALOG) {
+    if (owners.includes('*') || owners.includes(owner)) {
+      result.add(pattern);
+    }
+  }
+  if (extraTools) {
+    for (const t of extraTools) result.add(t);
+  }
+  return Array.from(result);
+}
+
+/**
+ * Tool catalog for interactive session mode (includes playwright).
+ * Playwright is available to all users in session mode.
+ */
+const SESSION_TOOL_CATALOG: Array<{ pattern: string; owners: string[] }> = [
+  { pattern: 'mcp__hopcode-tasks__*', owners: ['*'] },
+  { pattern: 'mcp__browser-proxy__*', owners: ['*'] },
+  { pattern: 'mcp__playwright__*', owners: ['*'] },
+  { pattern: 'mcp__search__*', owners: ['*'] },
+  { pattern: 'mcp__wechat__*', owners: ['*'] },
+  { pattern: 'mcp__yuyi-sales__*', owners: ['jack', 'root', 'alex'] },
+  { pattern: 'mcp__tesla__*', owners: ['jack', 'root', 'jack-user'] },
+];
+
+export function getSessionAllowedTools(owner: string): string[] {
+  const result = new Set<string>();
+  for (const { pattern, owners } of SESSION_TOOL_CATALOG) {
+    if (owners.includes('*') || owners.includes(owner)) {
+      result.add(pattern);
+    }
+  }
+  return Array.from(result);
+}
+
 interface HistoryEntry {
   role: 'user' | 'assistant';
   text: string;
@@ -316,6 +364,7 @@ export class ClaudeProcess {
     const modelArg = this.providerEnv.ANTHROPIC_BASE_URL
       ? [this.providerEnv.ANTHROPIC_DEFAULT_SONNET_MODEL || 'MiniMax-M2.7-highspeed']
       : [];
+    const sessionAllowedTools = getSessionAllowedTools(this.owner);
     const args = [
       '-p', promptText,
       '--output-format', 'stream-json',
@@ -326,13 +375,8 @@ export class ClaudeProcess {
       '--allowedTools',
       // Native tools - required for file operations and bash
       'Read', 'Write', 'Edit', 'Grep', 'Glob', 'Bash', 'WebFetch', 'WebSearch',
-      // MCP tools
-      'mcp__hopcode-tasks__schedule_task', 'mcp__hopcode-tasks__list_tasks', 'mcp__hopcode-tasks__delete_task', 'mcp__hopcode-tasks__activate_task',
-      'mcp__browser-proxy__browser_open', 'mcp__browser-proxy__browser_screenshot', 'mcp__browser-proxy__browser_click', 'mcp__browser-proxy__browser_type', 'mcp__browser-proxy__browser_key', 'mcp__browser-proxy__browser_scroll', 'mcp__browser-proxy__browser_navigate', 'mcp__browser-proxy__browser_evaluate', 'mcp__browser-proxy__browser_cookies', 'mcp__browser-proxy__browser_status', 'mcp__browser-proxy__browser_close', 'mcp__browser-proxy__browser_list',
-      'mcp__playwright__playwright_navigate', 'mcp__playwright__playwright_click', 'mcp__playwright__playwright_fill', 'mcp__playwright__playwright_extract_text', 'mcp__playwright__playwright_screenshot', 'mcp__playwright__playwright_console_logs', 'mcp__playwright__playwright_network_errors', 'mcp__playwright__playwright_close', 'mcp__playwright__playwright_evaluate',
-      'mcp__wechat__wechat_login', 'mcp__wechat__wechat_status', 'mcp__wechat__wechat_send', 'mcp__wechat__wechat_read', 'mcp__wechat__wechat_contacts', 'mcp__wechat__wechat_search',
-      ...(['jack', 'root', 'alex'].includes(this.owner) ? ['mcp__yuyi-sales__sales_attendance', 'mcp__yuyi-sales__sales_bd_activity', 'mcp__yuyi-sales__sales_shipment_stats', 'mcp__yuyi-sales__sales_activation_stats', 'mcp__yuyi-sales__sales_order_stats', 'mcp__yuyi-sales__sales_team_overview', 'mcp__yuyi-sales__sales_dealer_ranking', 'mcp__yuyi-sales__sales_daily_report'] : []),
-      ...(['jack', 'root', 'jack-user'].includes(this.owner) ? ['mcp__tesla__check_battery', 'mcp__tesla__wake_vehicle'] : []),
+      // MCP tools (catalog-based, owner-gated)
+      ...sessionAllowedTools,
       'mcp__search__web_search',
       'mcp__search__news_search',
       'mcp__search__browser_search',

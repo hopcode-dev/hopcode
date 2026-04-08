@@ -33,7 +33,7 @@ import {
   getPtyInternalToken,
   type SessionInfo,
 } from './shared/protocol.js';
-import { ClaudeProcess } from './easymode/claude-process.js';
+import { ClaudeProcess, getTaskAllowedTools } from './easymode/claude-process.js';
 import type { EasyClientMessage, EasyServerMessage } from './easymode/protocol.js';
 import { TaskScheduler } from './easymode/task-scheduler.js';
 import type { TaskRunResult } from './easymode/task-scheduler.js';
@@ -63,6 +63,8 @@ interface UserConfig {
   claudeApiKey?: string;
   portStart?: number;
   portEnd?: number;
+  /** Explicit tool allowlist for this user (supports wildcards, e.g. mcp__yuyi-sales__*). Overrides defaults. */
+  allowedTools?: string[];
 }
 
 let usersConfig: Record<string, UserConfig> = {};
@@ -11501,7 +11503,7 @@ function initTaskSchedulerForUser(owner: string): void {
     }
   };
 
-  taskScheduler.loadForUser(owner, userHome, taskCallback, countCallback, mcpConfigDir);
+  taskScheduler.loadForUser(owner, userHome, taskCallback, countCallback, mcpConfigDir, getTaskAllowedTools(owner));
 }
 
 // Initialize scheduler for all restored users (deduplicated by owner)

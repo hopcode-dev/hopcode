@@ -69,6 +69,8 @@ interface OwnerState {
   mcpConfigDir?: string;
   /** Track tasks currently being executed to prevent duplicate runs */
   executingTasks: Set<string>;
+  /** Allowed tool patterns for this owner (e.g. mcp__yuyi-sales__* or mcp__yuyi-sales__sales_attendance) */
+  allowedTools: string[];
 }
 
 export class TaskScheduler {
@@ -81,8 +83,9 @@ export class TaskScheduler {
   /**
    * Register a session for task scheduling. If this owner is already loaded,
    * just adds the callback. Otherwise loads tasks and starts scheduling.
+   * @param allowedTools List of allowed tool patterns (supports wildcards, e.g. mcp__yuyi-sales__*)
    */
-  loadForUser(owner: string, userHome: string, callback: TaskCallback, onCountChange?: CountCallback, mcpConfigDir?: string): void {
+  loadForUser(owner: string, userHome: string, callback: TaskCallback, onCountChange?: CountCallback, mcpConfigDir?: string, allowedTools?: string[]): void {
     let state = this.owners.get(owner);
     if (state) {
       // Owner already loaded — just add this session's callback
@@ -102,6 +105,7 @@ export class TaskScheduler {
       countCallbacks: onCountChange ? new Set([onCountChange]) : new Set(),
       mcpConfigDir,
       executingTasks: new Set(),
+      allowedTools: allowedTools || [],
     };
     this.owners.set(owner, state);
 
@@ -385,18 +389,9 @@ export class TaskScheduler {
       const mcpConfigPath = homeMcpConfig;
       const hasMcpConfig = fs.existsSync(mcpConfigPath);
 
-      // Owner-based tool whitelist
-      const allowedTools: string[] = [
-        'mcp__hopcode-tasks__schedule_task', 'mcp__hopcode-tasks__list_tasks', 'mcp__hopcode-tasks__delete_task', 'mcp__hopcode-tasks__activate_task',
-        'mcp__browser-proxy__browser_open', 'mcp__browser-proxy__browser_screenshot', 'mcp__browser-proxy__browser_click', 'mcp__browser-proxy__browser_type', 'mcp__browser-proxy__browser_key', 'mcp__browser-proxy__browser_navigate', 'mcp__browser-proxy__browser_evaluate', 'mcp__browser-proxy__browser_cookies', 'mcp__browser-proxy__browser_status', 'mcp__browser-proxy__browser_close', 'mcp__browser-proxy__browser_list', 'mcp__browser-proxy__browser_scroll',
-        'mcp__wechat__wechat_login', 'mcp__wechat__wechat_status', 'mcp__wechat__wechat_send', 'mcp__wechat__wechat_read', 'mcp__wechat__wechat_contacts', 'mcp__wechat__wechat_search',
-      ];
-      if (['jack', 'root'].includes(owner)) {
-        allowedTools.push('mcp__tesla__check_battery', 'mcp__tesla__wake_vehicle');
-      }
-      if (['jack', 'root', 'alex'].includes(owner)) {
-        allowedTools.push('mcp__yuyi-sales__sales_attendance', 'mcp__yuyi-sales__sales_bd_activity', 'mcp__yuyi-sales__sales_shipment_stats', 'mcp__yuyi-sales__sales_activation_stats', 'mcp__yuyi-sales__sales_order_stats', 'mcp__yuyi-sales__sales_team_overview', 'mcp__yuyi-sales__sales_dealer_ranking', 'mcp__yuyi-sales__sales_daily_report');
-      }
+      // Get allowed tools from owner state (set at loadForUser time)
+      const state = this.owners.get(owner);
+      const allowedTools = state?.allowedTools || [];
 
       const args = [
         '-p', prompt,
